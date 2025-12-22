@@ -16,4 +16,13 @@ pub mod db;
 pub mod models;
 
 pub use db::Database;
-pub use models::*;
+pub use models::{
+    extract_session_files, ContentBlock, LinkCreator, LinkType, MessageContent, MessageRole,
+    SessionLink,
+};
+
+// Re-exported for use by integration tests. These types are used through the
+// storage module in tests/cli_integration.rs even though they're not directly
+// used in the binary crate itself.
+#[allow(unused_imports)]
+pub use models::{Message, Session};
