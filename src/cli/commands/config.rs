@@ -1,4 +1,7 @@
-//! Config command - manage configuration
+//! Config command - view and manage Lore configuration.
+//!
+//! Provides subcommands to show, get, and set configuration values.
+//! Configuration is stored in `~/.lore/config.yaml`.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -6,22 +9,34 @@ use colored::Colorize;
 
 use crate::storage::db::default_db_path;
 
+/// Arguments for the config command.
 #[derive(clap::Args)]
 pub struct Args {
+    /// The config subcommand to run.
     #[command(subcommand)]
     pub command: Option<ConfigCommand>,
 }
 
+/// Available config subcommands.
 #[derive(Subcommand)]
 pub enum ConfigCommand {
     /// Show current configuration
     Show,
     /// Get a configuration value
-    Get { key: String },
+    Get {
+        /// The configuration key to retrieve.
+        key: String,
+    },
     /// Set a configuration value
-    Set { key: String, value: String },
+    Set {
+        /// The configuration key to set.
+        key: String,
+        /// The value to assign.
+        value: String,
+    },
 }
 
+/// Executes the config command.
 pub fn run(args: Args) -> Result<()> {
     match args.command {
         Some(ConfigCommand::Show) | None => show_config(),
@@ -59,7 +74,7 @@ fn get_config(key: &str) -> Result<()> {
     // TODO: Implement config storage
     println!(
         "{}",
-        format!("Config key '{}' not found", key).yellow()
+        format!("Config key '{key}' not found").yellow()
     );
     Ok(())
 }
@@ -70,6 +85,6 @@ fn set_config(key: &str, value: &str) -> Result<()> {
         "{}",
         "Config storage not yet implemented".yellow()
     );
-    println!("Would set {} = {}", key, value);
+    println!("Would set {key} = {value}");
     Ok(())
 }

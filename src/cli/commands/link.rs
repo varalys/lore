@@ -1,4 +1,8 @@
-//! Link command - link sessions to commits
+//! Link command - link sessions to git commits.
+//!
+//! Creates associations between development sessions and the commits
+//! they produced. Links are stored in the database and can be queried
+//! by commit SHA to find related sessions.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -7,17 +11,22 @@ use uuid::Uuid;
 
 use crate::storage::{Database, LinkCreator, LinkType, SessionLink};
 
+/// Arguments for the link command.
 #[derive(clap::Args)]
 pub struct Args {
-    /// Session IDs to link (can specify multiple)
+    /// Session IDs to link (prefix match, can specify multiple).
     #[arg(required = true)]
     pub sessions: Vec<String>,
 
-    /// Commit SHA to link to (defaults to HEAD)
+    /// Commit SHA to link to. Defaults to HEAD if not specified.
     #[arg(long)]
     pub commit: Option<String>,
 }
 
+/// Executes the link command.
+///
+/// Creates links between the specified sessions and a commit.
+/// Uses the current HEAD if no commit is specified.
 pub fn run(args: Args) -> Result<()> {
     let db = Database::open_default()?;
 
@@ -39,7 +48,7 @@ pub fn run(args: Args) -> Result<()> {
         let session = all_sessions
             .iter()
             .find(|s| s.id.to_string().starts_with(session_prefix))
-            .context(format!("No session found matching '{}'", session_prefix))?;
+            .context(format!("No session found matching '{session_prefix}'"))?;
 
         let link = SessionLink {
             id: Uuid::new_v4(),

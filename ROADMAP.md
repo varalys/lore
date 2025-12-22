@@ -23,24 +23,24 @@ Before adding new features, establish a solid testing foundation for existing co
 - [ ] Test concurrent read operations
 
 ### 0.2 Claude Code Parser Tests
-- [ ] Unit tests for JSONL parsing (valid input)
-- [ ] Unit tests for malformed JSONL handling
-- [ ] Unit tests for message type parsing (human, assistant, tool_use, tool_result)
-- [ ] Unit tests for session file discovery
-- [ ] Integration test: parse real session file format
+- [x] Unit tests for JSONL parsing (valid input)
+- [x] Unit tests for malformed JSONL handling
+- [x] Unit tests for message type parsing (human, assistant, tool_use, tool_result)
+- [x] Unit tests for session file discovery
+- [x] Integration test: parse real session file format
 
 ### 0.3 CLI Command Tests
-- [ ] Integration tests for `lore sessions` command
-- [ ] Integration tests for `lore show` command
-- [ ] Integration tests for `lore import` command
-- [ ] Integration tests for `lore link` command
-- [ ] Test error handling and user-friendly messages
+- [x] Integration tests for `lore sessions` command
+- [x] Integration tests for `lore show` command
+- [x] Integration tests for `lore import` command
+- [x] Integration tests for `lore link` command
+- [x] Test error handling and user-friendly messages
 
 ### 0.4 Code Quality
-- [ ] Run clippy and fix all warnings
-- [ ] Add doc comments to all public functions
-- [ ] Add module-level documentation to all modules
-- [ ] Ensure consistent error handling patterns
+- [x] Run clippy and fix all warnings
+- [x] Add doc comments to all public functions
+- [x] Add module-level documentation to all modules
+- [x] Ensure consistent error handling patterns
 
 ---
 

@@ -1,4 +1,8 @@
-//! SQLite storage layer for Lore
+//! SQLite storage layer for Lore.
+//!
+//! Provides database operations for storing and retrieving sessions,
+//! messages, and session-to-commit links. Uses SQLite for local-first
+//! persistence with automatic schema migrations.
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -7,7 +11,9 @@ use uuid::Uuid;
 
 use super::models::{Message, MessageContent, MessageRole, Session, SessionLink};
 
-/// Get the default database path
+/// Returns the default database path at `~/.lore/lore.db`.
+///
+/// Creates the `.lore` directory if it does not exist.
 pub fn default_db_path() -> Result<PathBuf> {
     let config_dir = dirs::home_dir()
         .context("Could not find home directory")?
@@ -17,13 +23,19 @@ pub fn default_db_path() -> Result<PathBuf> {
     Ok(config_dir.join("lore.db"))
 }
 
-/// Database connection wrapper
+/// SQLite database connection wrapper.
+///
+/// Provides methods for storing and querying sessions, messages,
+/// and session-to-commit links. Handles schema migrations automatically
+/// when opening the database.
 pub struct Database {
     conn: Connection,
 }
 
 impl Database {
-    /// Open or create the database
+    /// Opens or creates a database at the specified path.
+    ///
+    /// Runs schema migrations automatically to ensure tables exist.
     pub fn open(path: &PathBuf) -> Result<Self> {
         let conn = Connection::open(path)?;
         let db = Self { conn };
@@ -31,13 +43,18 @@ impl Database {
         Ok(db)
     }
 
-    /// Open the default database
+    /// Opens the default database at `~/.lore/lore.db`.
+    ///
+    /// Creates the database file and directory if they do not exist.
     pub fn open_default() -> Result<Self> {
         let path = default_db_path()?;
         Self::open(&path)
     }
 
-    /// Run migrations
+    /// Runs database schema migrations.
+    ///
+    /// Creates tables for sessions, messages, session_links, and repositories
+    /// if they do not already exist. Also creates indexes for common queries.
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
@@ -108,7 +125,10 @@ impl Database {
 
     // ==================== Sessions ====================
 
-    /// Insert a new session
+    /// Inserts a new session or updates an existing one.
+    ///
+    /// If a session with the same ID already exists, updates the `ended_at`
+    /// and `message_count` fields.
     pub fn insert_session(&self, session: &Session) -> Result<()> {
         self.conn.execute(
             r#"
@@ -134,7 +154,9 @@ impl Database {
         Ok(())
     }
 
-    /// Get a session by ID
+    /// Retrieves a session by its unique ID.
+    ///
+    /// Returns `None` if no session with the given ID exists.
     pub fn get_session(&self, id: &Uuid) -> Result<Option<Session>> {
         self.conn
             .query_row(
@@ -165,7 +187,10 @@ impl Database {
             .context("Failed to get session")
     }
 
-    /// List recent sessions
+    /// Lists sessions ordered by start time (most recent first).
+    ///
+    /// Optionally filters by working directory prefix. Returns at most
+    /// `limit` sessions.
     pub fn list_sessions(&self, limit: usize, working_dir: Option<&str>) -> Result<Vec<Session>> {
         let mut stmt = if working_dir.is_some() {
             self.conn.prepare(
@@ -193,7 +218,9 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().context("Failed to list sessions")
     }
 
-    /// Check if a session exists by source path
+    /// Checks if a session with the given source path already exists.
+    ///
+    /// Used to detect already-imported sessions during import operations.
     pub fn session_exists_by_source(&self, source_path: &str) -> Result<bool> {
         let count: i32 = self.conn.query_row(
             "SELECT COUNT(*) FROM sessions WHERE source_path = ?1",
@@ -226,7 +253,10 @@ impl Database {
 
     // ==================== Messages ====================
 
-    /// Insert a message
+    /// Inserts a message into the database.
+    ///
+    /// If a message with the same ID already exists, the insert is ignored.
+    /// Message content is serialized to JSON for storage.
     pub fn insert_message(&self, message: &Message) -> Result<()> {
         let content_json = serde_json::to_string(&message.content)?;
 
@@ -252,7 +282,9 @@ impl Database {
         Ok(())
     }
 
-    /// Get messages for a session
+    /// Retrieves all messages for a session, ordered by index.
+    ///
+    /// Messages are returned in conversation order (by their `index` field).
     pub fn get_messages(&self, session_id: &Uuid) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, parent_id, idx, timestamp, role, content, model, git_branch, cwd 
@@ -291,7 +323,10 @@ impl Database {
 
     // ==================== Session Links ====================
 
-    /// Insert a session link
+    /// Inserts a link between a session and a git commit.
+    ///
+    /// Links can be created manually by users or automatically by
+    /// the auto-linking system based on time and file overlap heuristics.
     pub fn insert_link(&self, link: &SessionLink) -> Result<()> {
         self.conn.execute(
             r#"
@@ -313,7 +348,10 @@ impl Database {
         Ok(())
     }
 
-    /// Get links for a commit
+    /// Retrieves all session links for a commit.
+    ///
+    /// Supports prefix matching on the commit SHA, allowing short SHAs
+    /// (e.g., first 8 characters) to be used for lookup.
     pub fn get_links_by_commit(&self, commit_sha: &str) -> Result<Vec<SessionLink>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, link_type, commit_sha, branch, remote, created_at, created_by, confidence 
@@ -321,13 +359,16 @@ impl Database {
              WHERE commit_sha LIKE ?1"
         )?;
 
-        let pattern = format!("{}%", commit_sha);
+        let pattern = format!("{commit_sha}%");
         let rows = stmt.query_map(params![pattern], Self::row_to_link)?;
 
         rows.collect::<Result<Vec<_>, _>>().context("Failed to get links")
     }
 
-    /// Get links for a session
+    /// Retrieves all links associated with a session.
+    ///
+    /// A session can be linked to multiple commits if it spans
+    /// several git operations.
     pub fn get_links_by_session(&self, session_id: &Uuid) -> Result<Vec<SessionLink>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, link_type, commit_sha, branch, remote, created_at, created_by, confidence 
@@ -371,7 +412,7 @@ impl Database {
 
     // ==================== Stats ====================
 
-    /// Get total session count
+    /// Returns the total number of sessions in the database.
     pub fn session_count(&self) -> Result<i32> {
         let count: i32 = self.conn.query_row(
             "SELECT COUNT(*) FROM sessions",
@@ -381,7 +422,7 @@ impl Database {
         Ok(count)
     }
 
-    /// Get total message count
+    /// Returns the total number of messages across all sessions.
     pub fn message_count(&self) -> Result<i32> {
         let count: i32 = self.conn.query_row(
             "SELECT COUNT(*) FROM messages",

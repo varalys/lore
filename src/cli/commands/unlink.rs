@@ -1,18 +1,27 @@
-//! Unlink command - remove session links
+//! Unlink command - remove session-to-commit links.
+//!
+//! Removes associations between sessions and commits. Can unlink
+//! a session from all commits or from a specific commit.
+//!
+//! Note: Unlink functionality is not yet implemented.
 
 use anyhow::Result;
 use colored::Colorize;
 
+/// Arguments for the unlink command.
 #[derive(clap::Args)]
 pub struct Args {
-    /// Session ID to unlink
+    /// Session ID prefix to unlink.
     pub session: String,
 
-    /// Commit SHA to unlink from
+    /// Specific commit SHA to unlink from. If not provided, removes all links.
     #[arg(long)]
     pub commit: Option<String>,
 }
 
+/// Executes the unlink command.
+///
+/// Note: Unlink functionality is not yet implemented.
 pub fn run(args: Args) -> Result<()> {
     // TODO: Implement unlinking
     println!(

@@ -10,6 +10,105 @@ This document tracks development progress in reverse chronological order. Each e
 
 ---
 
+## Entry 005 - 2024-12-22
+
+### Session Focus
+Complete Phase 0: Foundation and Testing (0.3 CLI tests, 0.4 documentation)
+
+### Completed
+- Added 29 CLI integration tests in tests/cli_integration.rs (ROADMAP 0.3)
+- Added comprehensive doc comments to all public items (ROADMAP 0.4)
+- Added module-level documentation to all modules (ROADMAP 0.4)
+- Phase 0 is now fully complete
+
+### Files Changed
+- tests/cli_integration.rs (new - 29 integration tests)
+- src/lib.rs (module-level docs, re-export docs)
+- src/storage/mod.rs (module docs)
+- src/storage/db.rs (doc comments for all public methods)
+- src/storage/models.rs (doc comments for enums and structs)
+- src/capture/mod.rs (module docs)
+- src/capture/watchers/mod.rs (module docs)
+- src/capture/watchers/claude_code.rs (doc comments for public items)
+- src/config/mod.rs (module docs, struct docs)
+- src/git/mod.rs (module docs, function docs)
+- src/cli/mod.rs (module docs)
+- src/cli/commands/mod.rs (module docs)
+- src/cli/commands/*.rs (doc comments for Args structs, run functions)
+
+### Tests Added (29 integration tests)
+**sessions_tests:** test_list_sessions_empty_database, test_list_sessions_shows_imported_sessions, test_list_sessions_respects_limit, test_list_sessions_filter_by_repo, test_sessions_json_output_is_valid
+
+**show_tests:** test_show_session_by_prefix, test_show_invalid_session_prefix, test_show_commit_displays_linked_sessions, test_show_commit_no_linked_sessions, test_show_session_with_different_content_types
+
+**import_tests:** test_import_no_claude_sessions_returns_gracefully, test_import_dry_run_does_not_modify_database, test_import_parses_valid_session_file, test_import_converts_to_storage_models, test_import_skips_already_imported_sessions, test_import_stores_session_and_messages
+
+**link_tests:** test_link_session_to_commit, test_link_invalid_session_prefix, test_link_multiple_sessions_to_same_commit, test_link_session_to_multiple_commits, test_find_session_by_prefix_for_linking
+
+**error_handling_tests:** test_invalid_database_path_returns_error, test_get_nonexistent_session_returns_none, test_get_messages_for_nonexistent_session_returns_empty, test_get_links_for_nonexistent_session_returns_empty, test_get_links_for_nonexistent_commit_returns_empty, test_unrelated_prefix_matches_nothing, test_malformed_jsonl_handled_gracefully, test_session_with_special_characters_in_directory
+
+### Issues Encountered
+None.
+
+### Resume Point
+Phase 0 complete. Ready to begin Phase 1: Core CLI Completion (status enhancement, search implementation, unlink implementation, config enhancement).
+
+---
+
+## Entry 004 - 2024-12-22
+
+### Session Focus
+Fix all warnings and complete Phase 0.2: Claude Code Parser Tests
+
+### Completed
+- Fixed all clippy warnings (uninlined_format_args, double_ended_iterator_last) (ROADMAP 0.4)
+- Added #[allow(dead_code)] annotations for future-use code (documented in ROADMAP Technical Debt)
+- Added 21 new unit tests for Claude Code parser (ROADMAP 0.2)
+
+### Files Changed
+- src/storage/db.rs (inline format args fix)
+- src/storage/models.rs (inline format args, dead_code annotations)
+- src/cli/commands/config.rs (inline format args)
+- src/cli/commands/import.rs (next_back(), inline format args)
+- src/cli/commands/link.rs (inline format args)
+- src/cli/commands/sessions.rs (next_back(), inline format args)
+- src/cli/commands/show.rs (inline format args)
+- src/cli/commands/status.rs (next_back(), inline format args)
+- src/capture/watchers/claude_code.rs (dead_code annotations, 21 new tests)
+- src/config/mod.rs (dead_code annotations)
+- src/git/mod.rs (dead_code annotations)
+
+### Tests Added
+- test_parse_valid_user_message
+- test_parse_valid_assistant_message
+- test_session_metadata_extraction
+- test_empty_lines_are_skipped
+- test_invalid_json_is_gracefully_skipped
+- test_unknown_message_types_are_skipped
+- test_sidechain_messages_are_skipped
+- test_parse_human_user_role
+- test_parse_assistant_role_with_model
+- test_parse_system_role
+- test_tool_use_blocks_parsed_correctly
+- test_tool_result_blocks_parsed_correctly
+- test_tool_result_with_error
+- test_thinking_blocks_parsed_correctly
+- test_find_session_files_returns_empty_when_claude_dir_missing
+- test_to_storage_models_creates_correct_session
+- test_to_storage_models_creates_correct_messages
+- test_to_storage_models_parent_id_linking
+- test_to_storage_models_with_invalid_uuid_generates_new
+- test_to_storage_models_empty_session
+- test_session_id_from_filename_fallback
+
+### Issues Encountered
+None.
+
+### Resume Point
+Continue with Phase 0.3: CLI Command Tests (integration tests for sessions, show, import, link commands).
+
+---
+
 ## Entry 003 - 2024-12-22
 
 ### Session Focus
