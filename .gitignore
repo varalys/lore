@@ -1,0 +1,48 @@
+# Build artifacts
+/target
+Cargo.lock
+
+# Database files
+*.db
+*.db-journal
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# AI and LLM related files
+# These are excluded to keep the open source repo clean
+# Contributors should provide their own AI/LLM configuration
+CLAUDE.md
+.claude/
+.cursor/
+.copilot/
+.aider*
+.continue/
+.codeium/
+.tabnine/
+.sourcegraph/
+*.prompt
+*.prompts
+.llm/
+.ai/
+ai-context/
+llm-config/
+
+# Session and conversation logs from AI tools
+*.jsonl.ai
+*.conversation
+.chat_history/
+
+# Local configuration that may contain AI settings
+.env.local
+.env.*.local
+secrets.yaml
+secrets.json
