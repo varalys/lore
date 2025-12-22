@@ -137,8 +137,11 @@ impl MessageContent {
         }
     }
 
-    /// Get the full text content (excluding tool calls and thinking)
-    #[allow(dead_code)]
+    /// Get the full text content (excluding tool calls and thinking).
+    ///
+    /// For simple text messages, returns the text directly. For block content,
+    /// extracts and concatenates all text blocks, ignoring tool calls and
+    /// thinking blocks.
     pub fn text(&self) -> String {
         match self {
             MessageContent::Text(s) => s.clone(),
@@ -234,6 +237,31 @@ pub enum LinkCreator {
     Auto,
     /// Manually created by a user via CLI command.
     User,
+}
+
+/// A search result from full-text search of message content.
+///
+/// Contains the matching message metadata along with a snippet of the
+/// matching content for display in search results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResult {
+    /// The session containing the matching message.
+    pub session_id: Uuid,
+
+    /// The matching message ID.
+    pub message_id: Uuid,
+
+    /// Role of the message sender (user, assistant, system).
+    pub role: MessageRole,
+
+    /// Snippet of matching content with search terms highlighted.
+    pub snippet: String,
+
+    /// Timestamp of the matching message.
+    pub timestamp: DateTime<Utc>,
+
+    /// Working directory of the session containing this message.
+    pub working_directory: String,
 }
 
 /// A tracked git repository.

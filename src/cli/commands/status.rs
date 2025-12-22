@@ -1,19 +1,20 @@
 //! Status command - show current Lore state.
 //!
 //! Displays an overview of the Lore database including the number
-//! of imported sessions, discovered session files, and recent
-//! session activity.
+//! of imported sessions, discovered session files, recent session
+//! activity, daemon status, and links to the current commit.
 
 use anyhow::Result;
 use colored::Colorize;
 
 use crate::capture::watchers::claude_code;
+use crate::git;
 use crate::storage::Database;
 
 /// Executes the status command.
 ///
-/// Shows database statistics, available session sources, and
-/// recent sessions.
+/// Shows database statistics, available session sources, daemon status,
+/// watcher availability, current commit links, and recent sessions.
 pub fn run() -> Result<()> {
     println!("{}", "Lore".bold().cyan());
     println!("{}", "Reasoning history for code".dimmed());
@@ -21,21 +22,24 @@ pub fn run() -> Result<()> {
 
     // Check Claude Code sessions
     let session_files = claude_code::find_session_files()?;
-    println!(
-        "{}",
-        format!("Claude Code sessions found: {}", session_files.len()).green()
-    );
+
+    // Daemon status placeholder
+    print_daemon_status();
+
+    // Watchers section
+    print_watchers_status(&session_files);
 
     // Check database
     let db = Database::open_default()?;
+
+    // Database statistics
+    print_database_stats(&db)?;
+
+    // Current commit section (if in a git repo)
+    print_current_commit_links(&db)?;
+
+    // Show hint if sessions exist but are not imported
     let session_count = db.session_count()?;
-    let message_count = db.message_count()?;
-
-    println!();
-    println!("{}", "Database:".bold());
-    println!("  Sessions imported: {session_count}");
-    println!("  Messages stored:   {message_count}");
-
     if session_count == 0 && !session_files.is_empty() {
         println!();
         println!(
@@ -45,40 +49,220 @@ pub fn run() -> Result<()> {
     }
 
     // Show recent sessions if any
-    let recent = db.list_sessions(5, None)?;
-    if !recent.is_empty() {
-        println!();
-        println!("{}", "Recent sessions:".bold());
-        for session in recent {
-            let id_short = &session.id.to_string()[..8];
-            let ago = chrono::Utc::now()
-                .signed_duration_since(session.started_at)
-                .num_hours();
-            let ago_str = if ago < 1 {
-                "just now".to_string()
-            } else if ago < 24 {
-                format!("{ago} hours ago")
-            } else {
-                format!("{} days ago", ago / 24)
-            };
+    print_recent_sessions(&db)?;
 
-            let branch = session.git_branch.as_deref().unwrap_or("-");
-            let dir = session
-                .working_directory
-                .split('/')
-                .next_back()
-                .unwrap_or(&session.working_directory);
+    Ok(())
+}
 
-            println!(
-                "  {}  {:12}  {:10}  {}  {}",
-                id_short.cyan(),
-                ago_str.dimmed(),
-                format!("{} msgs", session.message_count),
-                branch.yellow(),
-                dir
-            );
+/// Prints the daemon status section.
+///
+/// Currently shows a placeholder since the daemon is not yet implemented.
+fn print_daemon_status() {
+    println!("{}", "Daemon:".bold());
+    println!(
+        "  {}",
+        "not running (daemon not yet implemented)".dimmed()
+    );
+    println!();
+}
+
+/// Prints the watchers availability section.
+///
+/// Shows which session watchers are available and how many session files
+/// each has discovered.
+fn print_watchers_status(claude_code_files: &[std::path::PathBuf]) {
+    println!("{}", "Watchers:".bold());
+
+    // Claude Code watcher
+    if claude_code_files.is_empty() {
+        println!("  {}: {}", "claude-code".cyan(), "not available".dimmed());
+    } else {
+        println!(
+            "  {}: {} ({} session files)",
+            "claude-code".cyan(),
+            "available".green(),
+            claude_code_files.len()
+        );
+    }
+
+    // Cursor watcher (not yet implemented)
+    println!("  {}: {}", "cursor".cyan(), "not available".dimmed());
+
+    // Copilot watcher (not yet implemented)
+    println!("  {}: {}", "copilot".cyan(), "not available".dimmed());
+
+    println!();
+}
+
+/// Prints enhanced database statistics.
+///
+/// Shows total sessions, messages, links, and database file size.
+fn print_database_stats(db: &Database) -> Result<()> {
+    let session_count = db.session_count()?;
+    let message_count = db.message_count()?;
+    let link_count = db.link_count()?;
+
+    println!("{}", "Database:".bold());
+    println!("  Sessions: {session_count}");
+    println!("  Messages: {message_count}");
+    println!("  Links:    {link_count}");
+
+    // Try to get database file size
+    if let Some(db_path) = db.db_path() {
+        if let Ok(metadata) = std::fs::metadata(&db_path) {
+            let size_bytes = metadata.len();
+            let size_str = format_file_size(size_bytes);
+            println!("  Size:     {size_str}");
         }
     }
 
     Ok(())
+}
+
+/// Formats a file size in bytes to a human-readable string.
+fn format_file_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// Prints information about sessions linked to the current HEAD commit.
+///
+/// If not in a git repository, this section is silently skipped.
+fn print_current_commit_links(db: &Database) -> Result<()> {
+    // Try to get current git repo info
+    let cwd = std::env::current_dir()?;
+    let repo_info = match git::repo_info(&cwd) {
+        Ok(info) => info,
+        Err(_) => {
+            // Not in a git repo, skip this section
+            return Ok(());
+        }
+    };
+
+    let commit_sha = match repo_info.commit_sha {
+        Some(sha) => sha,
+        None => {
+            // No commits yet
+            println!();
+            println!("{}", "Current commit:".bold());
+            println!("  {}", "No commits yet".dimmed());
+            return Ok(());
+        }
+    };
+
+    let short_sha = &commit_sha[..7.min(commit_sha.len())];
+
+    println!();
+    println!("{} ({}):", "Current commit".bold(), short_sha.yellow());
+
+    // Get links for this commit
+    let links = db.get_links_by_commit(&commit_sha)?;
+
+    if links.is_empty() {
+        println!("  {}", "No linked sessions".dimmed());
+    } else {
+        println!("  Linked sessions: {}", links.len());
+
+        for link in &links {
+            // Get session details
+            if let Ok(Some(session)) = db.get_session(&link.session_id) {
+                let id_short = &session.id.to_string()[..8];
+                println!(
+                    "  - {} ({} messages)",
+                    id_short.cyan(),
+                    session.message_count
+                );
+            } else {
+                let id_short = &link.session_id.to_string()[..8];
+                println!("  - {} (session not found)", id_short.cyan());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Prints the recent sessions section.
+fn print_recent_sessions(db: &Database) -> Result<()> {
+    let recent = db.list_sessions(5, None)?;
+    if recent.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("{}", "Recent sessions:".bold());
+    for session in recent {
+        let id_short = &session.id.to_string()[..8];
+        let ago = chrono::Utc::now()
+            .signed_duration_since(session.started_at)
+            .num_hours();
+        let ago_str = if ago < 1 {
+            "just now".to_string()
+        } else if ago < 24 {
+            format!("{ago} hours ago")
+        } else {
+            format!("{} days ago", ago / 24)
+        };
+
+        let branch = session.git_branch.as_deref().unwrap_or("-");
+        let dir = session
+            .working_directory
+            .split('/')
+            .next_back()
+            .unwrap_or(&session.working_directory);
+
+        println!(
+            "  {}  {:12}  {:10}  {}  {}",
+            id_short.cyan(),
+            ago_str.dimmed(),
+            format!("{} msgs", session.message_count),
+            branch.yellow(),
+            dir
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_file_size_bytes() {
+        assert_eq!(format_file_size(0), "0 bytes");
+        assert_eq!(format_file_size(512), "512 bytes");
+        assert_eq!(format_file_size(1023), "1023 bytes");
+    }
+
+    #[test]
+    fn test_format_file_size_kilobytes() {
+        assert_eq!(format_file_size(1024), "1.0 KB");
+        assert_eq!(format_file_size(1536), "1.5 KB");
+        assert_eq!(format_file_size(10240), "10.0 KB");
+    }
+
+    #[test]
+    fn test_format_file_size_megabytes() {
+        assert_eq!(format_file_size(1024 * 1024), "1.0 MB");
+        assert_eq!(format_file_size(1024 * 1024 * 5), "5.0 MB");
+        assert_eq!(format_file_size(1024 * 1024 + 512 * 1024), "1.5 MB");
+    }
+
+    #[test]
+    fn test_format_file_size_gigabytes() {
+        assert_eq!(format_file_size(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(format_file_size(1024 * 1024 * 1024 * 2), "2.0 GB");
+    }
 }

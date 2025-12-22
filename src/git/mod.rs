@@ -17,7 +17,6 @@ use std::path::Path;
 /// # Errors
 ///
 /// Returns an error if the path is not inside a git repository.
-#[allow(dead_code)]
 pub fn repo_info(path: &Path) -> Result<RepoInfo> {
     let repo = git2::Repository::discover(path).context("Not a git repository")?;
 

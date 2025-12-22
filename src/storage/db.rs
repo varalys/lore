@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use super::models::{Message, MessageContent, MessageRole, Session, SessionLink};
+use super::models::{Message, MessageContent, MessageRole, SearchResult, Session, SessionLink};
 
 /// Returns the default database path at `~/.lore/lore.db`.
 ///
@@ -120,6 +120,21 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_session_links_commit_sha ON session_links(commit_sha);
             "#,
         )?;
+
+        // Create FTS5 virtual table for full-text search on message content.
+        // This is a standalone FTS table (not content-synced) because we need to
+        // store extracted text content, not the raw JSON from the messages table.
+        // The message_id column stores the UUID string for joining back to messages.
+        self.conn.execute_batch(
+            r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                message_id,
+                text_content,
+                tokenize='porter unicode61'
+            );
+            "#,
+        )?;
+
         Ok(())
     }
 
@@ -256,11 +271,12 @@ impl Database {
     /// Inserts a message into the database.
     ///
     /// If a message with the same ID already exists, the insert is ignored.
-    /// Message content is serialized to JSON for storage.
+    /// Message content is serialized to JSON for storage. Also inserts
+    /// extracted text content into the FTS index for full-text search.
     pub fn insert_message(&self, message: &Message) -> Result<()> {
         let content_json = serde_json::to_string(&message.content)?;
 
-        self.conn.execute(
+        let rows_changed = self.conn.execute(
             r#"
             INSERT INTO messages (id, session_id, parent_id, idx, timestamp, role, content, model, git_branch, cwd)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -279,6 +295,18 @@ impl Database {
                 message.cwd,
             ],
         )?;
+
+        // Only insert into FTS if the message was actually inserted (not a duplicate)
+        if rows_changed > 0 {
+            let text_content = message.content.text();
+            if !text_content.is_empty() {
+                self.conn.execute(
+                    "INSERT INTO messages_fts (message_id, text_content) VALUES (?1, ?2)",
+                    params![message.id.to_string(), text_content],
+                )?;
+            }
+        }
+
         Ok(())
     }
 
@@ -410,6 +438,210 @@ impl Database {
         })
     }
 
+    /// Deletes a specific session link by its ID.
+    ///
+    /// Returns `true` if a link was deleted, `false` if no link with that ID existed.
+    ///
+    /// Note: This method is part of the public API for programmatic use,
+    /// though the CLI currently uses session/commit-based deletion.
+    #[allow(dead_code)]
+    pub fn delete_link(&self, link_id: &Uuid) -> Result<bool> {
+        let rows_affected = self.conn.execute(
+            "DELETE FROM session_links WHERE id = ?1",
+            params![link_id.to_string()],
+        )?;
+        Ok(rows_affected > 0)
+    }
+
+    /// Deletes all links for a session.
+    ///
+    /// Returns the number of links deleted.
+    pub fn delete_links_by_session(&self, session_id: &Uuid) -> Result<usize> {
+        let rows_affected = self.conn.execute(
+            "DELETE FROM session_links WHERE session_id = ?1",
+            params![session_id.to_string()],
+        )?;
+        Ok(rows_affected)
+    }
+
+    /// Deletes a link between a specific session and commit.
+    ///
+    /// The commit_sha is matched as a prefix, so short SHAs work.
+    /// Returns `true` if a link was deleted, `false` if no matching link existed.
+    pub fn delete_link_by_session_and_commit(
+        &self,
+        session_id: &Uuid,
+        commit_sha: &str,
+    ) -> Result<bool> {
+        let pattern = format!("{commit_sha}%");
+        let rows_affected = self.conn.execute(
+            "DELETE FROM session_links WHERE session_id = ?1 AND commit_sha LIKE ?2",
+            params![session_id.to_string(), pattern],
+        )?;
+        Ok(rows_affected > 0)
+    }
+
+    // ==================== Search ====================
+
+    /// Searches message content using full-text search.
+    ///
+    /// Uses SQLite FTS5 to search for messages matching the query.
+    /// Returns results ordered by FTS5 relevance ranking.
+    ///
+    /// Optional filters:
+    /// - `working_dir`: Filter by working directory prefix
+    /// - `since`: Filter by minimum timestamp
+    /// - `role`: Filter by message role
+    pub fn search_messages(
+        &self,
+        query: &str,
+        limit: usize,
+        working_dir: Option<&str>,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        role: Option<&str>,
+    ) -> Result<Vec<SearchResult>> {
+        // Build the query dynamically based on filters
+        let mut sql = String::from(
+            r#"
+            SELECT
+                m.session_id,
+                m.id,
+                m.role,
+                snippet(messages_fts, 1, '**', '**', '...', 32) as snippet,
+                m.timestamp,
+                s.working_directory
+            FROM messages_fts fts
+            JOIN messages m ON fts.message_id = m.id
+            JOIN sessions s ON m.session_id = s.id
+            WHERE messages_fts MATCH ?1
+            "#,
+        );
+
+        let mut param_idx = 2;
+        if working_dir.is_some() {
+            sql.push_str(&format!(
+                " AND s.working_directory LIKE ?{param_idx}"
+            ));
+            param_idx += 1;
+        }
+        if since.is_some() {
+            sql.push_str(&format!(" AND m.timestamp >= ?{param_idx}"));
+            param_idx += 1;
+        }
+        if role.is_some() {
+            sql.push_str(&format!(" AND m.role = ?{param_idx}"));
+        }
+
+        sql.push_str(" ORDER BY rank LIMIT ?");
+        // The limit parameter will be appended at the end
+
+        // Prepare and execute with the right number of parameters
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        // Build parameter list dynamically
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_string())];
+
+        if let Some(wd) = working_dir {
+            params_vec.push(Box::new(format!("{wd}%")));
+        }
+        if let Some(ts) = since {
+            params_vec.push(Box::new(ts.to_rfc3339()));
+        }
+        if let Some(r) = role {
+            params_vec.push(Box::new(r.to_string()));
+        }
+        params_vec.push(Box::new(limit as i64));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            let role_str: String = row.get(2)?;
+            Ok(SearchResult {
+                session_id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
+                message_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
+                role: match role_str.as_str() {
+                    "user" => MessageRole::User,
+                    "assistant" => MessageRole::Assistant,
+                    "system" => MessageRole::System,
+                    _ => MessageRole::User,
+                },
+                snippet: row.get(3)?,
+                timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                working_directory: row.get(5)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to search messages")
+    }
+
+    /// Rebuilds the full-text search index from existing messages.
+    ///
+    /// This should be called when:
+    /// - Upgrading from a database without FTS support
+    /// - The FTS index becomes corrupted or out of sync
+    ///
+    /// Returns the number of messages indexed.
+    pub fn rebuild_search_index(&self) -> Result<usize> {
+        // Clear existing FTS data
+        self.conn.execute("DELETE FROM messages_fts", [])?;
+
+        // Reindex all messages
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content FROM messages"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let content_json: String = row.get(1)?;
+            Ok((id, content_json))
+        })?;
+
+        let mut count = 0;
+        for row in rows {
+            let (id, content_json) = row?;
+            // Parse the content JSON and extract text
+            let content: MessageContent = serde_json::from_str(&content_json)
+                .unwrap_or(MessageContent::Text(content_json.clone()));
+            let text_content = content.text();
+
+            if !text_content.is_empty() {
+                self.conn.execute(
+                    "INSERT INTO messages_fts (message_id, text_content) VALUES (?1, ?2)",
+                    params![id, text_content],
+                )?;
+                count += 1;
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Checks if the search index needs rebuilding.
+    ///
+    /// Returns true if there are messages in the database but the FTS
+    /// index is empty, indicating messages were imported before FTS
+    /// was added.
+    pub fn search_index_needs_rebuild(&self) -> Result<bool> {
+        let message_count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let fts_count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages_fts",
+            [],
+            |row| row.get(0),
+        )?;
+
+        // If we have messages but the FTS index is empty, it needs rebuilding
+        Ok(message_count > 0 && fts_count == 0)
+    }
+
     // ==================== Stats ====================
 
     /// Returns the total number of sessions in the database.
@@ -430,6 +662,23 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count)
+    }
+
+    /// Returns the total number of session links in the database.
+    pub fn link_count(&self) -> Result<i32> {
+        let count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM session_links",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Returns the path to the database file, if available.
+    ///
+    /// Returns `None` for in-memory databases.
+    pub fn db_path(&self) -> Option<std::path::PathBuf> {
+        self.conn.path().map(std::path::PathBuf::from)
     }
 }
 
@@ -965,5 +1214,559 @@ mod tests {
             3,
             "Message count should be 3 after all inserts"
         );
+    }
+
+    #[test]
+    fn test_link_count() {
+        let (db, _dir) = create_test_db();
+
+        assert_eq!(
+            db.link_count().expect("Failed to get count"),
+            0,
+            "Initial link count should be 0"
+        );
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let link1 = create_test_link(session.id, Some("abc123def456"), LinkType::Commit);
+        db.insert_link(&link1).expect("Failed to insert link1");
+
+        assert_eq!(
+            db.link_count().expect("Failed to get count"),
+            1,
+            "Link count should be 1 after first insert"
+        );
+
+        let link2 = create_test_link(session.id, Some("def456abc789"), LinkType::Commit);
+        db.insert_link(&link2).expect("Failed to insert link2");
+
+        assert_eq!(
+            db.link_count().expect("Failed to get count"),
+            2,
+            "Link count should be 2 after second insert"
+        );
+    }
+
+    #[test]
+    fn test_db_path() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).expect("Failed to open test database");
+
+        let retrieved_path = db.db_path();
+        assert!(retrieved_path.is_some(), "Database path should be available");
+
+        // Canonicalize both paths to handle macOS /var -> /private/var symlinks
+        let expected = db_path.canonicalize().unwrap_or(db_path);
+        let actual = retrieved_path.unwrap();
+        let actual_canonical = actual.canonicalize().unwrap_or(actual.clone());
+
+        assert_eq!(
+            actual_canonical, expected,
+            "Database path should match (after canonicalization)"
+        );
+    }
+
+    // ==================== Search Tests ====================
+
+    #[test]
+    fn test_search_messages_basic() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/home/user/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let msg1 = create_test_message(
+            session.id,
+            0,
+            MessageRole::User,
+            "How do I implement error handling in Rust?",
+        );
+        let msg2 = create_test_message(
+            session.id,
+            1,
+            MessageRole::Assistant,
+            "You can use Result types for error handling. The anyhow crate is also helpful.",
+        );
+
+        db.insert_message(&msg1).expect("Failed to insert message 1");
+        db.insert_message(&msg2).expect("Failed to insert message 2");
+
+        // Search for "error"
+        let results = db
+            .search_messages("error", 10, None, None, None)
+            .expect("Failed to search");
+
+        assert_eq!(results.len(), 2, "Should find 2 messages containing 'error'");
+    }
+
+    #[test]
+    fn test_search_messages_no_results() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let msg = create_test_message(session.id, 0, MessageRole::User, "Hello world");
+        db.insert_message(&msg).expect("Failed to insert message");
+
+        // Search for something not in the messages
+        let results = db
+            .search_messages("nonexistent_term_xyz", 10, None, None, None)
+            .expect("Failed to search");
+
+        assert!(results.is_empty(), "Should find no results");
+    }
+
+    #[test]
+    fn test_search_messages_with_role_filter() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let msg1 = create_test_message(
+            session.id,
+            0,
+            MessageRole::User,
+            "Tell me about Rust programming",
+        );
+        let msg2 = create_test_message(
+            session.id,
+            1,
+            MessageRole::Assistant,
+            "Rust is a systems programming language",
+        );
+
+        db.insert_message(&msg1).expect("Failed to insert message 1");
+        db.insert_message(&msg2).expect("Failed to insert message 2");
+
+        // Search with user role filter
+        let user_results = db
+            .search_messages("programming", 10, None, None, Some("user"))
+            .expect("Failed to search");
+
+        assert_eq!(user_results.len(), 1, "Should find 1 user message");
+        assert_eq!(
+            user_results[0].role,
+            MessageRole::User,
+            "Result should be from user"
+        );
+
+        // Search with assistant role filter
+        let assistant_results = db
+            .search_messages("programming", 10, None, None, Some("assistant"))
+            .expect("Failed to search");
+
+        assert_eq!(assistant_results.len(), 1, "Should find 1 assistant message");
+        assert_eq!(
+            assistant_results[0].role,
+            MessageRole::Assistant,
+            "Result should be from assistant"
+        );
+    }
+
+    #[test]
+    fn test_search_messages_with_repo_filter() {
+        let (db, _dir) = create_test_db();
+
+        let session1 = create_test_session("claude-code", "/home/user/project-a", Utc::now(), None);
+        let session2 = create_test_session("claude-code", "/home/user/project-b", Utc::now(), None);
+
+        db.insert_session(&session1).expect("insert 1");
+        db.insert_session(&session2).expect("insert 2");
+
+        let msg1 = create_test_message(session1.id, 0, MessageRole::User, "Hello from project-a");
+        let msg2 = create_test_message(session2.id, 0, MessageRole::User, "Hello from project-b");
+
+        db.insert_message(&msg1).expect("insert msg 1");
+        db.insert_message(&msg2).expect("insert msg 2");
+
+        // Search with repo filter
+        let results = db
+            .search_messages("Hello", 10, Some("/home/user/project-a"), None, None)
+            .expect("Failed to search");
+
+        assert_eq!(results.len(), 1, "Should find 1 message in project-a");
+        assert!(
+            results[0].working_directory.contains("project-a"),
+            "Should be from project-a"
+        );
+    }
+
+    #[test]
+    fn test_search_messages_limit() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // Insert 5 messages all containing "test"
+        for i in 0..5 {
+            let msg = create_test_message(
+                session.id,
+                i,
+                MessageRole::User,
+                &format!("This is test message number {i}"),
+            );
+            db.insert_message(&msg).expect("insert message");
+        }
+
+        // Search with limit of 3
+        let results = db
+            .search_messages("test", 3, None, None, None)
+            .expect("Failed to search");
+
+        assert_eq!(results.len(), 3, "Should respect limit of 3");
+    }
+
+    #[test]
+    fn test_search_index_needs_rebuild_empty_db() {
+        let (db, _dir) = create_test_db();
+
+        let needs_rebuild = db
+            .search_index_needs_rebuild()
+            .expect("Failed to check rebuild status");
+
+        assert!(
+            !needs_rebuild,
+            "Empty database should not need rebuild"
+        );
+    }
+
+    #[test]
+    fn test_rebuild_search_index() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let msg1 = create_test_message(session.id, 0, MessageRole::User, "First test message");
+        let msg2 = create_test_message(session.id, 1, MessageRole::Assistant, "Second test response");
+
+        db.insert_message(&msg1).expect("insert msg 1");
+        db.insert_message(&msg2).expect("insert msg 2");
+
+        // Clear and rebuild the index
+        db.conn
+            .execute("DELETE FROM messages_fts", [])
+            .expect("clear fts");
+
+        // Index should now need rebuilding
+        assert!(
+            db.search_index_needs_rebuild().expect("check rebuild"),
+            "Should need rebuild after clearing FTS"
+        );
+
+        // Rebuild
+        let count = db.rebuild_search_index().expect("rebuild");
+        assert_eq!(count, 2, "Should have indexed 2 messages");
+
+        // Index should no longer need rebuilding
+        assert!(
+            !db.search_index_needs_rebuild().expect("check rebuild"),
+            "Should not need rebuild after rebuilding"
+        );
+
+        // Search should work
+        let results = db
+            .search_messages("test", 10, None, None, None)
+            .expect("search");
+        assert_eq!(results.len(), 2, "Should find 2 results after rebuild");
+    }
+
+    #[test]
+    fn test_search_with_block_content() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // Create a message with block content
+        let block_content = MessageContent::Blocks(vec![
+            crate::storage::models::ContentBlock::Text {
+                text: "Let me help with your database query.".to_string(),
+            },
+            crate::storage::models::ContentBlock::ToolUse {
+                id: "tool_123".to_string(),
+                name: "Bash".to_string(),
+                input: serde_json::json!({"command": "ls -la"}),
+            },
+        ]);
+
+        let msg = Message {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            parent_id: None,
+            index: 0,
+            timestamp: Utc::now(),
+            role: MessageRole::Assistant,
+            content: block_content,
+            model: Some("claude-opus-4".to_string()),
+            git_branch: Some("main".to_string()),
+            cwd: Some("/project".to_string()),
+        };
+
+        db.insert_message(&msg).expect("insert message");
+
+        // Search should find text from blocks
+        let results = db
+            .search_messages("database", 10, None, None, None)
+            .expect("search");
+
+        assert_eq!(results.len(), 1, "Should find message with block content");
+    }
+
+    #[test]
+    fn test_search_result_contains_session_info() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/home/user/my-project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let msg = create_test_message(session.id, 0, MessageRole::User, "Search test message");
+        db.insert_message(&msg).expect("insert message");
+
+        let results = db
+            .search_messages("Search", 10, None, None, None)
+            .expect("search");
+
+        assert_eq!(results.len(), 1, "Should find 1 result");
+        assert_eq!(
+            results[0].session_id, session.id,
+            "Session ID should match"
+        );
+        assert_eq!(results[0].message_id, msg.id, "Message ID should match");
+        assert_eq!(
+            results[0].working_directory, "/home/user/my-project",
+            "Working directory should match"
+        );
+        assert_eq!(results[0].role, MessageRole::User, "Role should match");
+    }
+
+    // ==================== Delete Link Tests ====================
+
+    #[test]
+    fn test_delete_link_by_id() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let link = create_test_link(session.id, Some("abc123def456"), LinkType::Commit);
+        db.insert_link(&link).expect("Failed to insert link");
+
+        // Verify link exists
+        let links_before = db
+            .get_links_by_session(&session.id)
+            .expect("Failed to get links");
+        assert_eq!(links_before.len(), 1, "Should have 1 link before delete");
+
+        // Delete the link
+        let deleted = db
+            .delete_link(&link.id)
+            .expect("Failed to delete link");
+        assert!(deleted, "Should return true when link is deleted");
+
+        // Verify link is gone
+        let links_after = db
+            .get_links_by_session(&session.id)
+            .expect("Failed to get links");
+        assert_eq!(links_after.len(), 0, "Should have 0 links after delete");
+    }
+
+    #[test]
+    fn test_delete_link_nonexistent() {
+        let (db, _dir) = create_test_db();
+
+        let nonexistent_id = Uuid::new_v4();
+        let deleted = db
+            .delete_link(&nonexistent_id)
+            .expect("Failed to call delete_link");
+
+        assert!(!deleted, "Should return false for nonexistent link");
+    }
+
+    #[test]
+    fn test_delete_links_by_session() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        // Create multiple links for the same session
+        let link1 = create_test_link(session.id, Some("abc123"), LinkType::Commit);
+        let link2 = create_test_link(session.id, Some("def456"), LinkType::Commit);
+        let link3 = create_test_link(session.id, Some("ghi789"), LinkType::Commit);
+
+        db.insert_link(&link1).expect("Failed to insert link1");
+        db.insert_link(&link2).expect("Failed to insert link2");
+        db.insert_link(&link3).expect("Failed to insert link3");
+
+        // Verify all links exist
+        let links_before = db
+            .get_links_by_session(&session.id)
+            .expect("Failed to get links");
+        assert_eq!(links_before.len(), 3, "Should have 3 links before delete");
+
+        // Delete all links for the session
+        let count = db
+            .delete_links_by_session(&session.id)
+            .expect("Failed to delete links");
+        assert_eq!(count, 3, "Should have deleted 3 links");
+
+        // Verify all links are gone
+        let links_after = db
+            .get_links_by_session(&session.id)
+            .expect("Failed to get links");
+        assert_eq!(links_after.len(), 0, "Should have 0 links after delete");
+    }
+
+    #[test]
+    fn test_delete_links_by_session_no_links() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        // Delete links for session that has none
+        let count = db
+            .delete_links_by_session(&session.id)
+            .expect("Failed to call delete_links_by_session");
+        assert_eq!(count, 0, "Should return 0 when no links exist");
+    }
+
+    #[test]
+    fn test_delete_links_by_session_preserves_other_sessions() {
+        let (db, _dir) = create_test_db();
+
+        let session1 = create_test_session("claude-code", "/project1", Utc::now(), None);
+        let session2 = create_test_session("claude-code", "/project2", Utc::now(), None);
+
+        db.insert_session(&session1).expect("Failed to insert session1");
+        db.insert_session(&session2).expect("Failed to insert session2");
+
+        let link1 = create_test_link(session1.id, Some("abc123"), LinkType::Commit);
+        let link2 = create_test_link(session2.id, Some("def456"), LinkType::Commit);
+
+        db.insert_link(&link1).expect("Failed to insert link1");
+        db.insert_link(&link2).expect("Failed to insert link2");
+
+        // Delete links only for session1
+        let count = db
+            .delete_links_by_session(&session1.id)
+            .expect("Failed to delete links");
+        assert_eq!(count, 1, "Should have deleted 1 link");
+
+        // Verify session2's link is preserved
+        let session2_links = db
+            .get_links_by_session(&session2.id)
+            .expect("Failed to get links");
+        assert_eq!(
+            session2_links.len(),
+            1,
+            "Session2's link should be preserved"
+        );
+        assert_eq!(session2_links[0].id, link2.id, "Link ID should match");
+    }
+
+    #[test]
+    fn test_delete_link_by_session_and_commit() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let link1 = create_test_link(session.id, Some("abc123def456"), LinkType::Commit);
+        let link2 = create_test_link(session.id, Some("def456abc789"), LinkType::Commit);
+
+        db.insert_link(&link1).expect("Failed to insert link1");
+        db.insert_link(&link2).expect("Failed to insert link2");
+
+        // Delete only the first link by commit SHA
+        let deleted = db
+            .delete_link_by_session_and_commit(&session.id, "abc123")
+            .expect("Failed to delete link");
+        assert!(deleted, "Should return true when link is deleted");
+
+        // Verify only link2 remains
+        let links = db
+            .get_links_by_session(&session.id)
+            .expect("Failed to get links");
+        assert_eq!(links.len(), 1, "Should have 1 link remaining");
+        assert_eq!(links[0].id, link2.id, "Remaining link should be link2");
+    }
+
+    #[test]
+    fn test_delete_link_by_session_and_commit_full_sha() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let full_sha = "abc123def456789012345678901234567890abcd";
+        let link = create_test_link(session.id, Some(full_sha), LinkType::Commit);
+        db.insert_link(&link).expect("Failed to insert link");
+
+        // Delete using full SHA
+        let deleted = db
+            .delete_link_by_session_and_commit(&session.id, full_sha)
+            .expect("Failed to delete link");
+        assert!(deleted, "Should delete with full SHA");
+
+        let links = db
+            .get_links_by_session(&session.id)
+            .expect("Failed to get links");
+        assert_eq!(links.len(), 0, "Should have 0 links after delete");
+    }
+
+    #[test]
+    fn test_delete_link_by_session_and_commit_no_match() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let link = create_test_link(session.id, Some("abc123"), LinkType::Commit);
+        db.insert_link(&link).expect("Failed to insert link");
+
+        // Try to delete with non-matching commit
+        let deleted = db
+            .delete_link_by_session_and_commit(&session.id, "xyz999")
+            .expect("Failed to call delete");
+        assert!(!deleted, "Should return false when no match");
+
+        // Verify original link is preserved
+        let links = db
+            .get_links_by_session(&session.id)
+            .expect("Failed to get links");
+        assert_eq!(links.len(), 1, "Link should be preserved");
+    }
+
+    #[test]
+    fn test_delete_link_by_session_and_commit_wrong_session() {
+        let (db, _dir) = create_test_db();
+
+        let session1 = create_test_session("claude-code", "/project1", Utc::now(), None);
+        let session2 = create_test_session("claude-code", "/project2", Utc::now(), None);
+
+        db.insert_session(&session1).expect("Failed to insert session1");
+        db.insert_session(&session2).expect("Failed to insert session2");
+
+        let link = create_test_link(session1.id, Some("abc123"), LinkType::Commit);
+        db.insert_link(&link).expect("Failed to insert link");
+
+        // Try to delete from wrong session
+        let deleted = db
+            .delete_link_by_session_and_commit(&session2.id, "abc123")
+            .expect("Failed to call delete");
+        assert!(!deleted, "Should not delete link from different session");
+
+        // Verify original link is preserved
+        let links = db
+            .get_links_by_session(&session1.id)
+            .expect("Failed to get links");
+        assert_eq!(links.len(), 1, "Link should be preserved");
     }
 }
