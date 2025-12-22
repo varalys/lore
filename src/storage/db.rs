@@ -391,3 +391,538 @@ impl Database {
         Ok(count)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::models::{LinkCreator, LinkType, MessageContent, MessageRole};
+    use chrono::{Duration, Utc};
+    use tempfile::tempdir;
+
+    /// Creates a test database in a temporary directory.
+    /// Returns the Database instance and the temp directory (which must be kept alive).
+    fn create_test_db() -> (Database, tempfile::TempDir) {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).expect("Failed to open test database");
+        (db, dir)
+    }
+
+    /// Creates a test session with the given parameters.
+    fn create_test_session(
+        tool: &str,
+        working_directory: &str,
+        started_at: chrono::DateTime<Utc>,
+        source_path: Option<&str>,
+    ) -> Session {
+        Session {
+            id: Uuid::new_v4(),
+            tool: tool.to_string(),
+            tool_version: Some("1.0.0".to_string()),
+            started_at,
+            ended_at: None,
+            model: Some("test-model".to_string()),
+            working_directory: working_directory.to_string(),
+            git_branch: Some("main".to_string()),
+            source_path: source_path.map(|s| s.to_string()),
+            message_count: 0,
+        }
+    }
+
+    /// Creates a test message for the given session.
+    fn create_test_message(
+        session_id: Uuid,
+        index: i32,
+        role: MessageRole,
+        content: &str,
+    ) -> Message {
+        Message {
+            id: Uuid::new_v4(),
+            session_id,
+            parent_id: None,
+            index,
+            timestamp: Utc::now(),
+            role,
+            content: MessageContent::Text(content.to_string()),
+            model: Some("test-model".to_string()),
+            git_branch: Some("main".to_string()),
+            cwd: Some("/test/cwd".to_string()),
+        }
+    }
+
+    /// Creates a test session link for the given session.
+    fn create_test_link(
+        session_id: Uuid,
+        commit_sha: Option<&str>,
+        link_type: LinkType,
+    ) -> SessionLink {
+        SessionLink {
+            id: Uuid::new_v4(),
+            session_id,
+            link_type,
+            commit_sha: commit_sha.map(|s| s.to_string()),
+            branch: Some("main".to_string()),
+            remote: Some("origin".to_string()),
+            created_at: Utc::now(),
+            created_by: LinkCreator::Auto,
+            confidence: Some(0.95),
+        }
+    }
+
+    // ==================== Session Tests ====================
+
+    #[test]
+    fn test_insert_and_get_session() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session(
+            "claude-code",
+            "/home/user/project",
+            Utc::now(),
+            Some("/path/to/source.jsonl"),
+        );
+
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        let retrieved = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+
+        assert_eq!(retrieved.id, session.id, "Session ID should match");
+        assert_eq!(retrieved.tool, session.tool, "Tool should match");
+        assert_eq!(
+            retrieved.tool_version, session.tool_version,
+            "Tool version should match"
+        );
+        assert_eq!(
+            retrieved.working_directory, session.working_directory,
+            "Working directory should match"
+        );
+        assert_eq!(
+            retrieved.git_branch, session.git_branch,
+            "Git branch should match"
+        );
+        assert_eq!(
+            retrieved.source_path, session.source_path,
+            "Source path should match"
+        );
+    }
+
+    #[test]
+    fn test_list_sessions() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Insert sessions with different timestamps (oldest first)
+        let session1 = create_test_session(
+            "claude-code",
+            "/project1",
+            now - Duration::hours(2),
+            None,
+        );
+        let session2 = create_test_session(
+            "cursor",
+            "/project2",
+            now - Duration::hours(1),
+            None,
+        );
+        let session3 = create_test_session(
+            "claude-code",
+            "/project3",
+            now,
+            None,
+        );
+
+        db.insert_session(&session1).expect("Failed to insert session1");
+        db.insert_session(&session2).expect("Failed to insert session2");
+        db.insert_session(&session3).expect("Failed to insert session3");
+
+        let sessions = db
+            .list_sessions(10, None)
+            .expect("Failed to list sessions");
+
+        assert_eq!(sessions.len(), 3, "Should have 3 sessions");
+        // Sessions should be ordered by started_at DESC (most recent first)
+        assert_eq!(
+            sessions[0].id, session3.id,
+            "Most recent session should be first"
+        );
+        assert_eq!(
+            sessions[1].id, session2.id,
+            "Second most recent session should be second"
+        );
+        assert_eq!(
+            sessions[2].id, session1.id,
+            "Oldest session should be last"
+        );
+    }
+
+    #[test]
+    fn test_list_sessions_with_working_dir_filter() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let session1 = create_test_session(
+            "claude-code",
+            "/home/user/project-a",
+            now - Duration::hours(1),
+            None,
+        );
+        let session2 = create_test_session(
+            "claude-code",
+            "/home/user/project-b",
+            now,
+            None,
+        );
+        let session3 = create_test_session(
+            "claude-code",
+            "/other/path",
+            now,
+            None,
+        );
+
+        db.insert_session(&session1).expect("Failed to insert session1");
+        db.insert_session(&session2).expect("Failed to insert session2");
+        db.insert_session(&session3).expect("Failed to insert session3");
+
+        // Filter by working directory prefix
+        let sessions = db
+            .list_sessions(10, Some("/home/user"))
+            .expect("Failed to list sessions");
+
+        assert_eq!(
+            sessions.len(),
+            2,
+            "Should have 2 sessions matching /home/user prefix"
+        );
+
+        // Verify both matching sessions are returned
+        let ids: Vec<Uuid> = sessions.iter().map(|s| s.id).collect();
+        assert!(
+            ids.contains(&session1.id),
+            "Should contain session1"
+        );
+        assert!(
+            ids.contains(&session2.id),
+            "Should contain session2"
+        );
+        assert!(
+            !ids.contains(&session3.id),
+            "Should not contain session3"
+        );
+    }
+
+    #[test]
+    fn test_session_exists_by_source() {
+        let (db, _dir) = create_test_db();
+        let source_path = "/path/to/session.jsonl";
+
+        let session = create_test_session(
+            "claude-code",
+            "/project",
+            Utc::now(),
+            Some(source_path),
+        );
+
+        // Before insert, should not exist
+        assert!(
+            !db.session_exists_by_source(source_path)
+                .expect("Failed to check existence"),
+            "Session should not exist before insert"
+        );
+
+        db.insert_session(&session).expect("Failed to insert session");
+
+        // After insert, should exist
+        assert!(
+            db.session_exists_by_source(source_path)
+                .expect("Failed to check existence"),
+            "Session should exist after insert"
+        );
+
+        // Different path should not exist
+        assert!(
+            !db.session_exists_by_source("/other/path.jsonl")
+                .expect("Failed to check existence"),
+            "Different source path should not exist"
+        );
+    }
+
+    #[test]
+    fn test_get_nonexistent_session() {
+        let (db, _dir) = create_test_db();
+        let nonexistent_id = Uuid::new_v4();
+
+        let result = db
+            .get_session(&nonexistent_id)
+            .expect("Failed to query for nonexistent session");
+
+        assert!(
+            result.is_none(),
+            "Should return None for nonexistent session"
+        );
+    }
+
+    // ==================== Message Tests ====================
+
+    #[test]
+    fn test_insert_and_get_messages() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let msg1 = create_test_message(session.id, 0, MessageRole::User, "Hello");
+        let msg2 = create_test_message(session.id, 1, MessageRole::Assistant, "Hi there!");
+
+        db.insert_message(&msg1).expect("Failed to insert message 1");
+        db.insert_message(&msg2).expect("Failed to insert message 2");
+
+        let messages = db
+            .get_messages(&session.id)
+            .expect("Failed to get messages");
+
+        assert_eq!(messages.len(), 2, "Should have 2 messages");
+        assert_eq!(messages[0].id, msg1.id, "First message ID should match");
+        assert_eq!(messages[1].id, msg2.id, "Second message ID should match");
+        assert_eq!(
+            messages[0].role,
+            MessageRole::User,
+            "First message role should be User"
+        );
+        assert_eq!(
+            messages[1].role,
+            MessageRole::Assistant,
+            "Second message role should be Assistant"
+        );
+    }
+
+    #[test]
+    fn test_messages_ordered_by_index() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        // Insert messages out of order
+        let msg3 = create_test_message(session.id, 2, MessageRole::Assistant, "Third");
+        let msg1 = create_test_message(session.id, 0, MessageRole::User, "First");
+        let msg2 = create_test_message(session.id, 1, MessageRole::Assistant, "Second");
+
+        db.insert_message(&msg3).expect("Failed to insert message 3");
+        db.insert_message(&msg1).expect("Failed to insert message 1");
+        db.insert_message(&msg2).expect("Failed to insert message 2");
+
+        let messages = db
+            .get_messages(&session.id)
+            .expect("Failed to get messages");
+
+        assert_eq!(messages.len(), 3, "Should have 3 messages");
+        assert_eq!(
+            messages[0].index, 0,
+            "First message should have index 0"
+        );
+        assert_eq!(
+            messages[1].index, 1,
+            "Second message should have index 1"
+        );
+        assert_eq!(
+            messages[2].index, 2,
+            "Third message should have index 2"
+        );
+
+        // Verify content matches expected order
+        assert_eq!(
+            messages[0].content.text(),
+            "First",
+            "First message content should be 'First'"
+        );
+        assert_eq!(
+            messages[1].content.text(),
+            "Second",
+            "Second message content should be 'Second'"
+        );
+        assert_eq!(
+            messages[2].content.text(),
+            "Third",
+            "Third message content should be 'Third'"
+        );
+    }
+
+    // ==================== SessionLink Tests ====================
+
+    #[test]
+    fn test_insert_and_get_links_by_session() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let link1 = create_test_link(session.id, Some("abc123def456"), LinkType::Commit);
+        let link2 = create_test_link(session.id, Some("def456abc789"), LinkType::Commit);
+
+        db.insert_link(&link1).expect("Failed to insert link 1");
+        db.insert_link(&link2).expect("Failed to insert link 2");
+
+        let links = db
+            .get_links_by_session(&session.id)
+            .expect("Failed to get links");
+
+        assert_eq!(links.len(), 2, "Should have 2 links");
+
+        let link_ids: Vec<Uuid> = links.iter().map(|l| l.id).collect();
+        assert!(link_ids.contains(&link1.id), "Should contain link1");
+        assert!(link_ids.contains(&link2.id), "Should contain link2");
+
+        // Verify link properties
+        let retrieved_link = links.iter().find(|l| l.id == link1.id).unwrap();
+        assert_eq!(
+            retrieved_link.commit_sha,
+            Some("abc123def456".to_string()),
+            "Commit SHA should match"
+        );
+        assert_eq!(
+            retrieved_link.link_type,
+            LinkType::Commit,
+            "Link type should be Commit"
+        );
+        assert_eq!(
+            retrieved_link.created_by,
+            LinkCreator::Auto,
+            "Created by should be Auto"
+        );
+    }
+
+    #[test]
+    fn test_get_links_by_commit() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let full_sha = "abc123def456789012345678901234567890abcd";
+        let link = create_test_link(session.id, Some(full_sha), LinkType::Commit);
+        db.insert_link(&link).expect("Failed to insert link");
+
+        // Test full SHA match
+        let links_full = db
+            .get_links_by_commit(full_sha)
+            .expect("Failed to get links by full SHA");
+        assert_eq!(links_full.len(), 1, "Should find link by full SHA");
+        assert_eq!(links_full[0].id, link.id, "Link ID should match");
+
+        // Test partial SHA match (prefix)
+        let links_partial = db
+            .get_links_by_commit("abc123")
+            .expect("Failed to get links by partial SHA");
+        assert_eq!(
+            links_partial.len(),
+            1,
+            "Should find link by partial SHA prefix"
+        );
+        assert_eq!(links_partial[0].id, link.id, "Link ID should match");
+
+        // Test non-matching SHA
+        let links_none = db
+            .get_links_by_commit("zzz999")
+            .expect("Failed to get links by non-matching SHA");
+        assert_eq!(
+            links_none.len(),
+            0,
+            "Should not find link with non-matching SHA"
+        );
+    }
+
+    // ==================== Database Tests ====================
+
+    #[test]
+    fn test_database_creation() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let db_path = dir.path().join("new_test.db");
+
+        // Database should not exist before creation
+        assert!(
+            !db_path.exists(),
+            "Database file should not exist before creation"
+        );
+
+        let db = Database::open(&db_path).expect("Failed to create database");
+
+        // Database file should exist after creation
+        assert!(
+            db_path.exists(),
+            "Database file should exist after creation"
+        );
+
+        // Verify tables exist by attempting operations
+        let session_count = db.session_count().expect("Failed to get session count");
+        assert_eq!(session_count, 0, "New database should have 0 sessions");
+
+        let message_count = db.message_count().expect("Failed to get message count");
+        assert_eq!(message_count, 0, "New database should have 0 messages");
+    }
+
+    #[test]
+    fn test_session_count() {
+        let (db, _dir) = create_test_db();
+
+        assert_eq!(
+            db.session_count().expect("Failed to get count"),
+            0,
+            "Initial session count should be 0"
+        );
+
+        let session1 = create_test_session("claude-code", "/project1", Utc::now(), None);
+        db.insert_session(&session1).expect("Failed to insert session1");
+
+        assert_eq!(
+            db.session_count().expect("Failed to get count"),
+            1,
+            "Session count should be 1 after first insert"
+        );
+
+        let session2 = create_test_session("cursor", "/project2", Utc::now(), None);
+        db.insert_session(&session2).expect("Failed to insert session2");
+
+        assert_eq!(
+            db.session_count().expect("Failed to get count"),
+            2,
+            "Session count should be 2 after second insert"
+        );
+    }
+
+    #[test]
+    fn test_message_count() {
+        let (db, _dir) = create_test_db();
+
+        assert_eq!(
+            db.message_count().expect("Failed to get count"),
+            0,
+            "Initial message count should be 0"
+        );
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let msg1 = create_test_message(session.id, 0, MessageRole::User, "Hello");
+        db.insert_message(&msg1).expect("Failed to insert message1");
+
+        assert_eq!(
+            db.message_count().expect("Failed to get count"),
+            1,
+            "Message count should be 1 after first insert"
+        );
+
+        let msg2 = create_test_message(session.id, 1, MessageRole::Assistant, "Hi");
+        let msg3 = create_test_message(session.id, 2, MessageRole::User, "How are you?");
+        db.insert_message(&msg2).expect("Failed to insert message2");
+        db.insert_message(&msg3).expect("Failed to insert message3");
+
+        assert_eq!(
+            db.message_count().expect("Failed to get count"),
+            3,
+            "Message count should be 3 after all inserts"
+        );
+    }
+}

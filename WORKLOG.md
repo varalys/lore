@@ -10,6 +10,42 @@ This document tracks development progress in reverse chronological order. Each e
 
 ---
 
+## Entry 003 - 2024-12-22
+
+### Session Focus
+Phase 0.1: Storage Layer Tests
+
+### Completed
+- Added 12 unit tests for the storage layer (ROADMAP 0.1)
+- Created helper functions for test data generation
+- Initialized git repository with main branch
+- Created feature branch feat/phase-0-foundation-tests
+
+### Files Changed
+- src/storage/db.rs (added test module with 12 tests and 4 helper functions)
+
+### Tests Added
+- test_insert_and_get_session
+- test_list_sessions
+- test_list_sessions_with_working_dir_filter
+- test_session_exists_by_source
+- test_get_nonexistent_session
+- test_insert_and_get_messages
+- test_messages_ordered_by_index
+- test_insert_and_get_links_by_session
+- test_get_links_by_commit
+- test_database_creation
+- test_session_count
+- test_message_count
+
+### Issues Encountered
+None.
+
+### Resume Point
+Continue with Phase 0.2: Claude Code Parser Tests. One item remains in 0.1 (concurrent read tests) but can be deferred.
+
+---
+
 ## Entry 002 - 2024-12-22
 
 ### Session Focus

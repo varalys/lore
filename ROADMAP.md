@@ -16,10 +16,10 @@ This document contains the structured task list for Lore development. Tasks are 
 Before adding new features, establish a solid testing foundation for existing code.
 
 ### 0.1 Storage Layer Tests
-- [ ] Unit tests for Session CRUD operations in db.rs
-- [ ] Unit tests for Message CRUD operations in db.rs
-- [ ] Unit tests for SessionLink CRUD operations in db.rs
-- [ ] Test database migrations run correctly
+- [x] Unit tests for Session CRUD operations in db.rs
+- [x] Unit tests for Message CRUD operations in db.rs
+- [x] Unit tests for SessionLink CRUD operations in db.rs
+- [x] Test database migrations run correctly
 - [ ] Test concurrent read operations
 
 ### 0.2 Claude Code Parser Tests
