@@ -1,11 +1,17 @@
-//! Show command - display session details
+//! Show command - display session details.
+//!
+//! Displays the full conversation history for a session, or lists
+//! sessions linked to a specific commit. Supports truncation of
+//! long messages and optional display of AI thinking blocks.
 
 use anyhow::{Context, Result};
 use colored::Colorize;
 
 use crate::storage::{ContentBlock, Database, MessageContent, MessageRole};
 
-/// Safely truncate a string to at most `max_bytes` bytes at a character boundary
+/// Safely truncates a string to at most `max_bytes` bytes at a character boundary.
+///
+/// Ensures the truncation does not split a multi-byte UTF-8 character.
 fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -18,24 +24,29 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+/// Arguments for the show command.
 #[derive(clap::Args)]
 pub struct Args {
-    /// Session ID (first 8 chars) or commit SHA
+    /// Session ID prefix or commit SHA to look up.
     pub target: String,
 
-    /// Show linked sessions for a commit
+    /// Interpret target as a commit SHA and show linked sessions.
     #[arg(long)]
     pub commit: bool,
 
-    /// Show full content (don't truncate)
+    /// Show full message content without truncation.
     #[arg(long)]
     pub full: bool,
 
-    /// Include thinking blocks
+    /// Include AI thinking blocks in the output.
     #[arg(long)]
     pub thinking: bool,
 }
 
+/// Executes the show command.
+///
+/// Either displays a session's conversation or lists sessions
+/// linked to a commit, depending on the --commit flag.
 pub fn run(args: Args) -> Result<()> {
     let db = Database::open_default()?;
 
@@ -56,7 +67,7 @@ fn show_session(db: &Database, id_prefix: &str, full: bool, show_thinking: bool)
     let session = sessions
         .iter()
         .find(|s| s.id.to_string().starts_with(id_prefix))
-        .context(format!("No session found matching '{}'", id_prefix))?;
+        .context(format!("No session found matching '{id_prefix}'"))?;
 
     // Header
     println!("{} {}", "Session".bold(), session.id.to_string().cyan());
@@ -125,7 +136,7 @@ fn show_session(db: &Database, id_prefix: &str, full: bool, show_thinking: bool)
                 } else {
                     format!("{}...", truncate_str(text, 500))
                 };
-                println!("{}", display);
+                println!("{display}");
             }
             MessageContent::Blocks(blocks) => {
                 for block in blocks {
@@ -136,7 +147,7 @@ fn show_session(db: &Database, id_prefix: &str, full: bool, show_thinking: bool)
                             } else {
                                 format!("{}...", truncate_str(text, 500))
                             };
-                            println!("{}", display);
+                            println!("{display}");
                         }
                         ContentBlock::Thinking { thinking } => {
                             if show_thinking {
@@ -150,7 +161,7 @@ fn show_session(db: &Database, id_prefix: &str, full: bool, show_thinking: bool)
                         ContentBlock::ToolUse { name, input, .. } => {
                             println!(
                                 "{} {}",
-                                format!("[Tool: {}]", name).magenta(),
+                                format!("[Tool: {name}]").magenta(),
                                 serde_json::to_string(input)
                                     .unwrap_or_default()
                                     .dimmed()
@@ -170,7 +181,7 @@ fn show_session(db: &Database, id_prefix: &str, full: bool, show_thinking: bool)
                             } else {
                                 format!("{}...", truncate_str(&color_content, 200))
                             };
-                            println!("{} {}", format!("[{}]", label).dimmed(), display);
+                            println!("{} {}", format!("[{label}]").dimmed(), display);
                         }
                     }
                 }
@@ -188,7 +199,7 @@ fn show_commit_sessions(db: &Database, commit: &str) -> Result<()> {
     if links.is_empty() {
         println!(
             "{}",
-            format!("No sessions linked to commit '{}'", commit).dimmed()
+            format!("No sessions linked to commit '{commit}'").dimmed()
         );
         return Ok(());
     }

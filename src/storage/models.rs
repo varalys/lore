@@ -76,11 +76,15 @@ pub struct Message {
     pub cwd: Option<String>,
 }
 
+/// The role of a message sender in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
+    /// A human user message.
     User,
+    /// An AI assistant response.
     Assistant,
+    /// A system prompt or instruction.
     System,
 }
 
@@ -106,6 +110,7 @@ pub enum MessageContent {
 
 impl MessageContent {
     /// Get a text summary of the content
+    #[allow(dead_code)]
     pub fn summary(&self, max_len: usize) -> String {
         let text = match self {
             MessageContent::Text(s) => s.clone(),
@@ -114,7 +119,7 @@ impl MessageContent {
                     .iter()
                     .filter_map(|b| match b {
                         ContentBlock::Text { text } => Some(text.clone()),
-                        ContentBlock::ToolUse { name, .. } => Some(format!("[tool: {}]", name)),
+                        ContentBlock::ToolUse { name, .. } => Some(format!("[tool: {name}]")),
                         ContentBlock::ToolResult { content, .. } => {
                             Some(format!("[result: {}...]", &content.chars().take(50).collect::<String>()))
                         }
@@ -133,6 +138,7 @@ impl MessageContent {
     }
 
     /// Get the full text content (excluding tool calls and thinking)
+    #[allow(dead_code)]
     pub fn text(&self) -> String {
         match self {
             MessageContent::Text(s) => s.clone(),
@@ -206,23 +212,34 @@ pub struct SessionLink {
     pub confidence: Option<f64>,
 }
 
+/// The type of link between a session and git history.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum LinkType {
+    /// Link to a specific commit.
     Commit,
+    /// Link to a branch (session spans multiple commits).
     Branch,
+    /// Link to a pull request.
     Pr,
+    /// Manual link created by user without specific target.
     Manual,
 }
 
+/// Indicates how a session link was created.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum LinkCreator {
+    /// Automatically created by time and file overlap heuristics.
     Auto,
+    /// Manually created by a user via CLI command.
     User,
 }
 
-/// Repository tracking
+/// A tracked git repository.
+///
+/// Repositories are discovered when sessions reference working directories
+/// that are inside git repositories.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repository {
     /// Unique identifier

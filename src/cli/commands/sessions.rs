@@ -1,25 +1,34 @@
-//! Sessions command - list and filter sessions
+//! Sessions command - list and filter sessions.
+//!
+//! Displays a list of imported sessions with filtering options.
+//! Sessions can be filtered by working directory and output in
+//! table or JSON format.
 
 use anyhow::Result;
 use colored::Colorize;
 
 use crate::storage::Database;
 
+/// Arguments for the sessions command.
 #[derive(clap::Args)]
 pub struct Args {
-    /// Filter to sessions in this directory
+    /// Filter to sessions in this directory (prefix match).
     #[arg(short, long)]
     pub repo: Option<String>,
 
-    /// Maximum number of sessions to show
+    /// Maximum number of sessions to display.
     #[arg(short, long, default_value = "20")]
     pub limit: usize,
 
-    /// Output format (table, json)
+    /// Output format: "table" or "json".
     #[arg(short, long, default_value = "table")]
     pub format: String,
 }
 
+/// Executes the sessions command.
+///
+/// Lists sessions from the database, optionally filtered by
+/// working directory prefix.
 pub fn run(args: Args) -> Result<()> {
     let db = Database::open_default()?;
 
@@ -46,7 +55,7 @@ pub fn run(args: Args) -> Result<()> {
     match args.format.as_str() {
         "json" => {
             let json = serde_json::to_string_pretty(&sessions)?;
-            println!("{}", json);
+            println!("{json}");
         }
         _ => {
             println!(
@@ -65,7 +74,7 @@ pub fn run(args: Args) -> Result<()> {
                 let dir = session
                     .working_directory
                     .split('/')
-                    .last()
+                    .next_back()
                     .unwrap_or(&session.working_directory);
 
                 println!(

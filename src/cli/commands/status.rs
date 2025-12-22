@@ -1,4 +1,8 @@
-//! Status command - show current state
+//! Status command - show current Lore state.
+//!
+//! Displays an overview of the Lore database including the number
+//! of imported sessions, discovered session files, and recent
+//! session activity.
 
 use anyhow::Result;
 use colored::Colorize;
@@ -6,6 +10,10 @@ use colored::Colorize;
 use crate::capture::watchers::claude_code;
 use crate::storage::Database;
 
+/// Executes the status command.
+///
+/// Shows database statistics, available session sources, and
+/// recent sessions.
 pub fn run() -> Result<()> {
     println!("{}", "Lore".bold().cyan());
     println!("{}", "Reasoning history for code".dimmed());
@@ -25,8 +33,8 @@ pub fn run() -> Result<()> {
 
     println!();
     println!("{}", "Database:".bold());
-    println!("  Sessions imported: {}", session_count);
-    println!("  Messages stored:   {}", message_count);
+    println!("  Sessions imported: {session_count}");
+    println!("  Messages stored:   {message_count}");
 
     if session_count == 0 && !session_files.is_empty() {
         println!();
@@ -49,7 +57,7 @@ pub fn run() -> Result<()> {
             let ago_str = if ago < 1 {
                 "just now".to_string()
             } else if ago < 24 {
-                format!("{} hours ago", ago)
+                format!("{ago} hours ago")
             } else {
                 format!("{} days ago", ago / 24)
             };
@@ -58,7 +66,7 @@ pub fn run() -> Result<()> {
             let dir = session
                 .working_directory
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or(&session.working_directory);
 
             println!(

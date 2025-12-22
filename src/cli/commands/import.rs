@@ -1,4 +1,8 @@
-//! Import command - import sessions from Claude Code
+//! Import command - import sessions from AI coding tools.
+//!
+//! Discovers and imports session files from Claude Code into the
+//! Lore database. Tracks which files have been imported to avoid
+//! duplicates on subsequent runs.
 
 use anyhow::Result;
 use colored::Colorize;
@@ -6,17 +10,22 @@ use colored::Colorize;
 use crate::capture::watchers::claude_code;
 use crate::storage::Database;
 
+/// Arguments for the import command.
 #[derive(clap::Args)]
 pub struct Args {
-    /// Force re-import of already imported sessions
+    /// Force re-import of already imported sessions.
     #[arg(long)]
     pub force: bool,
 
-    /// Only show what would be imported (dry run)
+    /// Only show what would be imported without actually importing.
     #[arg(long)]
     pub dry_run: bool,
 }
 
+/// Executes the import command.
+///
+/// Scans for Claude Code session files, parses them, and stores
+/// sessions and messages in the database.
 pub fn run(args: Args) -> Result<()> {
     let db = Database::open_default()?;
 
@@ -69,7 +78,7 @@ pub fn run(args: Args) -> Result<()> {
                     let dir = session
                         .working_directory
                         .split('/')
-                        .last()
+                        .next_back()
                         .unwrap_or(&session.working_directory);
                     println!(
                         "  {} {} ({} messages, {})",
@@ -91,7 +100,7 @@ pub fn run(args: Args) -> Result<()> {
                     let dir = session
                         .working_directory
                         .split('/')
-                        .last()
+                        .next_back()
                         .unwrap_or(&session.working_directory);
 
                     println!(
@@ -117,8 +126,7 @@ pub fn run(args: Args) -> Result<()> {
         println!(
             "{}",
             format!(
-                "Dry run: would import {}, skip {}, {} errors",
-                imported, skipped, errors
+                "Dry run: would import {imported}, skip {skipped}, {errors} errors"
             )
             .bold()
         );
@@ -126,8 +134,7 @@ pub fn run(args: Args) -> Result<()> {
         println!(
             "{}",
             format!(
-                "Imported {}, skipped {}, {} errors",
-                imported, skipped, errors
+                "Imported {imported}, skipped {skipped}, {errors} errors"
             )
             .bold()
         );
