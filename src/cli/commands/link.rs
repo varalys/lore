@@ -3,24 +3,46 @@
 //! Creates associations between development sessions and the commits
 //! they produced. Links are stored in the database and can be queried
 //! by commit SHA to find related sessions.
+//!
+//! Supports both manual linking (specifying session IDs) and automatic
+//! linking based on time proximity and file overlap heuristics.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::Colorize;
+use std::path::Path;
 use uuid::Uuid;
 
-use crate::storage::{Database, LinkCreator, LinkType, SessionLink};
+use crate::config::Config;
+use crate::git::{calculate_link_confidence, get_commit_files, get_commit_info};
+use crate::storage::{extract_session_files, Database, LinkCreator, LinkType, SessionLink};
+
+/// Default time window in minutes for finding sessions near a commit.
+const DEFAULT_WINDOW_MINUTES: i64 = 30;
 
 /// Arguments for the link command.
 #[derive(clap::Args)]
 pub struct Args {
     /// Session IDs to link (prefix match, can specify multiple).
-    #[arg(required = true)]
+    /// Required unless --auto is specified.
     pub sessions: Vec<String>,
 
     /// Commit SHA to link to. Defaults to HEAD if not specified.
+    #[arg(long, default_value = "HEAD")]
+    pub commit: String,
+
+    /// Automatically find and link sessions based on time and file overlap.
     #[arg(long)]
-    pub commit: Option<String>,
+    pub auto: bool,
+
+    /// Minimum confidence score (0.0-1.0) for auto-linking.
+    /// Overrides the config value.
+    #[arg(long)]
+    pub threshold: Option<f64>,
+
+    /// Show what would be linked without actually creating links.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Executes the link command.
@@ -28,16 +50,23 @@ pub struct Args {
 /// Creates links between the specified sessions and a commit.
 /// Uses the current HEAD if no commit is specified.
 pub fn run(args: Args) -> Result<()> {
+    if args.auto {
+        run_auto_link(args)
+    } else {
+        run_manual_link(args)
+    }
+}
+
+/// Runs manual linking for explicitly specified session IDs.
+fn run_manual_link(args: Args) -> Result<()> {
+    if args.sessions.is_empty() {
+        anyhow::bail!("No sessions specified. Use --auto for automatic linking or provide session IDs.");
+    }
+
     let db = Database::open_default()?;
 
     // Resolve commit
-    let commit_sha = if let Some(ref sha) = args.commit {
-        sha.clone()
-    } else {
-        // Try to get HEAD from git
-        get_head_commit()?
-    };
-
+    let commit_sha = resolve_commit(&args.commit)?;
     let short_sha = &commit_sha[..8.min(commit_sha.len())];
     println!("Linking to commit {}", short_sha.yellow());
 
@@ -50,12 +79,22 @@ pub fn run(args: Args) -> Result<()> {
             .find(|s| s.id.to_string().starts_with(session_prefix))
             .context(format!("No session found matching '{session_prefix}'"))?;
 
+        if args.dry_run {
+            println!(
+                "  {} Would link session {} -> commit {}",
+                "[dry-run]".cyan(),
+                &session.id.to_string()[..8].cyan(),
+                short_sha
+            );
+            continue;
+        }
+
         let link = SessionLink {
             id: Uuid::new_v4(),
             session_id: session.id,
             link_type: LinkType::Commit,
             commit_sha: Some(commit_sha.clone()),
-            branch: None, // Could get from git
+            branch: None,
             remote: None,
             created_at: Utc::now(),
             created_by: LinkCreator::User,
@@ -65,7 +104,7 @@ pub fn run(args: Args) -> Result<()> {
         db.insert_link(&link)?;
 
         println!(
-            "  {} session {} → commit {}",
+            "  {} session {} -> commit {}",
             "Linked".green(),
             &session.id.to_string()[..8].cyan(),
             short_sha
@@ -75,14 +114,173 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-fn get_head_commit() -> Result<String> {
-    // Try to use git2 to get HEAD
+/// Runs automatic linking based on heuristics.
+fn run_auto_link(args: Args) -> Result<()> {
+    let db = Database::open_default()?;
+    let config = Config::load()?;
+
+    // Get threshold from args or config
+    let threshold = args.threshold.unwrap_or(config.auto_link_threshold);
+
+    // Get commit information
+    let cwd = std::env::current_dir()?;
+    let commit_info = get_commit_info(&cwd, &args.commit)?;
+    let commit_files = get_commit_files(&cwd, &args.commit)?;
+
+    let short_sha = &commit_info.sha[..8.min(commit_info.sha.len())];
+
+    println!("Auto-linking to commit {}", short_sha.yellow());
+    println!(
+        "  Commit: {} ({})",
+        commit_info.summary.dimmed(),
+        commit_info.timestamp.format("%Y-%m-%d %H:%M")
+    );
+    println!("  Files changed: {}", commit_files.len());
+    println!("  Threshold: {:.0}%", threshold * 100.0);
+    println!();
+
+    // Get working directory for filtering sessions
+    let repo_path = get_repo_root(&cwd)?;
+
+    // Find sessions active near the commit time
+    let candidates = db.find_sessions_near_commit_time(
+        commit_info.timestamp,
+        DEFAULT_WINDOW_MINUTES,
+        Some(&repo_path),
+    )?;
+
+    if candidates.is_empty() {
+        println!(
+            "{}",
+            "No sessions found within time window of commit.".yellow()
+        );
+        return Ok(());
+    }
+
+    println!("Found {} candidate session(s)", candidates.len());
+
+    // Score and filter sessions
+    let mut linked_count = 0;
+    let mut skipped_existing = 0;
+
+    for session in &candidates {
+        // Check if already linked
+        if db.link_exists(&session.id, &commit_info.sha)? {
+            skipped_existing += 1;
+            continue;
+        }
+
+        // Get session files
+        let messages = db.get_messages(&session.id)?;
+        let session_files = extract_session_files(&messages, &session.working_directory);
+
+        // Calculate time difference in minutes
+        let session_end = session.ended_at.unwrap_or_else(Utc::now);
+        let time_diff = (commit_info.timestamp - session_end).num_minutes().abs();
+
+        // Calculate confidence score
+        let commit_branch = commit_info.branch.as_deref().unwrap_or("unknown");
+        let confidence = calculate_link_confidence(
+            session.git_branch.as_deref(),
+            &session_files,
+            commit_branch,
+            &commit_files,
+            time_diff,
+        );
+
+        let session_short_id = &session.id.to_string()[..8];
+
+        if confidence >= threshold {
+            if args.dry_run {
+                println!(
+                    "  {} Would link {} (confidence: {:.0}%)",
+                    "[dry-run]".cyan(),
+                    session_short_id.cyan(),
+                    confidence * 100.0
+                );
+            } else {
+                // Create the link
+                let link = SessionLink {
+                    id: Uuid::new_v4(),
+                    session_id: session.id,
+                    link_type: LinkType::Commit,
+                    commit_sha: Some(commit_info.sha.clone()),
+                    branch: commit_info.branch.clone(),
+                    remote: None,
+                    created_at: Utc::now(),
+                    created_by: LinkCreator::Auto,
+                    confidence: Some(confidence),
+                };
+
+                db.insert_link(&link)?;
+
+                println!(
+                    "  {} {} -> {} (confidence: {:.0}%)",
+                    "Linked".green(),
+                    session_short_id.cyan(),
+                    short_sha,
+                    confidence * 100.0
+                );
+            }
+            linked_count += 1;
+        } else {
+            println!(
+                "  {} {} (confidence: {:.0}% < {:.0}%)",
+                "Skipped".dimmed(),
+                session_short_id.dimmed(),
+                confidence * 100.0,
+                threshold * 100.0
+            );
+        }
+    }
+
+    println!();
+    if args.dry_run {
+        println!(
+            "Dry run complete: would link {} session(s)",
+            linked_count.to_string().green()
+        );
+    } else {
+        println!(
+            "Linked {} session(s)",
+            linked_count.to_string().green()
+        );
+    }
+
+    if skipped_existing > 0 {
+        println!(
+            "Skipped {} already-linked session(s)",
+            skipped_existing.to_string().yellow()
+        );
+    }
+
+    Ok(())
+}
+
+/// Resolves a commit reference to a full SHA.
+fn resolve_commit(commit_ref: &str) -> Result<String> {
     let repo = git2::Repository::discover(".").context(
         "Not in a git repository. Use --commit to specify a commit SHA.",
     )?;
 
-    let head = repo.head().context("Could not get HEAD")?;
-    let commit = head.peel_to_commit().context("HEAD is not a commit")?;
+    let obj = repo
+        .revparse_single(commit_ref)
+        .with_context(|| format!("Could not resolve commit: {commit_ref}"))?;
+
+    let commit = obj
+        .peel_to_commit()
+        .with_context(|| format!("{commit_ref} is not a commit"))?;
 
     Ok(commit.id().to_string())
+}
+
+/// Gets the root path of the git repository.
+fn get_repo_root(path: &Path) -> Result<String> {
+    let repo = git2::Repository::discover(path).context("Not a git repository")?;
+
+    let workdir = repo
+        .workdir()
+        .context("Could not get repository working directory")?;
+
+    Ok(workdir.to_string_lossy().to_string())
 }

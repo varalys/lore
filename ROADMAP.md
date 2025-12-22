@@ -81,22 +81,22 @@ Complete the CLI commands that are currently stubs or incomplete.
 Improve the connection between sessions and git history.
 
 ### 2.1 Auto-linking Heuristics
-- [ ] Implement time-based session matching (sessions active near commit time)
-- [ ] Implement file-based session matching (sessions that touched committed files)
-- [ ] Implement confidence scoring algorithm
-- [ ] Add `lore link --auto` command
-- [ ] Add configurable auto-link threshold
+- [x] Implement time-based session matching (sessions active near commit time)
+- [x] Implement file-based session matching (sessions that touched committed files)
+- [x] Implement confidence scoring algorithm
+- [x] Add `lore link --auto` command
+- [x] Add configurable auto-link threshold
 
 ### 2.2 Git Hooks
-- [ ] Create post-commit hook template
-- [ ] Implement `lore hooks install` command
-- [ ] Implement `lore hooks uninstall` command
-- [ ] Add prepare-commit-msg hook for session references
+- [x] Create post-commit hook template
+- [x] Implement `lore hooks install` command
+- [x] Implement `lore hooks uninstall` command
+- [x] Add prepare-commit-msg hook for session references
 
 ### 2.3 Show by Commit
-- [ ] Enhance `lore show --commit <sha>` to show linked sessions
-- [ ] Support partial SHA matching
-- [ ] Support HEAD and other refs
+- [x] Enhance `lore show --commit <sha>` to show linked sessions
+- [x] Support partial SHA matching
+- [x] Support HEAD and other refs
 
 ---
 

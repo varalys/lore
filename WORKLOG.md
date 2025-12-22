@@ -10,7 +10,43 @@ This document tracks development progress in reverse chronological order. Each e
 
 ---
 
-## Entry 006 - 2024-12-22
+## Entry 007 - 2025-12-22
+
+### Session Focus
+Complete Phase 2: Git Integration
+
+### Completed
+- Implemented auto-linking heuristics with time and file-based matching (ROADMAP 2.1)
+- Added `lore link --auto` command with confidence scoring and threshold
+- Created git hooks (post-commit, prepare-commit-msg) with install/uninstall commands (ROADMAP 2.2)
+- Enhanced `lore show --commit` to support HEAD, branch names, and git refs (ROADMAP 2.3)
+
+### Files Changed
+- src/git/mod.rs (get_commit_info, get_commit_files, resolve_commit_ref)
+- src/storage/models.rs (extract_session_files for file-based matching)
+- src/storage/db.rs (find_sessions_near_commit_time, link_exists)
+- src/cli/commands/link.rs (--auto, --threshold, --dry-run flags)
+- src/cli/commands/hooks.rs (new - install/uninstall/status subcommands)
+- src/cli/commands/show.rs (git ref resolution, enhanced commit output)
+- src/cli/commands/mod.rs (added hooks module)
+- src/main.rs (added Hooks command)
+
+### Tests Added
+- 6 tests for confidence scoring in git module
+- 12 tests for file extraction from messages
+- 6 tests for auto-linking database functions
+- 11 tests for hooks installation/management
+- 6 tests for git ref resolution
+
+### Issues Encountered
+None.
+
+### Resume Point
+Phase 2 complete. Ready to begin Phase 3: Background Daemon (file watching, daemon process management).
+
+---
+
+## Entry 006 - 2025-12-22
 
 ### Session Focus
 Complete Phase 1: Core CLI Completion
@@ -47,7 +83,7 @@ Phase 1 complete. Ready to begin Phase 2: Git Integration (auto-linking, git hoo
 
 ---
 
-## Entry 005 - 2024-12-22
+## Entry 005 - 2025-12-22
 
 ### Session Focus
 Complete Phase 0: Foundation and Testing (0.3 CLI tests, 0.4 documentation)
@@ -92,7 +128,7 @@ Phase 0 complete. Ready to begin Phase 1: Core CLI Completion (status enhancemen
 
 ---
 
-## Entry 004 - 2024-12-22
+## Entry 004 - 2025-12-22
 
 ### Session Focus
 Fix all warnings and complete Phase 0.2: Claude Code Parser Tests
@@ -146,7 +182,7 @@ Continue with Phase 0.3: CLI Command Tests (integration tests for sessions, show
 
 ---
 
-## Entry 003 - 2024-12-22
+## Entry 003 - 2025-12-22
 
 ### Session Focus
 Phase 0.1: Storage Layer Tests
@@ -182,7 +218,7 @@ Continue with Phase 0.2: Claude Code Parser Tests. One item remains in 0.1 (conc
 
 ---
 
-## Entry 002 - 2024-12-22
+## Entry 002 - 2025-12-22
 
 ### Session Focus
 Project management infrastructure setup.
@@ -204,7 +240,7 @@ Ready to begin ROADMAP Phase 1 tasks. Next priority: implement unit tests for ex
 
 ---
 
-## Entry 001 - 2024-12-22
+## Entry 001 - 2025-12-22
 
 ### Session Focus
 Initial project scaffolding and getting the build working.
