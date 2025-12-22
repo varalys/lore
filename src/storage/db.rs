@@ -680,6 +680,106 @@ impl Database {
     pub fn db_path(&self) -> Option<std::path::PathBuf> {
         self.conn.path().map(std::path::PathBuf::from)
     }
+
+    // ==================== Auto-linking ====================
+
+    /// Finds sessions that were active around a commit time.
+    ///
+    /// A session is considered active if the commit time falls within the
+    /// window before and after the session's time range (started_at to ended_at).
+    ///
+    /// # Arguments
+    ///
+    /// * `commit_time` - The timestamp of the commit
+    /// * `window_minutes` - The window in minutes before/after the session
+    /// * `working_dir` - Optional working directory filter (prefix match)
+    ///
+    /// # Returns
+    ///
+    /// Sessions that were active near the commit time, ordered by proximity.
+    pub fn find_sessions_near_commit_time(
+        &self,
+        commit_time: chrono::DateTime<chrono::Utc>,
+        window_minutes: i64,
+        working_dir: Option<&str>,
+    ) -> Result<Vec<Session>> {
+        // Convert commit time to RFC3339 for SQLite comparison
+        let commit_time_str = commit_time.to_rfc3339();
+
+        // Calculate the time window boundaries
+        let window = chrono::Duration::minutes(window_minutes);
+        let window_start = (commit_time - window).to_rfc3339();
+        let window_end = (commit_time + window).to_rfc3339();
+
+        let sql = if working_dir.is_some() {
+            r#"
+            SELECT id, tool, tool_version, started_at, ended_at, model,
+                   working_directory, git_branch, source_path, message_count
+            FROM sessions
+            WHERE working_directory LIKE ?1
+              AND (
+                  -- Session started before or during the window
+                  (started_at <= ?3)
+                  AND
+                  -- Session ended after or during the window (or is still ongoing)
+                  (ended_at IS NULL OR ended_at >= ?2)
+              )
+            ORDER BY
+              -- Order by how close the session end (or start) is to commit time
+              ABS(julianday(COALESCE(ended_at, started_at)) - julianday(?4))
+            "#
+        } else {
+            r#"
+            SELECT id, tool, tool_version, started_at, ended_at, model,
+                   working_directory, git_branch, source_path, message_count
+            FROM sessions
+            WHERE
+              -- Session started before or during the window
+              (started_at <= ?2)
+              AND
+              -- Session ended after or during the window (or is still ongoing)
+              (ended_at IS NULL OR ended_at >= ?1)
+            ORDER BY
+              -- Order by how close the session end (or start) is to commit time
+              ABS(julianday(COALESCE(ended_at, started_at)) - julianday(?3))
+            "#
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+
+        let rows = if let Some(wd) = working_dir {
+            stmt.query_map(
+                params![
+                    format!("{wd}%"),
+                    window_start,
+                    window_end,
+                    commit_time_str
+                ],
+                Self::row_to_session,
+            )?
+        } else {
+            stmt.query_map(
+                params![window_start, window_end, commit_time_str],
+                Self::row_to_session,
+            )?
+        };
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to find sessions near commit time")
+    }
+
+    /// Checks if a link already exists between a session and commit.
+    ///
+    /// Used to avoid creating duplicate links during auto-linking.
+    pub fn link_exists(&self, session_id: &Uuid, commit_sha: &str) -> Result<bool> {
+        let pattern = format!("{commit_sha}%");
+        let count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM session_links WHERE session_id = ?1 AND commit_sha LIKE ?2",
+            params![session_id.to_string(), pattern],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
 }
 
 #[cfg(test)]
@@ -1768,5 +1868,176 @@ mod tests {
             .get_links_by_session(&session1.id)
             .expect("Failed to get links");
         assert_eq!(links.len(), 1, "Link should be preserved");
+    }
+
+    // ==================== Auto-linking Tests ====================
+
+    #[test]
+    fn test_find_sessions_near_commit_time_basic() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create a session that ended 10 minutes ago
+        let mut session = create_test_session(
+            "claude-code",
+            "/home/user/project",
+            now - Duration::hours(1),
+            None,
+        );
+        session.ended_at = Some(now - Duration::minutes(10));
+
+        db.insert_session(&session).expect("insert session");
+
+        // Find sessions near "now" with a 30 minute window
+        let found = db
+            .find_sessions_near_commit_time(now, 30, None)
+            .expect("find sessions");
+
+        assert_eq!(found.len(), 1, "Should find session within window");
+        assert_eq!(found[0].id, session.id);
+    }
+
+    #[test]
+    fn test_find_sessions_near_commit_time_outside_window() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create a session that ended 2 hours ago
+        let mut session = create_test_session(
+            "claude-code",
+            "/project",
+            now - Duration::hours(3),
+            None,
+        );
+        session.ended_at = Some(now - Duration::hours(2));
+
+        db.insert_session(&session).expect("insert session");
+
+        // Find sessions near "now" with a 30 minute window
+        let found = db
+            .find_sessions_near_commit_time(now, 30, None)
+            .expect("find sessions");
+
+        assert!(found.is_empty(), "Should not find session outside window");
+    }
+
+    #[test]
+    fn test_find_sessions_near_commit_time_with_working_dir() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create sessions in different directories
+        let mut session1 = create_test_session(
+            "claude-code",
+            "/home/user/project-a",
+            now - Duration::minutes(30),
+            None,
+        );
+        session1.ended_at = Some(now - Duration::minutes(5));
+
+        let mut session2 = create_test_session(
+            "claude-code",
+            "/home/user/project-b",
+            now - Duration::minutes(30),
+            None,
+        );
+        session2.ended_at = Some(now - Duration::minutes(5));
+
+        db.insert_session(&session1).expect("insert session1");
+        db.insert_session(&session2).expect("insert session2");
+
+        // Find sessions near "now" filtering by project-a
+        let found = db
+            .find_sessions_near_commit_time(now, 30, Some("/home/user/project-a"))
+            .expect("find sessions");
+
+        assert_eq!(found.len(), 1, "Should find only session in project-a");
+        assert_eq!(found[0].id, session1.id);
+    }
+
+    #[test]
+    fn test_find_sessions_near_commit_time_ongoing_session() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create an ongoing session (no ended_at)
+        let session = create_test_session(
+            "claude-code",
+            "/project",
+            now - Duration::minutes(20),
+            None,
+        );
+        // ended_at is None by default
+
+        db.insert_session(&session).expect("insert session");
+
+        // Find sessions near "now"
+        let found = db
+            .find_sessions_near_commit_time(now, 30, None)
+            .expect("find sessions");
+
+        assert_eq!(found.len(), 1, "Should find ongoing session");
+        assert_eq!(found[0].id, session.id);
+    }
+
+    #[test]
+    fn test_link_exists_true() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let link = create_test_link(session.id, Some("abc123def456"), LinkType::Commit);
+        db.insert_link(&link).expect("insert link");
+
+        // Check with full SHA
+        assert!(
+            db.link_exists(&session.id, "abc123def456").expect("check exists"),
+            "Should find link with full SHA"
+        );
+
+        // Check with partial SHA
+        assert!(
+            db.link_exists(&session.id, "abc123").expect("check exists"),
+            "Should find link with partial SHA"
+        );
+    }
+
+    #[test]
+    fn test_link_exists_false() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // No links created
+        assert!(
+            !db.link_exists(&session.id, "abc123").expect("check exists"),
+            "Should not find non-existent link"
+        );
+    }
+
+    #[test]
+    fn test_link_exists_different_session() {
+        let (db, _dir) = create_test_db();
+
+        let session1 = create_test_session("claude-code", "/project1", Utc::now(), None);
+        let session2 = create_test_session("claude-code", "/project2", Utc::now(), None);
+
+        db.insert_session(&session1).expect("insert session1");
+        db.insert_session(&session2).expect("insert session2");
+
+        let link = create_test_link(session1.id, Some("abc123"), LinkType::Commit);
+        db.insert_link(&link).expect("insert link");
+
+        // Link exists for session1 but not session2
+        assert!(
+            db.link_exists(&session1.id, "abc123").expect("check"),
+            "Should find link for session1"
+        );
+        assert!(
+            !db.link_exists(&session2.id, "abc123").expect("check"),
+            "Should not find link for session2"
+        );
     }
 }

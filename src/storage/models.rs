@@ -288,3 +288,389 @@ pub struct Repository {
     /// When last session was recorded
     pub last_session_at: Option<DateTime<Utc>>,
 }
+
+/// Extracts file paths mentioned in a list of messages.
+///
+/// Parses tool_use blocks to find file paths from tools like Read, Edit, Write,
+/// Glob, and Bash commands. Returns unique file paths that were referenced.
+///
+/// # Arguments
+///
+/// * `messages` - The messages to extract file paths from
+/// * `working_directory` - The session's working directory, used to convert
+///   absolute paths to relative paths for comparison with git files
+///
+/// # Returns
+///
+/// A vector of unique file paths (relative to the working directory when possible).
+pub fn extract_session_files(messages: &[Message], working_directory: &str) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let mut files = HashSet::new();
+
+    for message in messages {
+        if let MessageContent::Blocks(blocks) = &message.content {
+            for block in blocks {
+                if let ContentBlock::ToolUse { name, input, .. } = block {
+                    extract_files_from_tool_use(name, input, working_directory, &mut files);
+                }
+            }
+        }
+    }
+
+    files.into_iter().collect()
+}
+
+/// Extracts file paths from a single tool_use block.
+fn extract_files_from_tool_use(
+    tool_name: &str,
+    input: &serde_json::Value,
+    working_directory: &str,
+    files: &mut std::collections::HashSet<String>,
+) {
+    match tool_name {
+        "Read" | "Write" | "Edit" => {
+            // These tools have a file_path parameter
+            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+                if let Some(rel_path) = make_relative(path, working_directory) {
+                    files.insert(rel_path);
+                }
+            }
+        }
+        "Glob" => {
+            // Glob has a path parameter for the directory to search
+            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                if let Some(rel_path) = make_relative(path, working_directory) {
+                    files.insert(rel_path);
+                }
+            }
+        }
+        "Grep" => {
+            // Grep has a path parameter
+            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                if let Some(rel_path) = make_relative(path, working_directory) {
+                    files.insert(rel_path);
+                }
+            }
+        }
+        "Bash" => {
+            // Try to extract file paths from bash commands
+            if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+                extract_files_from_bash_command(cmd, working_directory, files);
+            }
+        }
+        "NotebookEdit" => {
+            // NotebookEdit has a notebook_path parameter
+            if let Some(path) = input.get("notebook_path").and_then(|v| v.as_str()) {
+                if let Some(rel_path) = make_relative(path, working_directory) {
+                    files.insert(rel_path);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extracts file paths from a bash command string.
+///
+/// This is a best-effort extraction that looks for common patterns.
+fn extract_files_from_bash_command(
+    cmd: &str,
+    working_directory: &str,
+    files: &mut std::collections::HashSet<String>,
+) {
+    // Common file-related commands
+    let file_commands = [
+        "cat", "less", "more", "head", "tail", "vim", "nano", "code",
+        "cp", "mv", "rm", "touch", "mkdir", "chmod", "chown",
+    ];
+
+    // Split by common separators
+    for part in cmd.split(&['|', ';', '&', '\n', ' '][..]) {
+        let part = part.trim();
+
+        // Check if this looks like a file path
+        if part.starts_with('/') || part.starts_with("./") || part.starts_with("../") {
+            // Skip if it's a command flag
+            if !part.starts_with('-') {
+                if let Some(rel_path) = make_relative(part, working_directory) {
+                    // Only add if it looks like a reasonable file path
+                    if !rel_path.is_empty() && !rel_path.contains('$') {
+                        files.insert(rel_path);
+                    }
+                }
+            }
+        }
+
+        // Check for file command patterns like "cat file.txt"
+        for file_cmd in &file_commands {
+            if part.starts_with(file_cmd) {
+                let args = part.strip_prefix(file_cmd).unwrap_or("").trim();
+                for arg in args.split_whitespace() {
+                    // Skip flags
+                    if arg.starts_with('-') {
+                        continue;
+                    }
+                    // This might be a file path
+                    if let Some(rel_path) = make_relative(arg, working_directory) {
+                        if !rel_path.is_empty() && !rel_path.contains('$') {
+                            files.insert(rel_path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Converts an absolute path to a path relative to the working directory.
+///
+/// Returns None if the path cannot be made relative (e.g., not under working dir).
+fn make_relative(path: &str, working_directory: &str) -> Option<String> {
+    // Handle relative paths - they're already relative
+    if !path.starts_with('/') {
+        // Clean up "./" prefix if present
+        let cleaned = path.strip_prefix("./").unwrap_or(path);
+        if !cleaned.is_empty() {
+            return Some(cleaned.to_string());
+        }
+        return None;
+    }
+
+    // For absolute paths, try to make them relative to working_directory
+    let wd = working_directory.trim_end_matches('/');
+
+    if let Some(rel) = path.strip_prefix(wd) {
+        let rel = rel.trim_start_matches('/');
+        if !rel.is_empty() {
+            return Some(rel.to_string());
+        }
+    }
+
+    // If we can't make it relative, still include it as-is
+    // (git may use absolute paths in some cases)
+    Some(path.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_session_files_read_tool() {
+        let messages = vec![Message {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            parent_id: None,
+            index: 0,
+            timestamp: Utc::now(),
+            role: MessageRole::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "tool_1".to_string(),
+                name: "Read".to_string(),
+                input: serde_json::json!({"file_path": "/home/user/project/src/main.rs"}),
+            }]),
+            model: None,
+            git_branch: None,
+            cwd: None,
+        }];
+
+        let files = extract_session_files(&messages, "/home/user/project");
+        assert!(files.contains(&"src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_files_edit_tool() {
+        let messages = vec![Message {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            parent_id: None,
+            index: 0,
+            timestamp: Utc::now(),
+            role: MessageRole::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "tool_1".to_string(),
+                name: "Edit".to_string(),
+                input: serde_json::json!({
+                    "file_path": "/home/user/project/src/lib.rs",
+                    "old_string": "old",
+                    "new_string": "new"
+                }),
+            }]),
+            model: None,
+            git_branch: None,
+            cwd: None,
+        }];
+
+        let files = extract_session_files(&messages, "/home/user/project");
+        assert!(files.contains(&"src/lib.rs".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_files_multiple_tools() {
+        let messages = vec![Message {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            parent_id: None,
+            index: 0,
+            timestamp: Utc::now(),
+            role: MessageRole::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::ToolUse {
+                    id: "tool_1".to_string(),
+                    name: "Read".to_string(),
+                    input: serde_json::json!({"file_path": "/project/a.rs"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "tool_2".to_string(),
+                    name: "Write".to_string(),
+                    input: serde_json::json!({"file_path": "/project/b.rs", "content": "..."}),
+                },
+                ContentBlock::ToolUse {
+                    id: "tool_3".to_string(),
+                    name: "Edit".to_string(),
+                    input: serde_json::json!({
+                        "file_path": "/project/c.rs",
+                        "old_string": "x",
+                        "new_string": "y"
+                    }),
+                },
+            ]),
+            model: None,
+            git_branch: None,
+            cwd: None,
+        }];
+
+        let files = extract_session_files(&messages, "/project");
+        assert_eq!(files.len(), 3);
+        assert!(files.contains(&"a.rs".to_string()));
+        assert!(files.contains(&"b.rs".to_string()));
+        assert!(files.contains(&"c.rs".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_files_deduplicates() {
+        let messages = vec![
+            Message {
+                id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                parent_id: None,
+                index: 0,
+                timestamp: Utc::now(),
+                role: MessageRole::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "tool_1".to_string(),
+                    name: "Read".to_string(),
+                    input: serde_json::json!({"file_path": "/project/src/main.rs"}),
+                }]),
+                model: None,
+                git_branch: None,
+                cwd: None,
+            },
+            Message {
+                id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                parent_id: None,
+                index: 1,
+                timestamp: Utc::now(),
+                role: MessageRole::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "tool_2".to_string(),
+                    name: "Edit".to_string(),
+                    input: serde_json::json!({
+                        "file_path": "/project/src/main.rs",
+                        "old_string": "a",
+                        "new_string": "b"
+                    }),
+                }]),
+                model: None,
+                git_branch: None,
+                cwd: None,
+            },
+        ];
+
+        let files = extract_session_files(&messages, "/project");
+        assert_eq!(files.len(), 1);
+        assert!(files.contains(&"src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_files_relative_paths() {
+        let messages = vec![Message {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            parent_id: None,
+            index: 0,
+            timestamp: Utc::now(),
+            role: MessageRole::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "tool_1".to_string(),
+                name: "Read".to_string(),
+                input: serde_json::json!({"file_path": "./src/main.rs"}),
+            }]),
+            model: None,
+            git_branch: None,
+            cwd: None,
+        }];
+
+        let files = extract_session_files(&messages, "/project");
+        assert!(files.contains(&"src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_files_empty_messages() {
+        let messages: Vec<Message> = vec![];
+        let files = extract_session_files(&messages, "/project");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_extract_session_files_text_only_messages() {
+        let messages = vec![Message {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            parent_id: None,
+            index: 0,
+            timestamp: Utc::now(),
+            role: MessageRole::User,
+            content: MessageContent::Text("Please fix the bug".to_string()),
+            model: None,
+            git_branch: None,
+            cwd: None,
+        }];
+
+        let files = extract_session_files(&messages, "/project");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_make_relative_absolute_path() {
+        let result = make_relative("/home/user/project/src/main.rs", "/home/user/project");
+        assert_eq!(result, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_make_relative_with_trailing_slash() {
+        let result = make_relative("/home/user/project/src/main.rs", "/home/user/project/");
+        assert_eq!(result, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_make_relative_already_relative() {
+        let result = make_relative("src/main.rs", "/home/user/project");
+        assert_eq!(result, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_make_relative_dotslash_prefix() {
+        let result = make_relative("./src/main.rs", "/home/user/project");
+        assert_eq!(result, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_make_relative_outside_working_dir() {
+        let result = make_relative("/other/path/file.rs", "/home/user/project");
+        // Should return the absolute path as-is
+        assert_eq!(result, Some("/other/path/file.rs".to_string()));
+    }
+}

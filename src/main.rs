@@ -48,6 +48,9 @@ enum Commands {
 
     /// Import sessions from Claude Code (temporary command for development)
     Import(commands::import::Args),
+
+    /// Manage git hooks for automatic session linking
+    Hooks(commands::hooks::Args),
 }
 
 fn main() -> Result<()> {
@@ -74,5 +77,6 @@ fn main() -> Result<()> {
         Commands::Search(args) => commands::search::run(args),
         Commands::Config(args) => commands::config::run(args),
         Commands::Import(args) => commands::import::run(args),
+        Commands::Hooks(args) => commands::hooks::run(args),
     }
 }

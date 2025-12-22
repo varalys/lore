@@ -6,6 +6,9 @@
 /// Configuration viewing and management.
 pub mod config;
 
+/// Git hooks management (install, uninstall, status).
+pub mod hooks;
+
 /// Import sessions from AI coding tools.
 pub mod import;
 
