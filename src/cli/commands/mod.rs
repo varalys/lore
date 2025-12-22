@@ -12,7 +12,7 @@ pub mod import;
 /// Link sessions to git commits.
 pub mod link;
 
-/// Search session content (not yet implemented).
+/// Search session content using FTS5 full-text search.
 pub mod search;
 
 /// List and filter sessions.

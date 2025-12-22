@@ -2,11 +2,13 @@
 //!
 //! Removes associations between sessions and commits. Can unlink
 //! a session from all commits or from a specific commit.
-//!
-//! Note: Unlink functionality is not yet implemented.
 
-use anyhow::Result;
+use std::io::{self, Write};
+
+use anyhow::{bail, Result};
 use colored::Colorize;
+
+use crate::storage::Database;
 
 /// Arguments for the unlink command.
 #[derive(clap::Args)]
@@ -17,17 +19,160 @@ pub struct Args {
     /// Specific commit SHA to unlink from. If not provided, removes all links.
     #[arg(long)]
     pub commit: Option<String>,
+
+    /// Skip confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 /// Executes the unlink command.
 ///
-/// Note: Unlink functionality is not yet implemented.
+/// Removes links between a session and commits. If --commit is specified,
+/// only removes the link to that specific commit. Otherwise, removes all
+/// links for the session.
 pub fn run(args: Args) -> Result<()> {
-    // TODO: Implement unlinking
-    println!(
-        "{}",
-        "Unlink command not yet implemented".yellow()
-    );
-    println!("Would unlink session {} from commit {:?}", args.session, args.commit);
+    let db = Database::open_default()?;
+
+    // Find session by prefix
+    let all_sessions = db.list_sessions(1000, None)?;
+    let matching: Vec<_> = all_sessions
+        .iter()
+        .filter(|s| s.id.to_string().starts_with(&args.session))
+        .collect();
+
+    if matching.is_empty() {
+        bail!("No session found matching '{}'", args.session);
+    }
+
+    if matching.len() > 1 {
+        println!(
+            "{}",
+            "Multiple sessions match that prefix:".yellow()
+        );
+        for s in &matching {
+            let id_short = &s.id.to_string()[..8];
+            println!("  {} - {}", id_short.cyan(), s.started_at.format("%Y-%m-%d %H:%M"));
+        }
+        bail!("Please use a more specific prefix");
+    }
+
+    let session = matching[0];
+    let session_short = &session.id.to_string()[..8];
+
+    // Get existing links for the session
+    let links = db.get_links_by_session(&session.id)?;
+
+    if links.is_empty() {
+        println!(
+            "{}",
+            format!("Session {session_short} has no links to remove").dimmed()
+        );
+        return Ok(());
+    }
+
+    // Determine which links to remove
+    if let Some(ref commit_sha) = args.commit {
+        // Remove only the link to the specific commit
+        let matching_links: Vec<_> = links
+            .iter()
+            .filter(|l| {
+                l.commit_sha
+                    .as_ref()
+                    .is_some_and(|sha| sha.starts_with(commit_sha))
+            })
+            .collect();
+
+        if matching_links.is_empty() {
+            bail!("No link found between session {session_short} and commit {commit_sha}");
+        }
+
+        let link = matching_links[0];
+        let link_sha = link.commit_sha.as_ref().map_or("unknown", |s| s.as_str());
+        let short_sha = &link_sha[..8.min(link_sha.len())];
+
+        // Confirm unless --yes
+        if !args.yes {
+            print!(
+                "Unlink session {} from commit {}? [y/N] ",
+                session_short.cyan(),
+                short_sha.yellow()
+            );
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("{}", "Cancelled".dimmed());
+                return Ok(());
+            }
+        }
+
+        // Delete the link
+        let deleted = db.delete_link_by_session_and_commit(&session.id, commit_sha)?;
+
+        if deleted {
+            println!(
+                "{} session {} from commit {}",
+                "Unlinked".green(),
+                session_short.cyan(),
+                short_sha
+            );
+        } else {
+            bail!("Failed to delete link");
+        }
+    } else {
+        // Remove all links for the session
+        let commit_count = links.len();
+
+        // Confirm unless --yes
+        if !args.yes {
+            println!(
+                "This will unlink session {} from:",
+                session_short.cyan()
+            );
+            for link in &links {
+                if let Some(ref sha) = link.commit_sha {
+                    let short_sha = &sha[..8.min(sha.len())];
+                    println!("  - commit {}", short_sha.yellow());
+                }
+            }
+            print!("Continue? [y/N] ");
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("{}", "Cancelled".dimmed());
+                return Ok(());
+            }
+        }
+
+        // Delete all links
+        let deleted_count = db.delete_links_by_session(&session.id)?;
+
+        if deleted_count == 1 {
+            let sha = links[0]
+                .commit_sha
+                .as_ref()
+                .map_or("unknown", |s| s.as_str());
+            let short_sha = &sha[..8.min(sha.len())];
+            println!(
+                "{} session {} from commit {}",
+                "Unlinked".green(),
+                session_short.cyan(),
+                short_sha
+            );
+        } else {
+            println!(
+                "{} session {} from {} commits",
+                "Unlinked".green(),
+                session_short.cyan(),
+                commit_count
+            );
+        }
+    }
+
     Ok(())
 }

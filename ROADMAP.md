@@ -49,30 +49,30 @@ Before adding new features, establish a solid testing foundation for existing co
 Complete the CLI commands that are currently stubs or incomplete.
 
 ### 1.1 Status Command Enhancement
-- [ ] Show daemon status (running/stopped) placeholder
-- [ ] Show active watchers
-- [ ] Show recent session summary
-- [ ] Show sessions linked to HEAD commit
-- [ ] Display storage statistics
+- [x] Show daemon status (running/stopped) placeholder
+- [x] Show active watchers
+- [x] Show recent session summary
+- [x] Show sessions linked to HEAD commit
+- [x] Display storage statistics
 
 ### 1.2 Search Command Implementation
-- [ ] Design search index strategy (SQLite FTS5 vs separate index)
-- [ ] Implement full-text indexing of message content
-- [ ] Implement `lore search <query>` basic functionality
-- [ ] Add filtering options (--repo, --since, --tool)
-- [ ] Add result formatting and pagination
+- [x] Design search index strategy (SQLite FTS5 vs separate index)
+- [x] Implement full-text indexing of message content
+- [x] Implement `lore search <query>` basic functionality
+- [x] Add filtering options (--repo, --since, --role)
+- [x] Add result formatting and pagination
 
 ### 1.3 Unlink Command Implementation
-- [ ] Implement session-commit unlinking
-- [ ] Add confirmation prompt for destructive action
-- [ ] Support unlinking by session ID or commit SHA
+- [x] Implement session-commit unlinking
+- [x] Add confirmation prompt for destructive action
+- [x] Support unlinking by session ID or commit SHA
 
 ### 1.4 Config Command Enhancement
-- [ ] Design configuration file format (YAML)
-- [ ] Implement config file loading and saving
-- [ ] Add `lore config set` command
-- [ ] Add `lore config get` command
-- [ ] Support both global and repo-level config
+- [x] Design configuration file format (YAML)
+- [x] Implement config file loading and saving
+- [x] Add `lore config set` command
+- [x] Add `lore config get` command
+- [ ] Support both global and repo-level config (deferred to future)
 
 ---
 

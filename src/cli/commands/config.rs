@@ -3,10 +3,11 @@
 //! Provides subcommands to show, get, and set configuration values.
 //! Configuration is stored in `~/.lore/config.yaml`.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Subcommand;
 use colored::Colorize;
 
+use crate::config::Config;
 use crate::storage::db::default_db_path;
 
 /// Arguments for the config command.
@@ -45,46 +46,70 @@ pub fn run(args: Args) -> Result<()> {
     }
 }
 
+/// Displays all configuration values.
 fn show_config() -> Result<()> {
+    let config = Config::load()?;
+
     println!("{}", "Lore Configuration".bold());
     println!();
 
     let db_path = default_db_path()?;
-    println!("  {}  {}", "Database:".dimmed(), db_path.display());
+    let config_path = Config::config_path()?;
 
-    let claude_dir = dirs::home_dir()
-        .map(|h| h.join(".claude"))
-        .unwrap_or_default();
-    println!(
-        "  {}  {}",
-        "Claude Code:".dimmed(),
-        claude_dir.display()
-    );
+    println!("  {}     {}", "Database:".dimmed(), db_path.display());
+    println!("  {}  {}", "Config file:".dimmed(), config_path.display());
 
     println!();
-    println!("{}", "Watchers:".bold());
-    println!("  {} claude-code", "✓".green());
-    println!("  {} cursor (not implemented)", "○".dimmed());
-    println!("  {} copilot (not implemented)", "○".dimmed());
+    println!("{}:", "Settings".bold());
+    println!(
+        "  {:<22} {}",
+        "watchers:".dimmed(),
+        config.watchers.join(",")
+    );
+    println!(
+        "  {:<22} {}",
+        "auto_link:".dimmed(),
+        config.auto_link
+    );
+    println!(
+        "  {:<22} {}",
+        "auto_link_threshold:".dimmed(),
+        config.auto_link_threshold
+    );
+    println!(
+        "  {:<22} {}",
+        "commit_footer:".dimmed(),
+        config.commit_footer
+    );
 
     Ok(())
 }
 
+/// Gets and prints a specific configuration value.
 fn get_config(key: &str) -> Result<()> {
-    // TODO: Implement config storage
-    println!(
-        "{}",
-        format!("Config key '{key}' not found").yellow()
-    );
+    let config = Config::load()?;
+
+    match config.get(key) {
+        Some(value) => {
+            println!("{value}");
+        }
+        None => {
+            let valid_keys = Config::valid_keys().join(", ");
+            bail!("Unknown configuration key: '{key}'. Valid keys are: {valid_keys}");
+        }
+    }
+
     Ok(())
 }
 
+/// Sets a configuration value and persists it.
 fn set_config(key: &str, value: &str) -> Result<()> {
-    // TODO: Implement config storage
-    println!(
-        "{}",
-        "Config storage not yet implemented".yellow()
-    );
-    println!("Would set {key} = {value}");
+    let mut config = Config::load()?;
+
+    config.set(key, value)?;
+    config.save()?;
+
+    println!("Set {key} = {value}");
+
     Ok(())
 }

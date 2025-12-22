@@ -10,6 +10,43 @@ This document tracks development progress in reverse chronological order. Each e
 
 ---
 
+## Entry 006 - 2024-12-22
+
+### Session Focus
+Complete Phase 1: Core CLI Completion
+
+### Completed
+- Enhanced status command with daemon placeholder, watchers, HEAD links, storage stats (ROADMAP 1.1)
+- Implemented full-text search using SQLite FTS5 with filtering options (ROADMAP 1.2)
+- Implemented unlink command with confirmation prompts (ROADMAP 1.3)
+- Implemented config command with YAML persistence (ROADMAP 1.4)
+
+### Files Changed
+- src/cli/commands/status.rs (complete rewrite with new sections)
+- src/cli/commands/search.rs (full implementation with FTS5)
+- src/cli/commands/unlink.rs (full implementation)
+- src/cli/commands/config.rs (full implementation)
+- src/cli/commands/mod.rs (updated docs)
+- src/storage/db.rs (FTS5 table, search, delete methods)
+- src/storage/models.rs (SearchResult struct)
+- src/config/mod.rs (load/save/get/set implementation)
+- src/git/mod.rs (removed dead_code attr)
+- Cargo.toml (added serde_yaml)
+
+### Tests Added
+- 6 tests for status command (format_file_size)
+- 14 tests for search functionality (FTS5, filtering, date parsing)
+- 10 tests for unlink/delete methods
+- 23 tests for config module
+
+### Issues Encountered
+None.
+
+### Resume Point
+Phase 1 complete. Ready to begin Phase 2: Git Integration (auto-linking, git hooks, show by commit).
+
+---
+
 ## Entry 005 - 2024-12-22
 
 ### Session Focus
