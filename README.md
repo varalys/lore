@@ -11,6 +11,41 @@ When you use AI coding tools like Claude Code or Aider, the conversation history
 - **Knowledge transfer**: When someone leaves a project, their AI conversations stay with the code
 - **Learning**: Study how problems were solved by browsing linked sessions
 
+## How It Works
+
+Lore reads session data from AI coding tools, stores it in a local SQLite database, and creates links between sessions and git commits.
+
+### Capture
+
+Each AI tool stores conversation data in its own format and location. Lore includes parsers for each supported tool:
+
+- **Claude Code**: JSONL files in `~/.claude/projects/<hash>/sessions/`
+- **Aider**: Markdown files (`.aider.chat.history.md`) in project directories
+- **Continue.dev**: JSON files in `~/.continue/sessions/`
+- **Cline**: JSON in VS Code's extension storage
+
+You can import existing sessions with `lore import`, or run `lore daemon start` to watch for new sessions in real-time.
+
+### Storage
+
+Sessions and messages are stored in a SQLite database at `~/.lore/lore.db`. The schema includes:
+
+- **sessions**: ID, tool, timestamps, working directory, message count
+- **messages**: ID, session ID, role (user/assistant), content, timestamp
+- **session_links**: Maps session IDs to git commit SHAs
+
+Full-text search uses SQLite FTS5 to index message content.
+
+### Linking
+
+Links connect sessions to commits. You can create them:
+
+- **Manually**: `lore link <session-id> --commit <sha>`
+- **Automatically**: `lore link --auto` matches sessions to commits by timestamp and file overlap
+- **Via hooks**: `lore hooks install` adds a post-commit hook that prompts for linking
+
+Links are bidirectional: given a session, find its commits; given a commit, find its sessions.
+
 ## Installation
 
 ```bash
@@ -129,16 +164,16 @@ lore show abc123 --format markdown
 lore status --format json
 ```
 
-## Storage
-
-All data is stored locally:
+## Data Location
 
 ```
 ~/.lore/
-├── lore.db       # SQLite database with sessions, messages, and links
+├── lore.db       # SQLite database
 ├── config.yaml   # Configuration
 └── logs/         # Daemon logs
 ```
+
+All data stays on your machine. There is no cloud sync or external service.
 
 ## License
 
