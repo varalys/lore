@@ -2,7 +2,14 @@
 
 Lore captures AI coding sessions and links them to git commits.
 
-Git tracks what changed. Lore tracks the reasoning behind those changes.
+When you use AI coding tools like Claude Code or Aider, the conversation history contains valuable context: the prompts you wrote, the approaches you tried, the decisions you made. Git captures the final code, but not this reasoning. Lore preserves both.
+
+## Use Cases
+
+- **Code review**: See the AI conversation that produced a PR, not just the diff
+- **Debugging**: Understand why code was written a certain way by reading the original discussion
+- **Knowledge transfer**: When someone leaves a project, their AI conversations stay with the code
+- **Learning**: Study how problems were solved by browsing linked sessions
 
 ## Installation
 
@@ -13,7 +20,7 @@ cargo install --path .
 ## Quick Start
 
 ```bash
-# Import sessions from AI coding tools
+# Import existing sessions from AI coding tools
 lore import
 
 # List sessions
@@ -22,17 +29,30 @@ lore sessions
 # View a session
 lore show abc123
 
-# Link a session to HEAD
+# Link a session to the current commit
 lore link abc123
 
-# View sessions linked to a commit
+# Later, view what sessions informed a commit
 lore show --commit HEAD
+```
 
-# Search sessions
-lore search "authentication"
+## Example Workflow
 
-# Start background daemon
-lore daemon start
+```bash
+# You're reviewing a PR and want to understand a change
+$ git log --oneline -1
+a1b2c3d feat: add rate limiting to API
+
+$ lore show --commit a1b2c3d
+Sessions linked to commit a1b2c3d:
+
+  Session: 7f3a2b1
+  Tool: claude-code
+  Duration: 45 minutes
+  Messages: 23
+
+# View the full conversation
+$ lore show 7f3a2b1
 ```
 
 ## Commands
@@ -40,22 +60,17 @@ lore daemon start
 | Command | Description |
 |---------|-------------|
 | `lore status` | Show daemon status, watchers, and recent sessions |
-| `lore sessions` | List sessions |
+| `lore sessions` | List sessions (supports `--repo`, `--limit`, `--format`) |
 | `lore show <id>` | View session details |
 | `lore show --commit <ref>` | View sessions linked to a commit |
 | `lore import` | Import sessions from AI tools |
 | `lore link <id>` | Link session to HEAD |
 | `lore link --auto` | Auto-link sessions by time and file overlap |
 | `lore unlink <id>` | Remove a session-commit link |
-| `lore search <query>` | Full-text search |
-| `lore hooks install` | Install git hooks |
-| `lore hooks uninstall` | Remove git hooks |
-| `lore daemon start` | Start background watcher |
-| `lore daemon stop` | Stop daemon |
-| `lore daemon status` | Check daemon status |
-| `lore daemon logs` | View daemon logs |
-| `lore config` | View configuration |
-| `lore config set <key> <value>` | Update configuration |
+| `lore search <query>` | Full-text search across all sessions |
+| `lore hooks install` | Install git hooks for automatic linking |
+| `lore daemon start` | Start background watcher for real-time capture |
+| `lore config` | View and update configuration |
 
 ## Supported Tools
 
@@ -67,22 +82,60 @@ lore daemon start
 | Cline | Supported | VS Code extension storage |
 | Cursor | Experimental | Conversations may be cloud-only |
 
-## Output Formats
+## Background Daemon
 
-Commands support `--format` flag:
+The daemon watches for new sessions in real-time and imports them automatically:
 
 ```bash
-lore sessions --format json    # JSON output
-lore show abc123 --format md   # Markdown output
+lore daemon start    # Start watching
+lore daemon status   # Check what's being watched
+lore daemon logs     # View daemon logs
+lore daemon stop     # Stop watching
+```
+
+## Auto-linking
+
+Lore can automatically link sessions to commits based on timing and file overlap:
+
+```bash
+# Preview what would be linked
+lore link --auto --dry-run
+
+# Link with default confidence threshold (0.5)
+lore link --auto
+
+# Require higher confidence
+lore link --auto --threshold 0.7
+```
+
+## Git Hooks
+
+Install hooks to automatically record session links on commit:
+
+```bash
+lore hooks install   # Install post-commit hook
+lore hooks status    # Check hook status
+lore hooks uninstall # Remove hooks
+```
+
+## Output Formats
+
+Commands support `--format` for scripting and integration:
+
+```bash
+lore sessions --format json
+lore show abc123 --format json
+lore show abc123 --format markdown
+lore status --format json
 ```
 
 ## Storage
 
-All data is local:
+All data is stored locally:
 
 ```
 ~/.lore/
-├── lore.db       # SQLite database
+├── lore.db       # SQLite database with sessions, messages, and links
 ├── config.yaml   # Configuration
 └── logs/         # Daemon logs
 ```
