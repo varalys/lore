@@ -5,21 +5,57 @@
 //! persistence with automatic schema migrations.
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use uuid::Uuid;
 
 use super::models::{Message, MessageContent, MessageRole, SearchResult, Session, SessionLink};
 
+/// Parses a UUID from a string, converting errors to rusqlite errors.
+///
+/// Used in row mapping functions where we need to return rusqlite::Result.
+fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(e),
+        )
+    })
+}
+
+/// Parses an RFC3339 datetime string, converting errors to rusqlite errors.
+///
+/// Used in row mapping functions where we need to return rusqlite::Result.
+fn parse_datetime(s: &str) -> rusqlite::Result<DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })
+}
+
 /// Returns the default database path at `~/.lore/lore.db`.
 ///
 /// Creates the `.lore` directory if it does not exist.
 pub fn default_db_path() -> Result<PathBuf> {
     let config_dir = dirs::home_dir()
-        .context("Could not find home directory")?
+        .context(
+            "Could not find home directory. Ensure your HOME environment variable is set.",
+        )?
         .join(".lore");
 
-    std::fs::create_dir_all(&config_dir)?;
+    std::fs::create_dir_all(&config_dir).with_context(|| {
+        format!(
+            "Failed to create Lore data directory at {}. Check directory permissions.",
+            config_dir.display()
+        )
+    })?;
     Ok(config_dir.join("lore.db"))
 }
 
@@ -177,26 +213,7 @@ impl Database {
             .query_row(
                 "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count FROM sessions WHERE id = ?1",
                 params![id.to_string()],
-                |row| {
-                    Ok(Session {
-                        id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                        tool: row.get(1)?,
-                        tool_version: row.get(2)?,
-                        started_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
-                            .unwrap()
-                            .with_timezone(&chrono::Utc),
-                        ended_at: row.get::<_, Option<String>>(4)?.map(|s| {
-                            chrono::DateTime::parse_from_rfc3339(&s)
-                                .unwrap()
-                                .with_timezone(&chrono::Utc)
-                        }),
-                        model: row.get(5)?,
-                        working_directory: row.get(6)?,
-                        git_branch: row.get(7)?,
-                        source_path: row.get(8)?,
-                        message_count: row.get(9)?,
-                    })
-                },
+                Self::row_to_session,
             )
             .optional()
             .context("Failed to get session")
@@ -246,18 +263,18 @@ impl Database {
     }
 
     fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
+        let ended_at_str: Option<String> = row.get(4)?;
+        let ended_at = match ended_at_str {
+            Some(s) => Some(parse_datetime(&s)?),
+            None => None,
+        };
+
         Ok(Session {
-            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
+            id: parse_uuid(&row.get::<_, String>(0)?)?,
             tool: row.get(1)?,
             tool_version: row.get(2)?,
-            started_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            ended_at: row.get::<_, Option<String>>(4)?.map(|s| {
-                chrono::DateTime::parse_from_rfc3339(&s)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc)
-            }),
+            started_at: parse_datetime(&row.get::<_, String>(3)?)?,
+            ended_at,
             model: row.get(5)?,
             working_directory: row.get(6)?,
             git_branch: row.get(7)?,
@@ -325,14 +342,18 @@ impl Database {
             let role_str: String = row.get(5)?;
             let content_str: String = row.get(6)?;
 
+            let parent_id_str: Option<String> = row.get(2)?;
+            let parent_id = match parent_id_str {
+                Some(s) => Some(parse_uuid(&s)?),
+                None => None,
+            };
+
             Ok(Message {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                session_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                parent_id: row.get::<_, Option<String>>(2)?.map(|s| Uuid::parse_str(&s).unwrap()),
+                id: parse_uuid(&row.get::<_, String>(0)?)?,
+                session_id: parse_uuid(&row.get::<_, String>(1)?)?,
+                parent_id,
                 index: row.get(3)?,
-                timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
+                timestamp: parse_datetime(&row.get::<_, String>(4)?)?,
                 role: match role_str.as_str() {
                     "user" => MessageRole::User,
                     "assistant" => MessageRole::Assistant,
@@ -416,8 +437,8 @@ impl Database {
         let created_by_str: String = row.get(7)?;
 
         Ok(SessionLink {
-            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-            session_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
+            id: parse_uuid(&row.get::<_, String>(0)?)?,
+            session_id: parse_uuid(&row.get::<_, String>(1)?)?,
             link_type: match link_type_str.as_str() {
                 "commit" => LinkType::Commit,
                 "branch" => LinkType::Branch,
@@ -427,9 +448,7 @@ impl Database {
             commit_sha: row.get(3)?,
             branch: row.get(4)?,
             remote: row.get(5)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at: parse_datetime(&row.get::<_, String>(6)?)?,
             created_by: match created_by_str.as_str() {
                 "auto" => LinkCreator::Auto,
                 _ => LinkCreator::User,
@@ -558,8 +577,8 @@ impl Database {
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             let role_str: String = row.get(2)?;
             Ok(SearchResult {
-                session_id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                message_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
+                session_id: parse_uuid(&row.get::<_, String>(0)?)?,
+                message_id: parse_uuid(&row.get::<_, String>(1)?)?,
                 role: match role_str.as_str() {
                     "user" => MessageRole::User,
                     "assistant" => MessageRole::Assistant,
@@ -567,9 +586,7 @@ impl Database {
                     _ => MessageRole::User,
                 },
                 snippet: row.get(3)?,
-                timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
+                timestamp: parse_datetime(&row.get::<_, String>(4)?)?,
                 working_directory: row.get(5)?,
             })
         })?;

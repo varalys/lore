@@ -12,13 +12,22 @@ use crate::storage::Database;
 
 /// Arguments for the import command.
 #[derive(clap::Args)]
+#[command(after_help = "EXAMPLES:\n    \
+    lore import              Import new sessions\n    \
+    lore import --dry-run    Preview what would be imported\n    \
+    lore import --force      Re-import all sessions")]
 pub struct Args {
-    /// Force re-import of already imported sessions.
+    /// Force re-import of already imported sessions
     #[arg(long)]
+    #[arg(long_help = "By default, Lore tracks which session files have been imported\n\
+        and skips them on subsequent runs. Use this flag to re-import\n\
+        all sessions, which may update existing records.")]
     pub force: bool,
 
-    /// Only show what would be imported without actually importing.
+    /// Preview what would be imported without making changes
     #[arg(long)]
+    #[arg(long_help = "Shows what sessions would be imported without actually\n\
+        modifying the database. Useful for verifying before import.")]
     pub dry_run: bool,
 }
 

@@ -81,21 +81,41 @@ impl HookType {
 /// Subcommands for the hooks command.
 #[derive(Subcommand)]
 pub enum HooksCommand {
-    /// Install git hooks in the current repository.
+    /// Install git hooks in the current repository
+    #[command(long_about = "Installs Lore's git hooks in the current repository's\n\
+        .git/hooks directory. The post-commit hook automatically\n\
+        links sessions to commits using time and file overlap.\n\
+        Existing hooks are backed up before being replaced.")]
     Install {
-        /// Overwrite existing hooks.
+        /// Overwrite existing hooks (backs up originals)
         #[arg(long)]
+        #[arg(long_help = "Replace existing hooks that are not managed by Lore.\n\
+            The original hooks are saved as <hook>.backup and can\n\
+            be restored with 'lore hooks uninstall'.")]
         force: bool,
     },
-    /// Uninstall git hooks from the current repository.
+
+    /// Uninstall git hooks from the current repository
+    #[command(long_about = "Removes Lore's git hooks from the current repository.\n\
+        Only removes hooks that Lore installed (identified by marker).\n\
+        Restores backed-up hooks if they exist.")]
     Uninstall,
-    /// Show status of installed hooks.
+
+    /// Show status of installed hooks
+    #[command(long_about = "Shows which git hooks are currently installed and\n\
+        whether they are managed by Lore or are third-party hooks.")]
     Status,
 }
 
 /// Arguments for the hooks command.
 #[derive(clap::Args)]
+#[command(after_help = "EXAMPLES:\n    \
+    lore hooks install         Install hooks (skips existing)\n    \
+    lore hooks install --force Replace existing hooks\n    \
+    lore hooks uninstall       Remove Lore hooks\n    \
+    lore hooks status          Check installed hooks")]
 pub struct Args {
+    /// Hooks subcommand to run
     #[command(subcommand)]
     pub command: HooksCommand,
 }

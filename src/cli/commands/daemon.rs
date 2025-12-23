@@ -17,34 +17,56 @@ use crate::daemon::{
 /// Daemon management subcommands.
 #[derive(Subcommand)]
 pub enum DaemonSubcommand {
-    /// Start the background daemon.
+    /// Start the background daemon
+    #[command(long_about = "Starts the background daemon that watches for new AI\n\
+        coding sessions and automatically imports them into the\n\
+        database. The daemon runs in the background by default.")]
     Start {
-        /// Run in foreground (don't daemonize).
+        /// Run in foreground instead of daemonizing
         #[arg(long)]
+        #[arg(long_help = "Run the daemon in the foreground instead of as a\n\
+            background process. Useful for debugging or when\n\
+            running under a process supervisor.")]
         foreground: bool,
     },
 
-    /// Stop the running daemon.
+    /// Stop the running daemon
+    #[command(long_about = "Sends a stop signal to the running daemon. The daemon\n\
+        will finish any pending operations before shutting down.")]
     Stop,
 
-    /// Show daemon status.
+    /// Show daemon status and statistics
+    #[command(long_about = "Shows whether the daemon is running, its PID, uptime,\n\
+        and statistics about watched files and imported sessions.")]
     Status,
 
-    /// Show daemon logs.
+    /// Show daemon logs
+    #[command(long_about = "Displays recent log output from the daemon. Use -f to\n\
+        follow the log in real-time (like 'tail -f').")]
     Logs {
-        /// Number of lines to show.
-        #[arg(short = 'n', long, default_value = "20")]
+        /// Number of lines to show
+        #[arg(short = 'n', long, default_value = "20", value_name = "N")]
         lines: usize,
 
-        /// Follow log output (like tail -f).
+        /// Follow log output in real-time (like tail -f)
         #[arg(short, long)]
+        #[arg(long_help = "Continuously display new log lines as they are written.\n\
+            Press Ctrl+C to stop following.")]
         follow: bool,
     },
 }
 
 /// Arguments for the daemon command.
 #[derive(clap::Args)]
+#[command(after_help = "EXAMPLES:\n    \
+    lore daemon start             Start in background\n    \
+    lore daemon start --foreground Run in foreground\n    \
+    lore daemon stop              Stop the daemon\n    \
+    lore daemon status            Check if running\n    \
+    lore daemon logs              Show recent logs\n    \
+    lore daemon logs -f           Follow logs in real-time")]
 pub struct Args {
+    /// Daemon subcommand to run
     #[command(subcommand)]
     pub command: DaemonSubcommand,
 }
@@ -187,8 +209,11 @@ fn kill_process(pid: u32) -> Result<()> {
 
     #[cfg(not(unix))]
     {
-        // On Windows, we would need a different approach
-        anyhow::bail!("Killing processes not supported on this platform");
+        let _ = pid; // Suppress unused variable warning
+        anyhow::bail!(
+            "Stopping the daemon by process signal is not supported on this platform. \
+             Try running 'lore daemon stop' again or manually terminate the process."
+        );
     }
 
     Ok(())

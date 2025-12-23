@@ -2,27 +2,36 @@
 //!
 //! Displays a list of imported sessions with filtering options.
 //! Sessions can be filtered by working directory and output in
-//! table or JSON format.
+//! text, JSON, or markdown format.
 
 use anyhow::Result;
 use colored::Colorize;
 
+use crate::cli::OutputFormat;
 use crate::storage::Database;
 
 /// Arguments for the sessions command.
 #[derive(clap::Args)]
+#[command(after_help = "EXAMPLES:\n    \
+    lore sessions                  List recent sessions (default 20)\n    \
+    lore sessions --limit 50       Show up to 50 sessions\n    \
+    lore sessions --repo .         Filter to current directory\n    \
+    lore sessions --repo /path     Filter to specific path\n    \
+    lore sessions --format json    Output as JSON")]
 pub struct Args {
-    /// Filter to sessions in this directory (prefix match).
-    #[arg(short, long)]
+    /// Filter to sessions in this directory (prefix match)
+    #[arg(short, long, value_name = "PATH")]
+    #[arg(long_help = "Filter sessions to those with a working directory matching\n\
+        this path prefix. Use '.' for the current directory.")]
     pub repo: Option<String>,
 
-    /// Maximum number of sessions to display.
-    #[arg(short, long, default_value = "20")]
+    /// Maximum number of sessions to display
+    #[arg(short, long, default_value = "20", value_name = "N")]
     pub limit: usize,
 
-    /// Output format: "table" or "json".
-    #[arg(short, long, default_value = "table")]
-    pub format: String,
+    /// Output format: text (default), json
+    #[arg(short, long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
 }
 
 /// Executes the sessions command.
@@ -52,16 +61,22 @@ pub fn run(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    match args.format.as_str() {
-        "json" => {
+    match args.format {
+        OutputFormat::Json => {
             let json = serde_json::to_string_pretty(&sessions)?;
             println!("{json}");
         }
-        _ => {
+        OutputFormat::Text | OutputFormat::Markdown => {
+            // Column widths for consistent alignment
+            const ID_WIDTH: usize = 8;
+            const STARTED_WIDTH: usize = 16;
+            const MESSAGES_WIDTH: usize = 8;
+            const BRANCH_WIDTH: usize = 12;
+
             println!(
                 "{}",
                 format!(
-                    "{:8}  {:14}  {:10}  {:12}  {}",
+                    "{:<ID_WIDTH$}  {:<STARTED_WIDTH$}  {:>MESSAGES_WIDTH$}  {:<BRANCH_WIDTH$}  {}",
                     "ID", "STARTED", "MESSAGES", "BRANCH", "DIRECTORY"
                 )
                 .bold()
@@ -78,7 +93,7 @@ pub fn run(args: Args) -> Result<()> {
                     .unwrap_or(&session.working_directory);
 
                 println!(
-                    "{}  {}  {:>10}  {:12}  {}",
+                    "{:<ID_WIDTH$}  {:<STARTED_WIDTH$}  {:>MESSAGES_WIDTH$}  {:<BRANCH_WIDTH$}  {}",
                     id_short.cyan(),
                     started.dimmed(),
                     session.message_count,
