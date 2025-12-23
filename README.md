@@ -1,5 +1,9 @@
 # Lore
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![CI](https://github.com/redactyl/lore/actions/workflows/ci.yml/badge.svg)](https://github.com/redactyl/lore/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/redactyl/lore)](https://github.com/redactyl/lore/releases)
+
 Lore captures AI coding sessions and links them to git commits.
 
 When you use AI coding tools like Claude Code or Aider, the conversation history contains valuable context: the prompts you wrote, the approaches you tried, the decisions you made. Git captures the final code, but not this reasoning. Lore preserves both.
