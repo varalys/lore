@@ -176,37 +176,16 @@ systemctl --user enable --now lore.service
 systemctl --user status lore.service
 ```
 
-#### Manual launchd Setup (macOS)
+#### macOS with Homebrew
 
-Create `~/Library/LaunchAgents/com.lore.daemon.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.lore.daemon</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/path/to/lore</string>
-        <string>daemon</string>
-        <string>start</string>
-        <string>--foreground</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-</dict>
-</plist>
-```
-
-Then load:
+Once a Homebrew formula is available:
 
 ```bash
-launchctl load -w ~/Library/LaunchAgents/com.lore.daemon.plist
+brew services start lore
+brew services stop lore
 ```
+
+Until then, use `lore daemon install` or manage launchd manually.
 
 ## Auto-linking
 
