@@ -1,8 +1,12 @@
-//! File system watcher for Claude Code session files.
+//! File system watcher for AI tool session files.
 //!
-//! Watches `~/.claude/projects/` for new and modified JSONL session files.
-//! Performs incremental parsing to efficiently handle file updates without
-//! re-reading entire files.
+//! Watches directories configured by the WatcherRegistry for new and modified
+//! session files. Performs incremental parsing to efficiently handle file
+//! updates without re-reading entire files.
+//!
+//! Currently supports:
+//! - Claude Code JSONL files in `~/.claude/projects/`
+//! - Cursor SQLite databases in workspace storage
 
 use anyhow::{Context, Result};
 use notify::RecursiveMode;
@@ -13,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::capture::watchers::claude_code;
+use crate::capture::watchers::default_registry;
 use crate::storage::Database;
 
 use super::state::DaemonStats;
@@ -46,8 +50,8 @@ impl DbConfig {
 pub struct SessionWatcher {
     /// Maps file paths to their last read position (byte offset).
     file_positions: HashMap<PathBuf, u64>,
-    /// The directory to watch for session files.
-    watch_dir: PathBuf,
+    /// Directories to watch for session files.
+    watch_dirs: Vec<PathBuf>,
     /// Database configuration for creating connections.
     db_config: DbConfig,
 }
@@ -55,31 +59,32 @@ pub struct SessionWatcher {
 impl SessionWatcher {
     /// Creates a new SessionWatcher.
     ///
+    /// Uses the default watcher registry to determine which directories
+    /// to watch for session files.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the home directory cannot be determined.
+    /// Returns an error if the database configuration cannot be created.
     pub fn new() -> Result<Self> {
-        let watch_dir = dirs::home_dir()
-            .context("Could not find home directory")?
-            .join(".claude")
-            .join("projects");
+        let registry = default_registry();
+        let watch_dirs = registry.all_watch_paths();
 
         let db_config = DbConfig::default_config()?;
 
         Ok(Self {
             file_positions: HashMap::new(),
-            watch_dir,
+            watch_dirs,
             db_config,
         })
     }
 
-    /// Returns the directory being watched.
+    /// Returns the directories being watched.
     ///
     /// This method is part of the public API for status reporting
     /// and may be used by CLI commands in the future.
     #[allow(dead_code)]
-    pub fn watch_dir(&self) -> &Path {
-        &self.watch_dir
+    pub fn watch_dirs(&self) -> &[PathBuf] {
+        &self.watch_dirs
     }
 
     /// Starts watching for file changes and processing them.
@@ -99,13 +104,16 @@ impl SessionWatcher {
         stats: Arc<RwLock<DaemonStats>>,
         mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<()> {
-        // Check if watch directory exists
-        if !self.watch_dir.exists() {
-            tracing::info!(
-                "Claude Code directory does not exist yet: {:?}",
-                self.watch_dir
-            );
-            tracing::info!("Watcher will wait for directory to be created...");
+        // Log which directories we will watch
+        for dir in &self.watch_dirs {
+            if dir.exists() {
+                tracing::info!("Will watch for session files in {:?}", dir);
+            } else {
+                tracing::info!(
+                    "Watch directory does not exist yet: {:?}",
+                    dir
+                );
+            }
         }
 
         // Create a channel for file events
@@ -116,15 +124,14 @@ impl SessionWatcher {
             Duration::from_millis(500),
             move |events: Result<Vec<DebouncedEvent>, notify::Error>| {
                 if let Ok(events) = events {
-                    // Filter for JSONL files
+                    // Filter for JSONL and SQLite database files
                     let filtered: Vec<DebouncedEvent> = events
                         .into_iter()
                         .filter(|e| {
-                            e.path
+                            let ext = e.path
                                 .extension()
-                                .and_then(|ext| ext.to_str())
-                                .map(|ext| ext == "jsonl")
-                                .unwrap_or(false)
+                                .and_then(|ext| ext.to_str());
+                            matches!(ext, Some("jsonl") | Some("vscdb"))
                         })
                         .collect();
 
@@ -136,18 +143,20 @@ impl SessionWatcher {
         )
         .context("Failed to create file watcher")?;
 
-        // Start watching if directory exists
-        if self.watch_dir.exists() {
-            debouncer
-                .watcher()
-                .watch(&self.watch_dir, RecursiveMode::Recursive)
-                .context("Failed to start watching directory")?;
+        // Start watching directories that exist
+        for dir in &self.watch_dirs {
+            if dir.exists() {
+                debouncer
+                    .watcher()
+                    .watch(dir, RecursiveMode::Recursive)
+                    .context(format!("Failed to start watching directory {dir:?}"))?;
 
-            tracing::info!("Watching for session files in {:?}", self.watch_dir);
-
-            // Do an initial scan (sync, before entering async loop)
-            self.initial_scan(&stats).await?;
+                tracing::info!("Watching for session files in {:?}", dir);
+            }
         }
+
+        // Do an initial scan (sync, before entering async loop)
+        self.initial_scan(&stats).await?;
 
         // Process events
         loop {
@@ -179,38 +188,57 @@ impl SessionWatcher {
     /// Performs an initial scan of existing session files.
     ///
     /// Called when the watcher starts to import any sessions that were
-    /// created while the daemon was not running.
+    /// created while the daemon was not running. Uses the watcher registry
+    /// to find session sources from all available watchers.
     async fn initial_scan(
         &mut self,
         stats: &Arc<RwLock<DaemonStats>>,
     ) -> Result<()> {
         tracing::info!("Performing initial scan of session files...");
 
-        let session_files = claude_code::find_session_files()?;
+        let registry = default_registry();
+        let mut total_files = 0;
+
+        for watcher in registry.available_watchers() {
+            let watcher_name = watcher.info().name;
+            match watcher.find_sources() {
+                Ok(sources) => {
+                    tracing::info!(
+                        "Found {} sources for {}",
+                        sources.len(),
+                        watcher_name
+                    );
+                    total_files += sources.len();
+
+                    for path in sources {
+                        // Process each file synchronously to avoid Send issues
+                        match self.process_file_sync(&path) {
+                            Ok(Some((sessions_imported, messages_imported))) => {
+                                let mut stats_guard = stats.write().await;
+                                stats_guard.sessions_imported += sessions_imported;
+                                stats_guard.messages_imported += messages_imported;
+                                stats_guard.files_watched = self.file_positions.len();
+                            }
+                            Ok(None) => {
+                                // File was already imported, just track position
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to import {:?}: {}", path, e);
+                                let mut stats_guard = stats.write().await;
+                                stats_guard.errors += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to find sources for {}: {}", watcher_name, e);
+                }
+            }
+        }
 
         {
             let mut stats_guard = stats.write().await;
-            stats_guard.files_watched = session_files.len();
-        }
-
-        for path in session_files {
-            // Process each file synchronously to avoid Send issues
-            match self.process_file_sync(&path) {
-                Ok(Some((sessions_imported, messages_imported))) => {
-                    let mut stats_guard = stats.write().await;
-                    stats_guard.sessions_imported += sessions_imported;
-                    stats_guard.messages_imported += messages_imported;
-                    stats_guard.files_watched = self.file_positions.len();
-                }
-                Ok(None) => {
-                    // File was already imported, just track position
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to import {:?}: {}", path, e);
-                    let mut stats_guard = stats.write().await;
-                    stats_guard.errors += 1;
-                }
-            }
+            stats_guard.files_watched = total_files;
         }
 
         Ok(())
@@ -222,12 +250,14 @@ impl SessionWatcher {
         path: &Path,
         stats: &Arc<RwLock<DaemonStats>>,
     ) -> Result<()> {
-        // Skip non-JSONL files
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        let ext = path.extension().and_then(|e| e.to_str());
+
+        // Skip files that are not session sources
+        if !matches!(ext, Some("jsonl") | Some("vscdb")) {
             return Ok(());
         }
 
-        // Skip agent files
+        // Skip agent files (Claude Code specific)
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if name.starts_with("agent-") {
                 return Ok(());
@@ -301,25 +331,67 @@ impl SessionWatcher {
 
     /// Imports a complete session file synchronously.
     /// Returns (sessions_imported, messages_imported) counts.
+    ///
+    /// Uses the watcher registry to find the appropriate parser for the file type.
     fn import_file_sync(&mut self, path: &Path, db: &Database) -> Result<(u64, u64)> {
         tracing::debug!("Importing session file: {:?}", path);
 
-        let parsed = claude_code::parse_session_file(path)?;
+        let path_buf = path.to_path_buf();
+        let registry = default_registry();
 
-        if parsed.messages.is_empty() {
-            tracing::debug!("Skipping empty session: {:?}", path);
+        // Try to parse with each watcher until one succeeds
+        let mut parsed_sessions = Vec::new();
+
+        for watcher in registry.available_watchers() {
+            match watcher.parse_source(&path_buf) {
+                Ok(sessions) if !sessions.is_empty() => {
+                    parsed_sessions = sessions;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::debug!(
+                        "Watcher {} could not parse {:?}: {}",
+                        watcher.info().name,
+                        path,
+                        e
+                    );
+                }
+            }
+        }
+
+        if parsed_sessions.is_empty() {
+            tracing::debug!("No watcher could parse {:?}", path);
             return Ok((0, 0));
         }
 
-        let (session, messages) = parsed.to_storage_models();
-        let message_count = messages.len();
+        let mut total_sessions = 0u64;
+        let mut total_messages = 0u64;
 
-        // Store session
-        db.insert_session(&session)?;
+        for (session, messages) in parsed_sessions {
+            if messages.is_empty() {
+                continue;
+            }
 
-        // Store messages
-        for msg in &messages {
-            db.insert_message(msg)?;
+            let message_count = messages.len();
+
+            // Store session
+            db.insert_session(&session)?;
+
+            // Store messages
+            for msg in &messages {
+                db.insert_message(msg)?;
+            }
+
+            tracing::info!(
+                "Imported session {} with {} messages from {:?}",
+                &session.id.to_string()[..8],
+                message_count,
+                path.file_name().unwrap_or_default()
+            );
+
+            total_sessions += 1;
+            total_messages += message_count as u64;
         }
 
         // Update file position
@@ -327,14 +399,7 @@ impl SessionWatcher {
             self.file_positions.insert(path.to_path_buf(), metadata.len());
         }
 
-        tracing::info!(
-            "Imported session {} with {} messages from {:?}",
-            &session.id.to_string()[..8],
-            message_count,
-            path.file_name().unwrap_or_default()
-        );
-
-        Ok((1, message_count as u64))
+        Ok((total_sessions, total_messages))
     }
 
     /// Returns the number of files currently being tracked.
@@ -357,10 +422,24 @@ mod tests {
         assert!(watcher.is_ok(), "Should create watcher successfully");
 
         let watcher = watcher.unwrap();
+        // Should have watch directories configured from the registry
+        let dirs = watcher.watch_dirs();
         assert!(
-            watcher.watch_dir().to_string_lossy().contains(".claude"),
-            "Watch dir should be in .claude directory"
+            !dirs.is_empty(),
+            "Should have at least one watch directory configured"
         );
+    }
+
+    #[test]
+    fn test_watch_dirs_from_registry() {
+        let watcher = SessionWatcher::new().unwrap();
+        let dirs = watcher.watch_dirs();
+
+        // Should include paths from both Claude Code and Cursor watchers
+        let has_claude = dirs.iter().any(|d| d.to_string_lossy().contains(".claude"));
+        let has_cursor = dirs.iter().any(|d| d.to_string_lossy().contains("Cursor"));
+
+        assert!(has_claude || has_cursor, "Should have at least one known watcher path");
     }
 
     #[test]

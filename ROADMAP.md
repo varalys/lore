@@ -130,17 +130,33 @@ Enable automatic session capture without manual import.
 Expand capture beyond Claude Code.
 
 ### 4.1 Watcher Abstraction
-- [ ] Define Watcher trait for common interface
-- [ ] Refactor claude_code.rs to implement trait
-- [ ] Add watcher registration and discovery
+- [x] Define Watcher trait for common interface
+- [x] Refactor claude_code.rs to implement trait
+- [x] Add watcher registration and discovery
 
-### 4.2 Cursor Watcher
-- [ ] Research Cursor session storage format
-- [ ] Implement SQLite state.vscdb parser
-- [ ] Handle schema version differences
-- [ ] Add Cursor watcher to daemon
+### 4.2 Cursor Watcher (Experimental)
+- [x] Research Cursor session storage format
+- [x] Implement SQLite state.vscdb parser
+- [x] Handle schema version differences
+- [x] Add Cursor watcher to daemon
+- [!] Note: Conversations appear to be synced to Cursor cloud, not stored locally
 
-### 4.3 Generic MCP Watcher (Future)
+### 4.3 Aider Watcher
+- [x] Research Aider chat history format (.aider.chat.history.md)
+- [x] Implement markdown parser for chat history
+- [x] Add Aider watcher to registry
+
+### 4.4 Continue.dev Watcher
+- [x] Research Continue.dev session storage (~/.continue/sessions/)
+- [x] Implement JSON session parser
+- [x] Add Continue.dev watcher to registry
+
+### 4.5 Cline Watcher
+- [x] Research Cline (Claude Dev) storage format
+- [x] Implement JSON conversation parser
+- [x] Add Cline watcher to registry
+
+### 4.6 Generic MCP Watcher (Future)
 - [ ] Research MCP protocol for session capture
 - [ ] Design MCP-based capture approach
 
@@ -191,8 +207,12 @@ Items for consideration after MVP.
 
 ### Additional Integrations
 - [ ] VS Code extension
-- [ ] GitHub Copilot watcher
-- [ ] Windsurf watcher
+- [ ] GitHub Copilot watcher (likely cloud-only, needs investigation)
+- [ ] Windsurf watcher (Codeium-based, investigate storage format)
+- [ ] Sourcegraph Cody watcher (investigate storage format)
+- [ ] Amazon Q Developer watcher (investigate storage format)
+- [ ] Tabnine watcher (investigate storage format)
+- [ ] Cursor watcher improvements (reverse engineer cloud API or monitor traffic)
 
 ---
 

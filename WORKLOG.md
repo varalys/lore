@@ -10,6 +10,77 @@ This document tracks development progress in reverse chronological order. Each e
 
 ---
 
+## Entry 010 - 2025-12-22
+
+### Session Focus
+Complete Phase 4: Additional Watchers (continued)
+
+### Completed
+- Implemented AiderWatcher for .aider.chat.history.md files (ROADMAP 4.3)
+- Implemented ContinueDevWatcher for ~/.continue/sessions/ JSON (ROADMAP 4.4)
+- Implemented ClineWatcher for VS Code extension storage JSON (ROADMAP 4.5)
+- Marked CursorWatcher as experimental (conversations not stored locally)
+- Updated WatcherRegistry to include all 5 watchers
+- Updated ROADMAP backlog with future watcher candidates
+
+### Files Created
+- src/capture/watchers/aider.rs (Aider chat history markdown parser)
+- src/capture/watchers/continue_dev.rs (Continue.dev JSON session parser)
+- src/capture/watchers/cline.rs (Cline/Claude Dev JSON parser)
+
+### Files Modified
+- src/capture/watchers/mod.rs (added new watcher modules and registration)
+- src/capture/watchers/cursor.rs (marked as experimental)
+- ROADMAP.md (added 4.3-4.5, updated backlog with future watchers)
+
+### Tests Added
+- 11 tests for AiderWatcher parsing
+- 13 tests for ContinueDevWatcher parsing
+- 11 tests for ClineWatcher parsing
+
+### Issues Encountered
+- CursorWatcher found to be non-functional: conversations appear to be synced to Cursor cloud rather than stored locally in state.vscdb
+
+### Resume Point
+Phase 4 complete. Ready to begin Phase 5: Polish and Distribution.
+
+---
+
+## Entry 009 - 2025-12-22
+
+### Session Focus
+Complete Phase 4: Additional Watchers
+
+### Completed
+- Defined Watcher trait for common watcher interface (ROADMAP 4.1)
+- Created WatcherRegistry for watcher discovery and management (ROADMAP 4.1)
+- Refactored ClaudeCodeWatcher to implement Watcher trait (ROADMAP 4.1)
+- Implemented CursorWatcher with SQLite state.vscdb parsing (ROADMAP 4.2)
+- Updated daemon to use WatcherRegistry for multi-tool watching (ROADMAP 4.2)
+- Updated status command to show all registered watchers dynamically
+
+### Files Created
+- src/capture/watchers/cursor.rs (Cursor IDE watcher with SQLite parsing)
+
+### Files Modified
+- src/capture/watchers/mod.rs (Watcher trait, WatcherInfo, WatcherRegistry)
+- src/capture/watchers/claude_code.rs (ClaudeCodeWatcher struct)
+- src/cli/commands/status.rs (dynamic watcher display)
+- src/daemon/watcher.rs (multi-directory watching via registry)
+
+### Tests Added
+- 6 tests for WatcherRegistry operations
+- 4 tests for ClaudeCodeWatcher trait implementation
+- 12 tests for CursorWatcher parsing
+
+### Issues Encountered
+None.
+
+### Resume Point
+Continue with additional watchers (Aider, Continue.dev, Cline).
+
+---
+
 ## Entry 008 - 2025-12-22
 
 ### Session Focus
