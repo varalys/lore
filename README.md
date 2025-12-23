@@ -105,6 +105,8 @@ $ lore show 7f3a2b1
 | `lore search <query>` | Full-text search across all sessions |
 | `lore hooks install` | Install git hooks for automatic linking |
 | `lore daemon start` | Start background watcher for real-time capture |
+| `lore daemon install` | Install daemon as a system service |
+| `lore daemon uninstall` | Remove daemon service |
 | `lore config` | View and update configuration |
 
 ## Supported Tools
@@ -119,7 +121,9 @@ $ lore show 7f3a2b1
 
 ## Background Daemon
 
-The daemon watches for new sessions in real-time and imports them automatically:
+The daemon watches for new sessions in real-time and imports them automatically.
+
+### Manual Start
 
 ```bash
 lore daemon start    # Start watching
@@ -127,6 +131,19 @@ lore daemon status   # Check what's being watched
 lore daemon logs     # View daemon logs
 lore daemon stop     # Stop watching
 ```
+
+### Run as a Service
+
+Install the daemon as a system service to start automatically on login:
+
+```bash
+lore daemon install    # Install and enable service
+lore daemon uninstall  # Remove service
+```
+
+This uses launchd on macOS (`~/Library/LaunchAgents/com.lore.daemon.plist`) and systemd on Linux (`~/.config/systemd/user/lore.service`).
+
+The service restarts automatically on failure. Logs are written to `~/.lore/logs/`.
 
 ## Auto-linking
 
