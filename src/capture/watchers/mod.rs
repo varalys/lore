@@ -13,10 +13,19 @@ use std::path::{Path, PathBuf};
 
 use crate::storage::models::{Message, Session};
 
+/// Aider session parser for markdown chat history files.
+pub mod aider;
+
 /// Claude Code session parser for JSONL files.
 pub mod claude_code;
 
-/// Cursor IDE session parser for SQLite databases.
+/// Cline (Claude Dev) session parser for VS Code extension storage.
+pub mod cline;
+
+/// Continue.dev session parser for JSON session files.
+pub mod continue_dev;
+
+/// Cursor IDE session parser for SQLite databases (experimental).
 pub mod cursor;
 
 /// Information about a tool that can be watched for sessions.
@@ -148,11 +157,17 @@ impl WatcherRegistry {
 /// Creates the default registry with all built-in watchers.
 ///
 /// This includes watchers for:
+/// - Aider (markdown files in project directories)
 /// - Claude Code (JSONL files in ~/.claude/projects/)
-/// - Cursor IDE (SQLite databases in workspace storage)
+/// - Cline (JSON files in VS Code extension storage)
+/// - Continue.dev (JSON files in ~/.continue/sessions/)
+/// - Cursor IDE (SQLite databases in workspace storage, experimental)
 pub fn default_registry() -> WatcherRegistry {
     let mut registry = WatcherRegistry::new();
+    registry.register(Box::new(aider::AiderWatcher));
     registry.register(Box::new(claude_code::ClaudeCodeWatcher));
+    registry.register(Box::new(cline::ClineWatcher));
+    registry.register(Box::new(continue_dev::ContinueDevWatcher));
     registry.register(Box::new(cursor::CursorWatcher));
     registry
 }
@@ -255,11 +270,14 @@ mod tests {
         let registry = default_registry();
         let watchers = registry.all_watchers();
 
-        // Should have at least the built-in watchers
-        assert!(watchers.len() >= 2);
+        // Should have all built-in watchers
+        assert!(watchers.len() >= 5);
 
-        // Check that claude-code and cursor are registered
+        // Check that all watchers are registered
+        assert!(registry.get_watcher("aider").is_some());
         assert!(registry.get_watcher("claude-code").is_some());
+        assert!(registry.get_watcher("cline").is_some());
+        assert!(registry.get_watcher("continue").is_some());
         assert!(registry.get_watcher("cursor").is_some());
     }
 
