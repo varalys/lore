@@ -48,7 +48,15 @@ Links are bidirectional: given a session, find its commits; given a commit, find
 
 ## Installation
 
+### From Releases
+
+Download the latest binary from [GitHub Releases](https://github.com/wemfore/lore/releases) and add it to your PATH.
+
+### From Source
+
 ```bash
+git clone https://github.com/wemfore/lore.git
+cd lore
 cargo install --path .
 ```
 
