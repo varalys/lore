@@ -137,7 +137,6 @@ $ lore show 7f3a2b1
 | Continue.dev | Supported | `~/.continue/sessions/` |
 | Cline | Supported | VS Code extension storage |
 | OpenCode | Supported | `~/.local/share/opencode/storage/` |
-| Cursor | Experimental | Conversations may be cloud-only |
 
 ## Background Daemon
 
