@@ -130,15 +130,15 @@ Enable automatic session capture without manual import.
 Expand capture beyond Claude Code.
 
 ### 4.1 Watcher Abstraction
-- [ ] Define Watcher trait for common interface
-- [ ] Refactor claude_code.rs to implement trait
-- [ ] Add watcher registration and discovery
+- [x] Define Watcher trait for common interface
+- [x] Refactor claude_code.rs to implement trait
+- [x] Add watcher registration and discovery
 
 ### 4.2 Cursor Watcher
-- [ ] Research Cursor session storage format
-- [ ] Implement SQLite state.vscdb parser
-- [ ] Handle schema version differences
-- [ ] Add Cursor watcher to daemon
+- [x] Research Cursor session storage format
+- [x] Implement SQLite state.vscdb parser
+- [x] Handle schema version differences
+- [x] Add Cursor watcher to daemon
 
 ### 4.3 Generic MCP Watcher (Future)
 - [ ] Research MCP protocol for session capture

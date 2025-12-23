@@ -7,7 +7,7 @@
 use anyhow::Result;
 use colored::Colorize;
 
-use crate::capture::watchers::claude_code;
+use crate::capture::watchers::{default_registry, WatcherRegistry};
 use crate::git;
 use crate::storage::Database;
 
@@ -20,14 +20,14 @@ pub fn run() -> Result<()> {
     println!("{}", "Reasoning history for code".dimmed());
     println!();
 
-    // Check Claude Code sessions
-    let session_files = claude_code::find_session_files()?;
+    // Get watcher registry
+    let registry = default_registry();
 
     // Daemon status placeholder
     print_daemon_status();
 
     // Watchers section
-    print_watchers_status(&session_files);
+    print_watchers_status(&registry);
 
     // Check database
     let db = Database::open_default()?;
@@ -40,11 +40,16 @@ pub fn run() -> Result<()> {
 
     // Show hint if sessions exist but are not imported
     let session_count = db.session_count()?;
-    if session_count == 0 && !session_files.is_empty() {
+    let has_available_sources = registry
+        .available_watchers()
+        .iter()
+        .any(|w| w.find_sources().map(|s| !s.is_empty()).unwrap_or(false));
+
+    if session_count == 0 && has_available_sources {
         println!();
         println!(
             "{}",
-            "Hint: Run 'lore import' to import Claude Code sessions".yellow()
+            "Hint: Run 'lore import' to import sessions from available sources".yellow()
         );
     }
 
@@ -70,25 +75,44 @@ fn print_daemon_status() {
 ///
 /// Shows which session watchers are available and how many session files
 /// each has discovered.
-fn print_watchers_status(claude_code_files: &[std::path::PathBuf]) {
+fn print_watchers_status(registry: &WatcherRegistry) {
     println!("{}", "Watchers:".bold());
 
-    // Claude Code watcher
-    if claude_code_files.is_empty() {
-        println!("  {}: {}", "claude-code".cyan(), "not available".dimmed());
-    } else {
-        println!(
-            "  {}: {} ({} session files)",
-            "claude-code".cyan(),
-            "available".green(),
-            claude_code_files.len()
-        );
+    for watcher in registry.all_watchers() {
+        let info = watcher.info();
+        let name = info.name;
+
+        if watcher.is_available() {
+            match watcher.find_sources() {
+                Ok(sources) if !sources.is_empty() => {
+                    println!(
+                        "  {}: {} ({} session files)",
+                        name.cyan(),
+                        "available".green(),
+                        sources.len()
+                    );
+                }
+                Ok(_) => {
+                    println!(
+                        "  {}: {} (no sessions found)",
+                        name.cyan(),
+                        "available".green()
+                    );
+                }
+                Err(_) => {
+                    println!(
+                        "  {}: {} (error reading sources)",
+                        name.cyan(),
+                        "available".green()
+                    );
+                }
+            }
+        } else {
+            println!("  {}: {}", name.cyan(), "not available".dimmed());
+        }
     }
 
-    // Cursor watcher (not yet implemented)
-    println!("  {}: {}", "cursor".cyan(), "not available".dimmed());
-
-    // Copilot watcher (not yet implemented)
+    // Note about future watchers
     println!("  {}: {}", "copilot".cyan(), "not available".dimmed());
 
     println!();

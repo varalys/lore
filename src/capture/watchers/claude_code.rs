@@ -13,10 +13,59 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::storage::models::{ContentBlock, Message, MessageContent, MessageRole, Session};
+
+use super::{Watcher, WatcherInfo};
+
+/// Watcher for Claude Code sessions.
+///
+/// Discovers and parses JSONL session files from the Claude Code CLI tool.
+/// Sessions are stored in `~/.claude/projects/<project-hash>/<session-uuid>.jsonl`.
+pub struct ClaudeCodeWatcher;
+
+impl Watcher for ClaudeCodeWatcher {
+    fn info(&self) -> WatcherInfo {
+        WatcherInfo {
+            name: "claude-code",
+            description: "Claude Code CLI sessions",
+            default_paths: vec![claude_projects_dir()],
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        claude_projects_dir().exists()
+    }
+
+    fn find_sources(&self) -> Result<Vec<PathBuf>> {
+        find_session_files()
+    }
+
+    fn parse_source(&self, path: &Path) -> Result<Vec<(Session, Vec<Message>)>> {
+        let parsed = parse_session_file(path)?;
+        if parsed.messages.is_empty() {
+            return Ok(vec![]);
+        }
+        let (session, messages) = parsed.to_storage_models();
+        Ok(vec![(session, messages)])
+    }
+
+    fn watch_paths(&self) -> Vec<PathBuf> {
+        vec![claude_projects_dir()]
+    }
+}
+
+/// Returns the path to the Claude Code projects directory.
+///
+/// This is typically `~/.claude/projects/`.
+fn claude_projects_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+        .join("projects")
+}
 
 /// Raw message as stored in Claude Code JSONL files
 #[derive(Debug, Deserialize)]
@@ -343,11 +392,8 @@ pub struct ParsedMessage {
 /// Scans project directories for UUID-named JSONL files, excluding
 /// agent sidechain files. Returns an empty vector if the Claude
 /// directory does not exist.
-pub fn find_session_files() -> Result<Vec<std::path::PathBuf>> {
-    let claude_dir = dirs::home_dir()
-        .context("Could not find home directory")?
-        .join(".claude")
-        .join("projects");
+pub fn find_session_files() -> Result<Vec<PathBuf>> {
+    let claude_dir = claude_projects_dir();
 
     if !claude_dir.exists() {
         return Ok(Vec::new());
@@ -980,5 +1026,64 @@ mod tests {
         // The session_id should be derived from the temp file name
         assert!(!parsed.session_id.is_empty());
         assert_ne!(parsed.session_id, "");
+    }
+
+    // =========================================================================
+    // Tests for ClaudeCodeWatcher trait implementation
+    // =========================================================================
+
+    #[test]
+    fn test_watcher_info() {
+        use super::Watcher;
+        let watcher = ClaudeCodeWatcher;
+        let info = watcher.info();
+
+        assert_eq!(info.name, "claude-code");
+        assert_eq!(info.description, "Claude Code CLI sessions");
+        assert!(!info.default_paths.is_empty());
+        assert!(info.default_paths[0].to_string_lossy().contains(".claude"));
+    }
+
+    #[test]
+    fn test_watcher_watch_paths() {
+        use super::Watcher;
+        let watcher = ClaudeCodeWatcher;
+        let paths = watcher.watch_paths();
+
+        assert!(!paths.is_empty());
+        assert!(paths[0].to_string_lossy().contains(".claude"));
+    }
+
+    #[test]
+    fn test_watcher_parse_source() {
+        use super::Watcher;
+        let watcher = ClaudeCodeWatcher;
+
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let user_uuid = "660e8400-e29b-41d4-a716-446655440001";
+        let user_line = make_user_message(session_id, user_uuid, None, "Hello");
+
+        let file = create_temp_session_file(&[&user_line]);
+        let path = file.path().to_path_buf();
+        let result = watcher.parse_source(&path).expect("Should parse successfully");
+
+        assert_eq!(result.len(), 1);
+        let (session, messages) = &result[0];
+        assert_eq!(session.tool, "claude-code");
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn test_watcher_parse_source_empty_session() {
+        use super::Watcher;
+        let watcher = ClaudeCodeWatcher;
+
+        // Create a file with no valid messages
+        let file = create_temp_session_file(&["", "invalid json"]);
+        let path = file.path().to_path_buf();
+        let result = watcher.parse_source(&path).expect("Should parse successfully");
+
+        // Empty sessions should return empty vec
+        assert!(result.is_empty());
     }
 }
