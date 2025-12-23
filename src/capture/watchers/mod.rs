@@ -31,9 +31,6 @@ pub mod codex;
 /// Continue.dev session parser for JSON session files.
 pub mod continue_dev;
 
-/// Cursor IDE session parser for SQLite databases (experimental).
-pub mod cursor;
-
 /// Gemini CLI session parser for JSON files.
 pub mod gemini;
 
@@ -177,7 +174,6 @@ impl WatcherRegistry {
 /// - Cline (JSON files in VS Code extension storage)
 /// - Codex CLI (JSONL files in ~/.codex/sessions/)
 /// - Continue.dev (JSON files in ~/.continue/sessions/)
-/// - Cursor IDE (SQLite databases in workspace storage, experimental)
 /// - Gemini CLI (JSON files in ~/.gemini/tmp/)
 /// - OpenCode CLI (JSON files in ~/.local/share/opencode/storage/)
 pub fn default_registry() -> WatcherRegistry {
@@ -188,7 +184,6 @@ pub fn default_registry() -> WatcherRegistry {
     registry.register(Box::new(cline::ClineWatcher));
     registry.register(Box::new(codex::CodexWatcher));
     registry.register(Box::new(continue_dev::ContinueDevWatcher));
-    registry.register(Box::new(cursor::CursorWatcher));
     registry.register(Box::new(gemini::GeminiWatcher));
     registry.register(Box::new(opencode::OpenCodeWatcher));
     registry
@@ -293,7 +288,7 @@ mod tests {
         let watchers = registry.all_watchers();
 
         // Should have all built-in watchers
-        assert!(watchers.len() >= 9);
+        assert!(watchers.len() >= 8);
 
         // Check that all watchers are registered
         assert!(registry.get_watcher("aider").is_some());
@@ -302,7 +297,6 @@ mod tests {
         assert!(registry.get_watcher("cline").is_some());
         assert!(registry.get_watcher("codex").is_some());
         assert!(registry.get_watcher("continue").is_some());
-        assert!(registry.get_watcher("cursor").is_some());
         assert!(registry.get_watcher("gemini").is_some());
         assert!(registry.get_watcher("opencode").is_some());
     }

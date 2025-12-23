@@ -26,12 +26,13 @@ use crate::storage::Database;
     long_about = "Import sessions from AI coding tools.\n\n\
         Supported tools:\n  \
         - Aider (markdown chat history files)\n  \
+        - Amp (JSON files in ~/.local/share/amp/threads/)\n  \
         - Claude Code (JSONL files in ~/.claude/projects/)\n  \
         - Cline (VS Code extension storage)\n  \
         - Codex CLI (JSONL files in ~/.codex/sessions/)\n  \
         - Continue.dev (JSON files in ~/.continue/sessions/)\n  \
-        - Cursor IDE (SQLite databases, experimental)\n  \
-        - Gemini CLI (JSON files in ~/.gemini/tmp/)",
+        - Gemini CLI (JSON files in ~/.gemini/tmp/)\n  \
+        - OpenCode (JSON files in ~/.local/share/opencode/storage/)",
     after_help = "EXAMPLES:\n    \
         lore import              Import new sessions from all tools\n    \
         lore import --dry-run    Preview what would be imported\n    \
