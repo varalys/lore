@@ -1,93 +1,90 @@
 # Lore
 
-**Reasoning history for code** — capture the story behind your commits.
+Lore captures AI coding sessions and links them to git commits.
 
-Git tells you *what* changed. Lore tells you *how* and *why* it changed.
-
-## The Problem
-
-In AI-assisted development, the reasoning happens in conversations:
-
-- The prompts you wrote
-- The iterations you went through  
-- The approaches you rejected
-- The context you provided
-
-But git only captures the final code. The story is lost.
-
-## What Lore Does
-
-Lore captures your AI coding sessions and links them to git commits, so you can:
-
-- **Review code with context**: See the reasoning behind a PR, not just the diff
-- **Debug with history**: Understand why code was written a certain way
-- **Onboard faster**: Learn how your team solves problems
-- **Preserve knowledge**: When people move on, the reasoning stays
+Git tracks what changed. Lore tracks the reasoning behind those changes.
 
 ## Installation
 
 ```bash
-# macOS
-brew install wemfore/tap/lore
-
-# From source
 cargo install --path .
 ```
 
 ## Quick Start
 
 ```bash
-# Import your Claude Code sessions
+# Import sessions from AI coding tools
 lore import
 
-# List recent sessions
+# List sessions
 lore sessions
 
 # View a session
 lore show abc123
 
-# Link a session to your current commit
+# Link a session to HEAD
 lore link abc123
 
 # View sessions linked to a commit
 lore show --commit HEAD
+
+# Search sessions
+lore search "authentication"
+
+# Start background daemon
+lore daemon start
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `lore status` | Show current state and recent sessions |
-| `lore sessions` | List and filter sessions |
+| `lore status` | Show daemon status, watchers, and recent sessions |
+| `lore sessions` | List sessions |
 | `lore show <id>` | View session details |
-| `lore show --commit <sha>` | View sessions linked to a commit |
+| `lore show --commit <ref>` | View sessions linked to a commit |
+| `lore import` | Import sessions from AI tools |
 | `lore link <id>` | Link session to HEAD |
-| `lore link <id> --commit <sha>` | Link session to specific commit |
-| `lore import` | Import sessions from Claude Code |
-| `lore config` | View/edit configuration |
+| `lore link --auto` | Auto-link sessions by time and file overlap |
+| `lore unlink <id>` | Remove a session-commit link |
+| `lore search <query>` | Full-text search |
+| `lore hooks install` | Install git hooks |
+| `lore hooks uninstall` | Remove git hooks |
+| `lore daemon start` | Start background watcher |
+| `lore daemon stop` | Stop daemon |
+| `lore daemon status` | Check daemon status |
+| `lore daemon logs` | View daemon logs |
+| `lore config` | View configuration |
+| `lore config set <key> <value>` | Update configuration |
 
 ## Supported Tools
 
-- ✅ Claude Code
-- 🚧 Cursor (planned)
-- 🚧 GitHub Copilot (planned)
-- 🚧 Windsurf (planned)
+| Tool | Status | Storage Location |
+|------|--------|------------------|
+| Claude Code | Supported | `~/.claude/projects/` |
+| Aider | Supported | `.aider.chat.history.md` |
+| Continue.dev | Supported | `~/.continue/sessions/` |
+| Cline | Supported | VS Code extension storage |
+| Cursor | Experimental | Conversations may be cloud-only |
 
-## How It Works
+## Output Formats
 
-1. **Capture**: Lore reads session files from AI coding tools (currently Claude Code's `~/.claude/projects/`)
-2. **Store**: Sessions are stored in a local SQLite database (`~/.lore/lore.db`)
-3. **Link**: You can link sessions to git commits manually or automatically
-4. **View**: Browse reasoning history alongside your code
+Commands support `--format` flag:
+
+```bash
+lore sessions --format json    # JSON output
+lore show abc123 --format md   # Markdown output
+```
 
 ## Storage
 
-All data is stored locally in `~/.lore/`:
+All data is local:
 
 ```
 ~/.lore/
-├── lore.db          # SQLite database
-└── config.yaml      # Configuration (future)
+├── lore.db       # SQLite database
+├── config.yaml   # Configuration
+└── logs/         # Daemon logs
 ```
 
 ## License
@@ -96,4 +93,4 @@ MIT
 
 ## Contributing
 
-This is an early-stage project. Contributions welcome!
+See [CONTRIBUTING.md](CONTRIBUTING.md).
