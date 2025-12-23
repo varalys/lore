@@ -144,7 +144,8 @@ async fn handle_connection(
         }
         DaemonCommand::Stop => {
             // Signal the daemon to shut down
-            let mut guard = shutdown_tx.lock().unwrap();
+            // If the lock is poisoned, we still want to try to shut down
+            let mut guard = shutdown_tx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(tx) = guard.take() {
                 let _ = tx.send(());
             }

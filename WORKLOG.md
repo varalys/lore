@@ -10,6 +10,60 @@ This document tracks development progress in reverse chronological order. Each e
 
 ---
 
+## Entry 011 - 2025-12-22
+
+### Session Focus
+Complete Phase 5: Polish and Distribution
+
+### Completed
+- Implemented OutputFormat enum with Text, Json, Markdown variants (ROADMAP 5.1)
+- Added --format flag to sessions, show, search, status, config commands (ROADMAP 5.1)
+- Implemented JSON output for all relevant commands (ROADMAP 5.1)
+- Implemented Markdown output for show command (ROADMAP 5.1)
+- Improved column alignment in table output (ROADMAP 5.1)
+- Audited and improved all error messages for clarity (ROADMAP 5.2)
+- Added helpful suggestions to error output (ROADMAP 5.2)
+- Replaced all .unwrap() calls in non-test code with proper error handling (ROADMAP 5.2)
+- Improved --help text for all commands with examples (ROADMAP 5.3)
+- Created CONTRIBUTING.md for open source contributors (ROADMAP 5.3)
+- Created GitHub Actions CI workflow for testing (ROADMAP 5.4)
+- Created GitHub Actions release workflow for building binaries (ROADMAP 5.4)
+
+### Files Created
+- src/cli/format.rs (OutputFormat enum)
+- CONTRIBUTING.md (contributor guidelines)
+- .github/workflows/ci.yml (CI workflow)
+- .github/workflows/release.yml (release workflow for macOS and Linux builds)
+
+### Files Modified
+- src/cli/mod.rs (export format module)
+- src/cli/commands/sessions.rs (--format flag, JSON output)
+- src/cli/commands/show.rs (--format flag, JSON and Markdown output)
+- src/cli/commands/search.rs (--format flag, JSON output, error handling)
+- src/cli/commands/status.rs (Args struct, --format flag, JSON output)
+- src/cli/commands/config.rs (--format flag, JSON output)
+- src/cli/commands/link.rs (improved error messages)
+- src/cli/commands/unlink.rs (improved error messages)
+- src/cli/commands/import.rs (improved help text)
+- src/cli/commands/hooks.rs (improved help text)
+- src/cli/commands/daemon.rs (improved help text and error messages)
+- src/storage/db.rs (parse_uuid/parse_datetime helpers, removed unwraps)
+- src/daemon/server.rs (handle poisoned mutex)
+- src/main.rs (improved help text, Status command args)
+- ROADMAP.md (marked Phase 5 complete)
+
+### Tests Added
+- test_output_format_default
+- test_output_format_from_str
+
+### Issues Encountered
+None.
+
+### Resume Point
+Phase 5 complete. MVP ready for initial release. Tag v0.1.0 to trigger release workflow.
+
+---
+
 ## Entry 010 - 2025-12-22
 
 ### Session Focus

@@ -6,3 +6,8 @@
 
 /// Individual CLI command implementations.
 pub mod commands;
+
+/// Output formatting utilities.
+pub mod format;
+
+pub use format::OutputFormat;

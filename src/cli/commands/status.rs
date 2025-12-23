@@ -6,37 +6,207 @@
 
 use anyhow::Result;
 use colored::Colorize;
+use serde::Serialize;
 
 use crate::capture::watchers::{default_registry, WatcherRegistry};
+use crate::cli::OutputFormat;
 use crate::git;
 use crate::storage::Database;
+
+/// Arguments for the status command.
+#[derive(clap::Args)]
+#[command(after_help = "EXAMPLES:\n    \
+    lore status               Show status overview\n    \
+    lore status --format json Output as JSON")]
+pub struct Args {
+    /// Output format: text (default), json
+    #[arg(short, long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
+}
+
+/// JSON output structure for status.
+#[derive(Serialize)]
+struct StatusOutput {
+    daemon: DaemonStatus,
+    watchers: Vec<WatcherStatus>,
+    database: DatabaseStats,
+    current_commit: Option<CurrentCommitInfo>,
+    recent_sessions: Vec<RecentSessionInfo>,
+}
+
+/// Daemon status for JSON output.
+#[derive(Serialize)]
+struct DaemonStatus {
+    running: bool,
+    message: String,
+}
+
+/// Watcher status for JSON output.
+#[derive(Serialize)]
+struct WatcherStatus {
+    name: String,
+    available: bool,
+    session_files: Option<usize>,
+}
+
+/// Database statistics for JSON output.
+#[derive(Serialize)]
+struct DatabaseStats {
+    sessions: i32,
+    messages: i32,
+    links: i32,
+    size_bytes: Option<u64>,
+}
+
+/// Current commit info for JSON output.
+#[derive(Serialize)]
+struct CurrentCommitInfo {
+    sha: String,
+    linked_sessions: usize,
+    session_ids: Vec<String>,
+}
+
+/// Recent session info for JSON output.
+#[derive(Serialize)]
+struct RecentSessionInfo {
+    id: String,
+    started_at: String,
+    message_count: i32,
+    branch: Option<String>,
+    directory: String,
+}
 
 /// Executes the status command.
 ///
 /// Shows database statistics, available session sources, daemon status,
 /// watcher availability, current commit links, and recent sessions.
-pub fn run() -> Result<()> {
+pub fn run(args: Args) -> Result<()> {
+    let registry = default_registry();
+    let db = Database::open_default()?;
+
+    match args.format {
+        OutputFormat::Json => {
+            run_json(&db, &registry)?;
+        }
+        OutputFormat::Text | OutputFormat::Markdown => {
+            run_text(&db, &registry)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Runs the status command with JSON output.
+fn run_json(db: &Database, registry: &WatcherRegistry) -> Result<()> {
+    // Collect watcher status
+    let mut watchers = Vec::new();
+    for watcher in registry.all_watchers() {
+        let info = watcher.info();
+        let session_files = if watcher.is_available() {
+            watcher.find_sources().ok().map(|s| s.len())
+        } else {
+            None
+        };
+        watchers.push(WatcherStatus {
+            name: info.name.to_string(),
+            available: watcher.is_available(),
+            session_files,
+        });
+    }
+    // Add copilot placeholder
+    watchers.push(WatcherStatus {
+        name: "copilot".to_string(),
+        available: false,
+        session_files: None,
+    });
+
+    // Database stats
+    let session_count = db.session_count()?;
+    let message_count = db.message_count()?;
+    let link_count = db.link_count()?;
+    let size_bytes = db
+        .db_path()
+        .and_then(|p| std::fs::metadata(&p).ok())
+        .map(|m| m.len());
+
+    // Current commit
+    let current_commit = get_current_commit_info(db)?;
+
+    // Recent sessions
+    let recent = db.list_sessions(5, None)?;
+    let recent_sessions: Vec<RecentSessionInfo> = recent
+        .into_iter()
+        .map(|s| RecentSessionInfo {
+            id: s.id.to_string(),
+            started_at: s.started_at.to_rfc3339(),
+            message_count: s.message_count,
+            branch: s.git_branch,
+            directory: s.working_directory,
+        })
+        .collect();
+
+    let output = StatusOutput {
+        daemon: DaemonStatus {
+            running: false,
+            message: "daemon not yet implemented".to_string(),
+        },
+        watchers,
+        database: DatabaseStats {
+            sessions: session_count,
+            messages: message_count,
+            links: link_count,
+            size_bytes,
+        },
+        current_commit,
+        recent_sessions,
+    };
+
+    let json = serde_json::to_string_pretty(&output)?;
+    println!("{json}");
+
+    Ok(())
+}
+
+/// Gets current commit info for JSON output.
+fn get_current_commit_info(db: &Database) -> Result<Option<CurrentCommitInfo>> {
+    let cwd = std::env::current_dir()?;
+    let repo_info = match git::repo_info(&cwd) {
+        Ok(info) => info,
+        Err(_) => return Ok(None),
+    };
+
+    let commit_sha = match repo_info.commit_sha {
+        Some(sha) => sha,
+        None => return Ok(None),
+    };
+
+    let links = db.get_links_by_commit(&commit_sha)?;
+    let session_ids: Vec<String> = links.iter().map(|l| l.session_id.to_string()).collect();
+
+    Ok(Some(CurrentCommitInfo {
+        sha: commit_sha,
+        linked_sessions: links.len(),
+        session_ids,
+    }))
+}
+
+/// Runs the status command with text output.
+fn run_text(db: &Database, registry: &WatcherRegistry) -> Result<()> {
     println!("{}", "Lore".bold().cyan());
     println!("{}", "Reasoning history for code".dimmed());
     println!();
-
-    // Get watcher registry
-    let registry = default_registry();
 
     // Daemon status placeholder
     print_daemon_status();
 
     // Watchers section
-    print_watchers_status(&registry);
-
-    // Check database
-    let db = Database::open_default()?;
+    print_watchers_status(registry);
 
     // Database statistics
-    print_database_stats(&db)?;
+    print_database_stats(db)?;
 
     // Current commit section (if in a git repo)
-    print_current_commit_links(&db)?;
+    print_current_commit_links(db)?;
 
     // Show hint if sessions exist but are not imported
     let session_count = db.session_count()?;
@@ -54,7 +224,7 @@ pub fn run() -> Result<()> {
     }
 
     // Show recent sessions if any
-    print_recent_sessions(&db)?;
+    print_recent_sessions(db)?;
 
     Ok(())
 }

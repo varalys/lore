@@ -167,26 +167,26 @@ Expand capture beyond Claude Code.
 Prepare for public release.
 
 ### 5.1 Output Formatting
-- [ ] Implement JSON output format for all commands
-- [ ] Implement markdown output format for show command
-- [ ] Add --format flag to relevant commands
-- [ ] Ensure consistent column alignment in table output
+- [x] Implement JSON output format for all commands
+- [x] Implement markdown output format for show command
+- [x] Add --format flag to relevant commands
+- [x] Ensure consistent column alignment in table output
 
 ### 5.2 Error Messages
-- [ ] Audit all error messages for clarity
-- [ ] Add helpful suggestions in error output
-- [ ] Ensure no panics reach user (graceful error handling)
+- [x] Audit all error messages for clarity
+- [x] Add helpful suggestions in error output
+- [x] Ensure no panics reach user (graceful error handling)
 
 ### 5.3 Documentation
-- [ ] Write README.md with installation and usage
-- [ ] Add man page or --help improvements
-- [ ] Create CONTRIBUTING.md for open source
+- [x] Write README.md with installation and usage
+- [x] Add man page or --help improvements
+- [x] Create CONTRIBUTING.md for open source
 
 ### 5.4 Distribution
-- [ ] Create release builds for macOS (arm64, x86_64)
-- [ ] Create release builds for Linux
-- [ ] Create Homebrew formula
-- [ ] Set up GitHub releases
+- [x] Create release builds for macOS (arm64, x86_64)
+- [x] Create release builds for Linux
+- [x] Set up GitHub releases (GitHub Actions workflow)
+- [ ] Create Homebrew formula (deferred until post-release)
 
 ---
 

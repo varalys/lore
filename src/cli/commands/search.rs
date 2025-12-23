@@ -6,30 +6,64 @@
 use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDate, Utc};
 use colored::Colorize;
+use serde::Serialize;
 
+use crate::cli::OutputFormat;
 use crate::storage::db::Database;
+use crate::storage::models::SearchResult;
 
 /// Arguments for the search command.
 #[derive(clap::Args)]
+#[command(after_help = "EXAMPLES:\n    \
+    lore search \"auth\"                  Search for 'auth' in messages\n    \
+    lore search \"bug fix\" --limit 20    Show up to 20 results\n    \
+    lore search api --since 7d          Last 7 days only\n    \
+    lore search error --role assistant  Only AI responses\n    \
+    lore search test --repo /path       Filter by repository")]
 pub struct Args {
-    /// The text to search for in session content.
+    /// Text to search for in session messages
+    #[arg(value_name = "QUERY")]
+    #[arg(long_help = "The text to search for. Uses SQLite FTS5 full-text search,\n\
+        which supports word matching and basic boolean operators.\n\
+        The search index is built automatically on first use.")]
     pub query: String,
 
-    /// Maximum number of results to return.
-    #[arg(short, long, default_value = "10")]
+    /// Maximum number of results to return
+    #[arg(short, long, default_value = "10", value_name = "N")]
     pub limit: usize,
 
-    /// Filter by working directory (repository path prefix).
-    #[arg(long)]
+    /// Filter by repository path prefix
+    #[arg(long, value_name = "PATH")]
+    #[arg(long_help = "Only search sessions from repositories matching this path\n\
+        prefix. Useful for narrowing results to a specific project.")]
     pub repo: Option<String>,
 
-    /// Filter by date. Accepts relative (7d, 2w, 1m) or absolute (2024-01-01) formats.
-    #[arg(long)]
+    /// Filter by date (e.g., 7d, 2w, 1m, or 2024-01-01)
+    #[arg(long, value_name = "DATE")]
+    #[arg(long_help = "Only search sessions from after this date. Accepts:\n\
+        - Relative: 7d (days), 2w (weeks), 1m (months)\n\
+        - Absolute: 2024-01-15 (ISO date format)")]
     pub since: Option<String>,
 
-    /// Filter by message role (user, assistant).
-    #[arg(long)]
+    /// Filter by message role (user, assistant, system)
+    #[arg(long, value_name = "ROLE")]
+    #[arg(long_help = "Only search messages from a specific role:\n\
+        - user: human messages\n\
+        - assistant: AI responses\n\
+        - system: system prompts")]
     pub role: Option<String>,
+
+    /// Output format: text (default), json
+    #[arg(short, long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
+}
+
+/// JSON output structure for search results.
+#[derive(Serialize)]
+struct SearchOutput {
+    query: String,
+    total_results: usize,
+    results: Vec<SearchResult>,
 }
 
 /// Parses a date filter string into a DateTime.
@@ -67,10 +101,12 @@ fn parse_since(since_str: &str) -> Result<chrono::DateTime<Utc>> {
     let date = NaiveDate::parse_from_str(&since_str, "%Y-%m-%d")
         .context("Invalid date format. Use YYYY-MM-DD or relative format like 7d, 2w, 1m")?;
 
-    Ok(date
+    // Midnight is always a valid time, so this should never fail
+    let datetime = date
         .and_hms_opt(0, 0, 0)
-        .expect("valid time")
-        .and_utc())
+        .ok_or_else(|| anyhow::anyhow!("Failed to create datetime from date {since_str}"))?;
+
+    Ok(datetime.and_utc())
 }
 
 /// Formats a relative time string for display (e.g., "2 hours ago").
@@ -146,69 +182,79 @@ pub fn run(args: Args) -> Result<()> {
         args.role.as_deref(),
     )?;
 
-    if results.is_empty() {
-        println!(
-            "{}",
-            format!("No results found for \"{}\"", args.query).dimmed()
-        );
-
-        // Provide helpful suggestions
-        if args.repo.is_some() || args.since.is_some() || args.role.is_some() {
-            println!(
-                "{}",
-                "Try removing filters to broaden your search.".dimmed()
-            );
+    match args.format {
+        OutputFormat::Json => {
+            let output = SearchOutput {
+                query: args.query,
+                total_results: results.len(),
+                results,
+            };
+            let json = serde_json::to_string_pretty(&output)?;
+            println!("{json}");
         }
-        return Ok(());
+        OutputFormat::Text | OutputFormat::Markdown => {
+            if results.is_empty() {
+                println!(
+                    "{}",
+                    format!("No results found for \"{}\"", args.query).dimmed()
+                );
+
+                // Provide helpful suggestions
+                if args.repo.is_some() || args.since.is_some() || args.role.is_some() {
+                    println!(
+                        "{}",
+                        "Try removing filters to broaden your search.".dimmed()
+                    );
+                }
+                return Ok(());
+            }
+
+            // Display header
+            println!("Search results for \"{}\":\n", args.query.cyan());
+
+            // Display results
+            for (idx, result) in results.iter().enumerate() {
+                let session_prefix = &result.session_id.to_string()[..8];
+                let relative_time = format_relative_time(&result.timestamp);
+                let repo_name = extract_repo_name(&result.working_directory);
+
+                let role_display = match result.role {
+                    crate::storage::MessageRole::User => "User".blue(),
+                    crate::storage::MessageRole::Assistant => "Assistant".green(),
+                    crate::storage::MessageRole::System => "System".yellow(),
+                };
+
+                println!(
+                    "[{}] Session {} - {} - {}",
+                    (idx + 1).to_string().bold(),
+                    session_prefix.cyan(),
+                    relative_time.dimmed(),
+                    repo_name.white()
+                );
+
+                // Format the snippet - replace ** markers with colored text
+                let snippet_formatted = result.snippet.replace("**", ""); // FTS5 markers
+
+                println!("    [{role_display}] ...{snippet_formatted}...\n");
+            }
+
+            // Display count info
+            let count_msg = if results.len() >= args.limit {
+                format!(
+                    "Found {} results (showing 1-{}, use --limit to see more)",
+                    results.len(),
+                    args.limit
+                )
+            } else {
+                format!(
+                    "Found {} result{}",
+                    results.len(),
+                    if results.len() == 1 { "" } else { "s" }
+                )
+            };
+            println!("{}", count_msg.dimmed());
+        }
     }
-
-    // Display header
-    println!(
-        "Search results for \"{}\":\n",
-        args.query.cyan()
-    );
-
-    // Display results
-    for (idx, result) in results.iter().enumerate() {
-        let session_prefix = &result.session_id.to_string()[..8];
-        let relative_time = format_relative_time(&result.timestamp);
-        let repo_name = extract_repo_name(&result.working_directory);
-
-        let role_display = match result.role {
-            crate::storage::MessageRole::User => "User".blue(),
-            crate::storage::MessageRole::Assistant => "Assistant".green(),
-            crate::storage::MessageRole::System => "System".yellow(),
-        };
-
-        println!(
-            "[{}] Session {} - {} - {}",
-            (idx + 1).to_string().bold(),
-            session_prefix.cyan(),
-            relative_time.dimmed(),
-            repo_name.white()
-        );
-
-        // Format the snippet - replace ** markers with colored text
-        let snippet_formatted = result
-            .snippet
-            .replace("**", "");  // FTS5 markers are for highlighting
-
-        println!(
-            "    [{role_display}] ...{snippet_formatted}...\n"
-        );
-    }
-
-    // Display count info
-    let count_msg = if results.len() >= args.limit {
-        format!(
-            "Found {} results (showing 1-{}, use --limit to see more)",
-            results.len(),
-            args.limit
-        )
-    } else {
-        format!("Found {} result{}", results.len(), if results.len() == 1 { "" } else { "s" })
-    };
-    println!("{}", count_msg.dimmed());
 
     Ok(())
 }
