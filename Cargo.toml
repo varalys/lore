@@ -20,14 +20,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 
-# File watching (for daemon, later)
-# notify = "6"
+# File watching (for daemon)
+notify = "6"
+notify-debouncer-mini = "0.4"
 
 # Git
 git2 = "0.18"
 
-# Async (for daemon, later)
-# tokio = { version = "1", features = ["full"] }
+# Async (for daemon)
+tokio = { version = "1", features = ["full"] }
+
+# Logging for daemon
+tracing-appender = "0.2"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
@@ -36,6 +40,7 @@ thiserror = "1"
 anyhow = "1"
 dirs = "5"
 glob = "0.3"
+libc = "0.2"
 
 # Logging
 tracing = "0.1"
