@@ -499,10 +499,7 @@ mod tests {
         assert_eq!(parsed.messages.len(), 2);
         assert_eq!(parsed.messages[0].role, MessageRole::User);
         assert_eq!(parsed.messages[1].role, MessageRole::Assistant);
-        assert_eq!(
-            parsed.model,
-            Some("claude-opus-4-5-20251101".to_string())
-        );
+        assert_eq!(parsed.model, Some("claude-opus-4-5-20251101".to_string()));
     }
 
     #[test]
@@ -586,8 +583,12 @@ mod tests {
         assert_eq!(parsed.messages.len(), 1);
         if let MessageContent::Blocks(blocks) = &parsed.messages[0].content {
             assert_eq!(blocks.len(), 2);
-            assert!(matches!(&blocks[0], ContentBlock::Thinking { thinking } if thinking == "Let me analyze this..."));
-            assert!(matches!(&blocks[1], ContentBlock::Text { text } if text == "Here is my answer"));
+            assert!(
+                matches!(&blocks[0], ContentBlock::Thinking { thinking } if thinking == "Let me analyze this...")
+            );
+            assert!(
+                matches!(&blocks[1], ContentBlock::Text { text } if text == "Here is my answer")
+            );
         } else {
             panic!("Expected Blocks content");
         }
@@ -607,10 +608,7 @@ mod tests {
         let file = create_temp_session_file(&json);
         let parsed = parse_amp_session_file(file.path()).expect("Failed to parse");
 
-        assert_eq!(
-            parsed.working_directory,
-            "/Users/franzer/projects/redactyl"
-        );
+        assert_eq!(parsed.working_directory, "/Users/franzer/projects/redactyl");
     }
 
     #[test]
