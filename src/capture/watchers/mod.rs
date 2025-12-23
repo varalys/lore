@@ -16,6 +16,9 @@ use crate::storage::models::{Message, Session};
 /// Aider session parser for markdown chat history files.
 pub mod aider;
 
+/// Amp CLI session parser for JSON files.
+pub mod amp;
+
 /// Claude Code session parser for JSONL files.
 pub mod claude_code;
 
@@ -166,6 +169,7 @@ impl WatcherRegistry {
 ///
 /// This includes watchers for:
 /// - Aider (markdown files in project directories)
+/// - Amp CLI (JSON files in ~/.local/share/amp/threads/)
 /// - Claude Code (JSONL files in ~/.claude/projects/)
 /// - Cline (JSON files in VS Code extension storage)
 /// - Codex CLI (JSONL files in ~/.codex/sessions/)
@@ -175,6 +179,7 @@ impl WatcherRegistry {
 pub fn default_registry() -> WatcherRegistry {
     let mut registry = WatcherRegistry::new();
     registry.register(Box::new(aider::AiderWatcher));
+    registry.register(Box::new(amp::AmpWatcher));
     registry.register(Box::new(claude_code::ClaudeCodeWatcher));
     registry.register(Box::new(cline::ClineWatcher));
     registry.register(Box::new(codex::CodexWatcher));
@@ -283,10 +288,11 @@ mod tests {
         let watchers = registry.all_watchers();
 
         // Should have all built-in watchers
-        assert!(watchers.len() >= 7);
+        assert!(watchers.len() >= 8);
 
         // Check that all watchers are registered
         assert!(registry.get_watcher("aider").is_some());
+        assert!(registry.get_watcher("amp").is_some());
         assert!(registry.get_watcher("claude-code").is_some());
         assert!(registry.get_watcher("cline").is_some());
         assert!(registry.get_watcher("codex").is_some());

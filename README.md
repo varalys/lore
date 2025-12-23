@@ -26,6 +26,7 @@ Each AI tool stores conversation data in its own format and location. Lore inclu
 - **Claude Code**: JSONL files in `~/.claude/projects/<hash>/sessions/`
 - **Codex CLI**: JSONL files in `~/.codex/sessions/`
 - **Gemini CLI**: JSON files in `~/.gemini/tmp/<hash>/chats/`
+- **Amp**: JSON files in `~/.local/share/amp/threads/`
 - **Aider**: Markdown files (`.aider.chat.history.md`) in project directories
 - **Continue.dev**: JSON files in `~/.continue/sessions/`
 - **Cline**: JSON in VS Code's extension storage
@@ -130,6 +131,7 @@ $ lore show 7f3a2b1
 | Claude Code | Supported | `~/.claude/projects/` |
 | Codex CLI | Supported | `~/.codex/sessions/` |
 | Gemini CLI | Supported | `~/.gemini/tmp/*/chats/` |
+| Amp | Supported | `~/.local/share/amp/threads/` |
 | Aider | Supported | `.aider.chat.history.md` |
 | Continue.dev | Supported | `~/.continue/sessions/` |
 | Cline | Supported | VS Code extension storage |
