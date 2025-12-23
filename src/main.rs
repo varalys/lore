@@ -5,6 +5,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod cli;
 mod capture;
 mod config;
+mod daemon;
 mod git;
 mod storage;
 
@@ -51,6 +52,9 @@ enum Commands {
 
     /// Manage git hooks for automatic session linking
     Hooks(commands::hooks::Args),
+
+    /// Manage the background daemon for automatic session capture
+    Daemon(commands::daemon::Args),
 }
 
 fn main() -> Result<()> {
@@ -78,5 +82,6 @@ fn main() -> Result<()> {
         Commands::Config(args) => commands::config::run(args),
         Commands::Import(args) => commands::import::run(args),
         Commands::Hooks(args) => commands::hooks::run(args),
+        Commands::Daemon(args) => commands::daemon::run(args),
     }
 }

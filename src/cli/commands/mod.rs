@@ -6,6 +6,9 @@
 /// Configuration viewing and management.
 pub mod config;
 
+/// Background daemon management (start, stop, status, logs).
+pub mod daemon;
+
 /// Git hooks management (install, uninstall, status).
 pub mod hooks;
 
