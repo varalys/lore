@@ -22,11 +22,17 @@ pub mod claude_code;
 /// Cline (Claude Dev) session parser for VS Code extension storage.
 pub mod cline;
 
+/// Codex CLI session parser for JSONL files.
+pub mod codex;
+
 /// Continue.dev session parser for JSON session files.
 pub mod continue_dev;
 
 /// Cursor IDE session parser for SQLite databases (experimental).
 pub mod cursor;
+
+/// Gemini CLI session parser for JSON files.
+pub mod gemini;
 
 /// Information about a tool that can be watched for sessions.
 ///
@@ -162,15 +168,19 @@ impl WatcherRegistry {
 /// - Aider (markdown files in project directories)
 /// - Claude Code (JSONL files in ~/.claude/projects/)
 /// - Cline (JSON files in VS Code extension storage)
+/// - Codex CLI (JSONL files in ~/.codex/sessions/)
 /// - Continue.dev (JSON files in ~/.continue/sessions/)
 /// - Cursor IDE (SQLite databases in workspace storage, experimental)
+/// - Gemini CLI (JSON files in ~/.gemini/tmp/)
 pub fn default_registry() -> WatcherRegistry {
     let mut registry = WatcherRegistry::new();
     registry.register(Box::new(aider::AiderWatcher));
     registry.register(Box::new(claude_code::ClaudeCodeWatcher));
     registry.register(Box::new(cline::ClineWatcher));
+    registry.register(Box::new(codex::CodexWatcher));
     registry.register(Box::new(continue_dev::ContinueDevWatcher));
     registry.register(Box::new(cursor::CursorWatcher));
+    registry.register(Box::new(gemini::GeminiWatcher));
     registry
 }
 
@@ -273,14 +283,16 @@ mod tests {
         let watchers = registry.all_watchers();
 
         // Should have all built-in watchers
-        assert!(watchers.len() >= 5);
+        assert!(watchers.len() >= 7);
 
         // Check that all watchers are registered
         assert!(registry.get_watcher("aider").is_some());
         assert!(registry.get_watcher("claude-code").is_some());
         assert!(registry.get_watcher("cline").is_some());
+        assert!(registry.get_watcher("codex").is_some());
         assert!(registry.get_watcher("continue").is_some());
         assert!(registry.get_watcher("cursor").is_some());
+        assert!(registry.get_watcher("gemini").is_some());
     }
 
     #[test]
