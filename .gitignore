@@ -46,3 +46,10 @@ llm-config/
 .env.*.local
 secrets.yaml
 secrets.json
+
+# Development planning docs (local only)
+docs/
+ROADMAP.md
+WORKLOG.md
+AGENTS.md
+GEMINI.md
