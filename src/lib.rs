@@ -10,6 +10,7 @@
 //!
 //! - [`capture`] - Session capture from AI coding tools
 //! - [`config`] - Configuration management
+//! - [`daemon`] - Background daemon for automatic session capture
 //! - [`git`] - Git repository integration and auto-linking
 //! - [`storage`] - SQLite database operations and data models
 
@@ -18,6 +19,9 @@ pub mod capture;
 
 /// Configuration management for Lore settings.
 pub mod config;
+
+/// Background daemon for automatic session capture and file watching.
+pub mod daemon;
 
 /// Git repository integration for commit linking and auto-detection.
 pub mod git;

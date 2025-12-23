@@ -105,23 +105,23 @@ Improve the connection between sessions and git history.
 Enable automatic session capture without manual import.
 
 ### 3.1 Daemon Infrastructure
-- [ ] Add tokio dependency for async runtime
-- [ ] Add notify dependency for file watching
-- [ ] Design daemon process management (start/stop/status)
-- [ ] Implement Unix socket IPC for CLI communication
+- [x] Add tokio dependency for async runtime
+- [x] Add notify dependency for file watching
+- [x] Design daemon process management (start/stop/status)
+- [x] Implement Unix socket IPC for CLI communication
 
 ### 3.2 File Watcher
-- [ ] Implement directory watcher for Claude Code sessions
-- [ ] Handle file creation, modification, and deletion events
-- [ ] Implement incremental parsing (track read positions)
-- [ ] Handle session boundaries (when does a session "end"?)
+- [x] Implement directory watcher for Claude Code sessions
+- [x] Handle file creation, modification, and deletion events
+- [x] Implement incremental parsing (track read positions)
+- [x] Handle session boundaries (when does a session "end"?)
 
 ### 3.3 Daemon Commands
-- [ ] Implement `lore daemon start`
-- [ ] Implement `lore daemon stop`
-- [ ] Implement `lore daemon status`
-- [ ] Implement `lore daemon logs`
-- [ ] Add auto-start configuration option
+- [x] Implement `lore daemon start`
+- [x] Implement `lore daemon stop`
+- [x] Implement `lore daemon status`
+- [x] Implement `lore daemon logs`
+- [ ] Add auto-start configuration option (deferred)
 
 ---
 
