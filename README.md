@@ -30,6 +30,7 @@ Each AI tool stores conversation data in its own format and location. Lore inclu
 - **Aider**: Markdown files (`.aider.chat.history.md`) in project directories
 - **Continue.dev**: JSON files in `~/.continue/sessions/`
 - **Cline**: JSON in VS Code's extension storage
+- **OpenCode**: JSON files in `~/.local/share/opencode/storage/`
 
 You can import existing sessions with `lore import`, or run `lore daemon start` to watch for new sessions in real-time.
 
@@ -135,6 +136,7 @@ $ lore show 7f3a2b1
 | Aider | Supported | `.aider.chat.history.md` |
 | Continue.dev | Supported | `~/.continue/sessions/` |
 | Cline | Supported | VS Code extension storage |
+| OpenCode | Supported | `~/.local/share/opencode/storage/` |
 | Cursor | Experimental | Conversations may be cloud-only |
 
 ## Background Daemon
