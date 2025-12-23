@@ -105,8 +105,15 @@ enum Commands {
     /// Import sessions from AI coding tools
     #[command(
         long_about = "Discovers and imports session files from AI coding tools into\n\
-        the Lore database. Currently supports Claude Code, Cursor, Cline,\n\
-        Aider, and Continue. Tracks imported files to avoid duplicates."
+        the Lore database. Tracks imported files to avoid duplicates.\n\n\
+        Supported tools:\n  \
+        - Aider (markdown chat history files)\n  \
+        - Claude Code (JSONL files in ~/.claude/projects/)\n  \
+        - Cline (VS Code extension storage)\n  \
+        - Codex CLI (JSONL files in ~/.codex/sessions/)\n  \
+        - Continue.dev (JSON files in ~/.continue/sessions/)\n  \
+        - Cursor IDE (SQLite databases, experimental)\n  \
+        - Gemini CLI (JSON files in ~/.gemini/tmp/)"
     )]
     Import(commands::import::Args),
 
