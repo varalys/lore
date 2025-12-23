@@ -32,7 +32,8 @@ use crate::storage::Database;
         - Codex CLI (JSONL files in ~/.codex/sessions/)\n  \
         - Continue.dev (JSON files in ~/.continue/sessions/)\n  \
         - Gemini CLI (JSON files in ~/.gemini/tmp/)\n  \
-        - OpenCode (JSON files in ~/.local/share/opencode/storage/)",
+        - OpenCode (JSON files in ~/.local/share/opencode/storage/)\n  \
+        - Roo Code (JSON in VS Code extension storage)",
     after_help = "EXAMPLES:\n    \
         lore import              Import new sessions from all tools\n    \
         lore import --dry-run    Preview what would be imported\n    \
