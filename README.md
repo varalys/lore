@@ -50,12 +50,12 @@ Links are bidirectional: given a session, find its commits; given a commit, find
 
 ### From Releases
 
-Download the latest binary from [GitHub Releases](https://github.com/wemfore/lore/releases) and add it to your PATH.
+Download the latest binary from [GitHub Releases](https://github.com/redactyl/lore/releases) and add it to your PATH.
 
 ### From Source
 
 ```bash
-git clone https://github.com/wemfore/lore.git
+git clone https://github.com/redactyl/lore.git
 cd lore
 cargo install --path .
 ```
@@ -244,7 +244,7 @@ All data stays on your machine. There is no cloud sync or external service.
 
 ## License
 
-MIT
+Apache 2.0
 
 ## Contributing
 

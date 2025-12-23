@@ -14,7 +14,7 @@ Thank you for your interest in contributing to Lore! This document provides guid
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourname/lore.git
+git clone https://github.com/redactyl/lore.git
 cd lore
 
 # Build the project
