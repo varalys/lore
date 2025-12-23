@@ -160,7 +160,9 @@ fn parse_aider_history(path: &Path) -> Result<Vec<(Session, Vec<Message>)>> {
             }
 
             in_tool_output = true;
-            let tool_line = line.strip_prefix("> ").unwrap_or(line.strip_prefix(">").unwrap_or(""));
+            let tool_line = line
+                .strip_prefix("> ")
+                .unwrap_or(line.strip_prefix(">").unwrap_or(""));
             if !current_content.is_empty() {
                 current_content.push('\n');
             }
@@ -174,7 +176,8 @@ fn parse_aider_history(path: &Path) -> Result<Vec<(Session, Vec<Message>)>> {
                 if !current_content.is_empty() {
                     current_content.push('\n');
                 }
-            } else if current_role == Some(MessageRole::User) && !current_content.trim().is_empty() {
+            } else if current_role == Some(MessageRole::User) && !current_content.trim().is_empty()
+            {
                 // End of user message, switch to assistant
                 current_messages.push(ParsedMessage {
                     role: MessageRole::User,

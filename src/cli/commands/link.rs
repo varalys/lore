@@ -32,22 +32,28 @@ const DEFAULT_WINDOW_MINUTES: i64 = 30;
 pub struct Args {
     /// Session ID prefixes to link (can specify multiple)
     #[arg(value_name = "SESSION")]
-    #[arg(long_help = "One or more session ID prefixes to link. You only need to\n\
+    #[arg(
+        long_help = "One or more session ID prefixes to link. You only need to\n\
         provide enough characters to uniquely identify each session.\n\
-        Required unless --auto is specified.")]
+        Required unless --auto is specified."
+    )]
     pub sessions: Vec<String>,
 
     /// Commit to link to (defaults to HEAD)
     #[arg(long, default_value = "HEAD", value_name = "REF")]
-    #[arg(long_help = "The git commit to link sessions to. Accepts any git reference:\n\
-        SHA, HEAD, HEAD~1, branch name, tag, etc. Defaults to HEAD.")]
+    #[arg(
+        long_help = "The git commit to link sessions to. Accepts any git reference:\n\
+        SHA, HEAD, HEAD~1, branch name, tag, etc. Defaults to HEAD."
+    )]
     pub commit: String,
 
     /// Automatically find and link sessions based on heuristics
     #[arg(long)]
-    #[arg(long_help = "Automatically find sessions that likely contributed to the\n\
+    #[arg(
+        long_help = "Automatically find sessions that likely contributed to the\n\
         commit based on time proximity and file overlap. Sessions are\n\
-        scored and linked if they meet the confidence threshold.")]
+        scored and linked if they meet the confidence threshold."
+    )]
     pub auto: bool,
 
     /// Minimum confidence score (0.0-1.0) for auto-linking
@@ -59,8 +65,10 @@ pub struct Args {
 
     /// Preview what would be linked without making changes
     #[arg(long)]
-    #[arg(long_help = "Shows what links would be created without actually modifying\n\
-        the database. Useful for previewing auto-link results.")]
+    #[arg(
+        long_help = "Shows what links would be created without actually modifying\n\
+        the database. Useful for previewing auto-link results."
+    )]
     pub dry_run: bool,
 }
 
@@ -79,7 +87,9 @@ pub fn run(args: Args) -> Result<()> {
 /// Runs manual linking for explicitly specified session IDs.
 fn run_manual_link(args: Args) -> Result<()> {
     if args.sessions.is_empty() {
-        anyhow::bail!("No sessions specified. Use --auto for automatic linking or provide session IDs.");
+        anyhow::bail!(
+            "No sessions specified. Use --auto for automatic linking or provide session IDs."
+        );
     }
 
     let db = Database::open_default()?;
@@ -276,10 +286,7 @@ fn run_auto_link(args: Args) -> Result<()> {
             linked_count.to_string().green()
         );
     } else {
-        println!(
-            "Linked {} session(s)",
-            linked_count.to_string().green()
-        );
+        println!("Linked {} session(s)", linked_count.to_string().green());
     }
 
     if skipped_existing > 0 {
@@ -294,9 +301,8 @@ fn run_auto_link(args: Args) -> Result<()> {
 
 /// Resolves a commit reference to a full SHA.
 fn resolve_commit(commit_ref: &str) -> Result<String> {
-    let repo = git2::Repository::discover(".").context(
-        "Not in a git repository. Use --commit to specify a commit SHA.",
-    )?;
+    let repo = git2::Repository::discover(".")
+        .context("Not in a git repository. Use --commit to specify a commit SHA.")?;
 
     let obj = repo
         .revparse_single(commit_ref)

@@ -250,9 +250,9 @@ fn parse_cline_task(history_path: &Path) -> Result<Option<(Session, Vec<Message>
         .and_then(|ts| Utc.timestamp_millis_opt(ts).single())
         .or_else(|| {
             metadata.ts.as_ref().and_then(|v| match v {
-                serde_json::Value::Number(n) => {
-                    n.as_i64().and_then(|ts| Utc.timestamp_millis_opt(ts).single())
-                }
+                serde_json::Value::Number(n) => n
+                    .as_i64()
+                    .and_then(|ts| Utc.timestamp_millis_opt(ts).single()),
                 serde_json::Value::String(s) => DateTime::parse_from_rfc3339(s)
                     .ok()
                     .map(|dt| dt.with_timezone(&Utc)),
@@ -379,7 +379,9 @@ mod tests {
         let paths = watcher.watch_paths();
 
         assert!(!paths.is_empty());
-        assert!(paths[0].to_string_lossy().contains("saoudrizwan.claude-dev"));
+        assert!(paths[0]
+            .to_string_lossy()
+            .contains("saoudrizwan.claude-dev"));
         assert!(paths[0].to_string_lossy().contains("tasks"));
     }
 

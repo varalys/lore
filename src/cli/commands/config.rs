@@ -39,8 +39,10 @@ pub enum ConfigCommand {
     Show,
 
     /// Get a single configuration value
-    #[command(long_about = "Retrieves the current value of a specific configuration key.\n\
-        Valid keys: watchers, auto_link, auto_link_threshold, commit_footer")]
+    #[command(
+        long_about = "Retrieves the current value of a specific configuration key.\n\
+        Valid keys: watchers, auto_link, auto_link_threshold, commit_footer"
+    )]
     Get {
         /// Configuration key to retrieve
         #[arg(value_name = "KEY")]
@@ -48,8 +50,10 @@ pub enum ConfigCommand {
     },
 
     /// Set a configuration value
-    #[command(long_about = "Sets a configuration value and saves it to the config file.\n\
-        Valid keys: watchers, auto_link, auto_link_threshold, commit_footer")]
+    #[command(
+        long_about = "Sets a configuration value and saves it to the config file.\n\
+        Valid keys: watchers, auto_link, auto_link_threshold, commit_footer"
+    )]
     Set {
         /// Configuration key to set
         #[arg(value_name = "KEY")]

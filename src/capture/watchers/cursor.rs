@@ -261,13 +261,23 @@ fn parse_cursor_conversation(
     // Determine timestamps
     let started_at = conversation
         .created_at
-        .or_else(|| conversation.messages.first().and_then(|m| m.timestamp.or(m.created_at)))
+        .or_else(|| {
+            conversation
+                .messages
+                .first()
+                .and_then(|m| m.timestamp.or(m.created_at))
+        })
         .and_then(|ts| Utc.timestamp_millis_opt(ts).single())
         .unwrap_or_else(Utc::now);
 
     let ended_at = conversation
         .updated_at
-        .or_else(|| conversation.messages.last().and_then(|m| m.timestamp.or(m.created_at)))
+        .or_else(|| {
+            conversation
+                .messages
+                .last()
+                .and_then(|m| m.timestamp.or(m.created_at))
+        })
         .and_then(|ts| Utc.timestamp_millis_opt(ts).single());
 
     // Create session
@@ -278,7 +288,9 @@ fn parse_cursor_conversation(
         started_at,
         ended_at,
         model: None,
-        working_directory: conversation.workspace_path.unwrap_or_else(|| ".".to_string()),
+        working_directory: conversation
+            .workspace_path
+            .unwrap_or_else(|| ".".to_string()),
         git_branch: None,
         source_path: Some(source_path.to_string_lossy().to_string()),
         message_count: conversation.messages.len() as i32,
@@ -354,7 +366,10 @@ mod tests {
         let info = watcher.info();
 
         assert_eq!(info.name, "cursor");
-        assert_eq!(info.description, "Cursor IDE AI conversations (experimental)");
+        assert_eq!(
+            info.description,
+            "Cursor IDE AI conversations (experimental)"
+        );
         assert!(!info.default_paths.is_empty());
     }
 
