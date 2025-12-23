@@ -134,31 +134,53 @@ Expand capture beyond Claude Code.
 - [x] Refactor claude_code.rs to implement trait
 - [x] Add watcher registration and discovery
 
-### 4.2 Cursor Watcher (Experimental)
-- [x] Research Cursor session storage format
-- [x] Implement SQLite state.vscdb parser
-- [x] Handle schema version differences
-- [x] Add Cursor watcher to daemon
-- [!] Note: Conversations appear to be synced to Cursor cloud, not stored locally
-
-### 4.3 Aider Watcher
+### 4.2 Aider Watcher
 - [x] Research Aider chat history format (.aider.chat.history.md)
 - [x] Implement markdown parser for chat history
 - [x] Add Aider watcher to registry
 
-### 4.4 Continue.dev Watcher
+### 4.3 Continue.dev Watcher
 - [x] Research Continue.dev session storage (~/.continue/sessions/)
 - [x] Implement JSON session parser
 - [x] Add Continue.dev watcher to registry
 
-### 4.5 Cline Watcher
+### 4.4 Cline Watcher
 - [x] Research Cline (Claude Dev) storage format
 - [x] Implement JSON conversation parser
 - [x] Add Cline watcher to registry
 
-### 4.6 Generic MCP Watcher (Future)
+### 4.5 Codex CLI Watcher
+- [x] Research Codex CLI session storage (~/.codex/sessions/)
+- [x] Implement JSONL parser
+- [x] Add Codex watcher to registry
+
+### 4.6 Gemini CLI Watcher
+- [x] Research Gemini CLI session storage (~/.gemini/tmp/)
+- [x] Implement JSON parser
+- [x] Add Gemini watcher to registry
+
+### 4.7 Amp Watcher
+- [x] Research Amp session storage (~/.local/share/amp/threads/)
+- [x] Implement JSON parser with thinking block support
+- [x] Add Amp watcher to registry
+
+### 4.8 OpenCode Watcher
+- [x] Research OpenCode session storage (~/.local/share/opencode/storage/)
+- [x] Implement multi-file JSON parser (session/message/part structure)
+- [x] Add OpenCode watcher to registry
+
+### 4.9 Roo Code Watcher
+- [x] Research Roo Code storage (VS Code extension, fork of Cline)
+- [x] Implement JSON conversation parser
+- [x] Add Roo Code watcher to registry
+
+### 4.10 Generic MCP Watcher (Future)
 - [ ] Research MCP protocol for session capture
 - [ ] Design MCP-based capture approach
+
+### 4.11 Cursor Watcher (Blocked)
+- [x] Research Cursor session storage format
+- [!] Conversations synced to cloud, not stored locally - removed from watchers
 
 ---
 
@@ -190,29 +212,77 @@ Prepare for public release.
 
 ---
 
-## Backlog (Future Phases)
+## Phase 6: Cloud Sync Foundation
 
-Items for consideration after MVP.
+Enable enterprise users to sync sessions to cloud storage.
 
-### Cloud Sync
-- [ ] User accounts and authentication
-- [ ] Session sync protocol
-- [ ] Conflict resolution
-- [ ] Encryption at rest
+### 6.1 API Key Configuration
+- [ ] Add `api_key` to config schema
+- [ ] Add `lore config set api_key <key>` support
+- [ ] Add `lore auth login` command (interactive browser flow)
+- [ ] Add `lore auth logout` command
+- [ ] Add `lore auth status` command
 
-### Team Features
-- [ ] Session sharing permissions
-- [ ] Team dashboard
-- [ ] GitHub/GitLab PR integration
+### 6.2 Sync Protocol Design
+- [ ] Define sync API contract (REST endpoints)
+- [ ] Design session upload format (JSON payload)
+- [ ] Design incremental sync (only new sessions/messages)
+- [ ] Handle offline-first with queue for pending uploads
 
-### Additional Integrations
-- [ ] VS Code extension
-- [ ] GitHub Copilot watcher (likely cloud-only, needs investigation)
-- [ ] Windsurf watcher (Codeium-based, investigate storage format)
-- [ ] Sourcegraph Cody watcher (investigate storage format)
-- [ ] Amazon Q Developer watcher (investigate storage format)
-- [ ] Tabnine watcher (investigate storage format)
-- [ ] Cursor watcher improvements (reverse engineer cloud API or monitor traffic)
+### 6.3 Sync Implementation
+- [ ] Implement session upload to cloud API
+- [ ] Add `lore sync` manual sync command
+- [ ] Add background sync in daemon (when API key present)
+- [ ] Add sync status to `lore status` output
+- [ ] Add `--no-sync` flag for privacy-sensitive sessions
+
+### 6.4 Encryption
+- [ ] Encrypt session content before upload (client-side)
+- [ ] Key derivation from user credentials
+- [ ] Ensure cloud storage is zero-knowledge
+
+---
+
+## Phase 7: Enterprise Features
+
+Team collaboration features (requires lore-cloud web app).
+
+### 7.1 Team Accounts
+- [ ] Organization/team creation in web app
+- [ ] Invite team members
+- [ ] API key scoped to organization
+
+### 7.2 Session Sharing
+- [ ] Share sessions with team (sync to shared workspace)
+- [ ] Permissions (view-only, admin)
+- [ ] Session visibility controls (private, team, public)
+
+### 7.3 PR Integration
+- [ ] GitHub App for PR comments with linked sessions
+- [ ] GitLab integration
+- [ ] Link sessions in PR description automatically
+
+### 7.4 Web Dashboard
+- [ ] View synced sessions in browser
+- [ ] Search across team sessions
+- [ ] Session analytics (usage patterns, tool breakdown)
+
+---
+
+## Phase 8: Additional Integrations
+
+### 8.1 VS Code Extension
+- [ ] Show linked sessions in editor
+- [ ] Quick link current session to commit
+- [ ] Session browser panel
+
+### 8.2 Additional Watchers
+- [ ] GitHub Copilot (likely cloud-only, needs investigation)
+- [ ] Windsurf (Codeium-based, investigate storage format)
+- [ ] Sourcegraph Cody (investigate storage format)
+- [ ] Amazon Q Developer (investigate storage format)
+- [ ] Tabnine (investigate storage format)
+- [ ] Cursor improvements (reverse engineer cloud API or monitor traffic)
 
 ---
 
@@ -226,6 +296,13 @@ Items for consideration after MVP.
 - Search index: SQLite FTS5 vs tantivy vs separate index
 - Config format: YAML vs TOML
 - Daemon IPC: Unix socket vs named pipe vs HTTP
+
+### Cloud Architecture Decisions (Phase 6+)
+- **Cloud storage**: Turso (SQLite-compatible, libsql sync) vs D1 vs Supabase
+- **Web app repo**: Separate `lore-cloud` repo for web dashboard and API
+- **Auth flow**: API key vs OAuth vs both
+- **Sync model**: Push from CLI vs pull from server vs bidirectional
+- **Encryption**: Client-side E2E encryption for zero-knowledge storage
 
 ### Technical Debt
 - Dead code in git/mod.rs (repo_info, calculate_link_confidence)
