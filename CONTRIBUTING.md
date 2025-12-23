@@ -94,6 +94,19 @@ refactor: extract common parsing logic
 
 ## Adding a New Watcher
 
+### For Tool Creators
+
+If you build an AI coding tool and want Lore to support it, open an issue with:
+
+- **Tool name and website**
+- **Storage location**: Where session files are stored (e.g., `~/.yourtool/sessions/`)
+- **File format**: JSON, JSONL, Markdown, SQLite, etc.
+- **Schema documentation** or example session files (sanitized of sensitive data)
+
+We can help build the watcher, or you can submit a PR yourself.
+
+### For Contributors
+
 To add support for a new AI coding tool:
 
 1. Create a new file in `src/capture/watchers/`:
