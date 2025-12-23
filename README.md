@@ -140,6 +140,8 @@ $ lore show 7f3a2b1
 | Roo Code | Supported | VS Code extension storage |
 | OpenCode | Supported | `~/.local/share/opencode/storage/` |
 
+**Building an AI coding tool?** We welcome contributions to support additional tools. Open an issue with your tool's session storage location and format, or submit a PR adding a watcher. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
 ## Background Daemon
 
 The daemon watches for new sessions in real-time and imports them automatically.
