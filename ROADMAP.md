@@ -214,32 +214,36 @@ Prepare for public release.
 
 ## Phase 6: Cloud Sync Foundation
 
-Enable enterprise users to sync sessions to cloud storage.
+Enable users to sync sessions to cloud storage. Free tier gets basic sync; paid teams get encryption.
 
-### 6.1 API Key Configuration
-- [ ] Add `api_key` to config schema
-- [ ] Add `lore config set api_key <key>` support
-- [ ] Add `lore auth login` command (interactive browser flow)
+### 6.1 Authentication
+- [ ] Add `lore auth login` command (opens browser for OAuth)
 - [ ] Add `lore auth logout` command
 - [ ] Add `lore auth status` command
+- [ ] Store credentials in `~/.lore/credentials`
+- [ ] Token refresh handling
 
 ### 6.2 Sync Protocol Design
-- [ ] Define sync API contract (REST endpoints)
+- [ ] Define sync API contract (REST endpoints in lore-cloud)
 - [ ] Design session upload format (JSON payload)
-- [ ] Design incremental sync (only new sessions/messages)
+- [ ] Design incremental sync (track last sync timestamp per session)
 - [ ] Handle offline-first with queue for pending uploads
+- [ ] Define rate limits and quotas per tier
 
 ### 6.3 Sync Implementation
 - [ ] Implement session upload to cloud API
 - [ ] Add `lore sync` manual sync command
-- [ ] Add background sync in daemon (when API key present)
+- [ ] Add background sync in daemon (when authenticated)
 - [ ] Add sync status to `lore status` output
-- [ ] Add `--no-sync` flag for privacy-sensitive sessions
+- [ ] Add `--no-sync` flag for sensitive sessions
+- [ ] First-sync onboarding prompt (explain what syncs, offer encryption)
 
-### 6.4 Encryption
-- [ ] Encrypt session content before upload (client-side)
-- [ ] Key derivation from user credentials
-- [ ] Ensure cloud storage is zero-knowledge
+### 6.4 Encryption (Paid Team Feature)
+- [ ] Generate user keypair on first team join
+- [ ] Encrypt message content client-side (AES-256-GCM)
+- [ ] Per-session keys wrapped for team members' public keys
+- [ ] Key storage and backup flow
+- [ ] Decrypt on display (`lore show` fetches and decrypts)
 
 ---
 
@@ -297,12 +301,21 @@ Team collaboration features (requires lore-cloud web app).
 - Config format: YAML vs TOML
 - Daemon IPC: Unix socket vs named pipe vs HTTP
 
-### Cloud Architecture Decisions (Phase 6+)
-- **Cloud storage**: Turso (SQLite-compatible, libsql sync) vs D1 vs Supabase
-- **Web app repo**: Separate `lore-cloud` repo for web dashboard and API
-- **Auth flow**: API key vs OAuth vs both
-- **Sync model**: Push from CLI vs pull from server vs bidirectional
-- **Encryption**: Client-side E2E encryption for zero-knowledge storage
+### Cloud Architecture Decisions (Phase 6+) - DECIDED
+
+- **Cloud storage**: Turso (SQLite-compatible, works with our schema)
+- **Web app repo**: Separate `lore-cloud` repo for web dashboard, API, billing
+- **Auth flow**: OAuth via browser
+  - `lore auth login` opens browser to web app
+  - User authenticates (GitHub, Google, or email)
+  - CLI receives token, stores in `~/.lore/credentials`
+- **Sync model**: Push from CLI to cloud API
+- **Encryption**: Zero-knowledge E2E encryption (paid team feature)
+  - Metadata (session ID, timestamps, tool, directory) unencrypted for indexing
+  - Message content encrypted client-side before upload
+  - First-sync prompt asks user to enable encryption
+  - We cannot read customer session content
+  - Per-session keys wrapped for team members (enables sharing)
 
 ### Technical Debt
 - Dead code in git/mod.rs (repo_info, calculate_link_confidence)
