@@ -37,6 +37,9 @@ pub mod cursor;
 /// Gemini CLI session parser for JSON files.
 pub mod gemini;
 
+/// OpenCode CLI session parser for multi-file JSON storage.
+pub mod opencode;
+
 /// Information about a tool that can be watched for sessions.
 ///
 /// Contains metadata about the watcher including its name, description,
@@ -176,6 +179,7 @@ impl WatcherRegistry {
 /// - Continue.dev (JSON files in ~/.continue/sessions/)
 /// - Cursor IDE (SQLite databases in workspace storage, experimental)
 /// - Gemini CLI (JSON files in ~/.gemini/tmp/)
+/// - OpenCode CLI (JSON files in ~/.local/share/opencode/storage/)
 pub fn default_registry() -> WatcherRegistry {
     let mut registry = WatcherRegistry::new();
     registry.register(Box::new(aider::AiderWatcher));
@@ -186,6 +190,7 @@ pub fn default_registry() -> WatcherRegistry {
     registry.register(Box::new(continue_dev::ContinueDevWatcher));
     registry.register(Box::new(cursor::CursorWatcher));
     registry.register(Box::new(gemini::GeminiWatcher));
+    registry.register(Box::new(opencode::OpenCodeWatcher));
     registry
 }
 
@@ -288,7 +293,7 @@ mod tests {
         let watchers = registry.all_watchers();
 
         // Should have all built-in watchers
-        assert!(watchers.len() >= 8);
+        assert!(watchers.len() >= 9);
 
         // Check that all watchers are registered
         assert!(registry.get_watcher("aider").is_some());
@@ -299,6 +304,7 @@ mod tests {
         assert!(registry.get_watcher("continue").is_some());
         assert!(registry.get_watcher("cursor").is_some());
         assert!(registry.get_watcher("gemini").is_some());
+        assert!(registry.get_watcher("opencode").is_some());
     }
 
     #[test]
