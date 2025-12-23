@@ -215,8 +215,8 @@ struct RooCodeTaskMetadata {
 
 /// Parses a Roo Code task from its conversation history file.
 fn parse_roo_code_task(history_path: &Path) -> Result<Option<(Session, Vec<Message>)>> {
-    let content = fs::read_to_string(history_path)
-        .context("Failed to read Roo Code conversation history")?;
+    let content =
+        fs::read_to_string(history_path).context("Failed to read Roo Code conversation history")?;
 
     let raw_messages: Vec<RooCodeApiMessage> =
         serde_json::from_str(&content).context("Failed to parse Roo Code conversation JSON")?;

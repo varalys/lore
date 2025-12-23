@@ -648,9 +648,7 @@ mod tests {
         assert_eq!(info.name, "opencode");
         assert_eq!(info.description, "OpenCode CLI");
         assert!(!info.default_paths.is_empty());
-        assert!(info.default_paths[0]
-            .to_string_lossy()
-            .contains("opencode"));
+        assert!(info.default_paths[0].to_string_lossy().contains("opencode"));
     }
 
     #[test]
@@ -728,7 +726,11 @@ mod tests {
             1766529546342,
             Some("claude-opus-4"),
         );
-        storage.create_text_part("msg_a1", "prt_a1", "Rust is a systems programming language.");
+        storage.create_text_part(
+            "msg_a1",
+            "prt_a1",
+            "Rust is a systems programming language.",
+        );
 
         let parsed = parse_opencode_session(&session_path).expect("Failed to parse");
 
@@ -758,8 +760,12 @@ mod tests {
 
         assert_eq!(parsed.messages.len(), 1);
         // Content should include both text and tool summary
-        assert!(parsed.messages[0].content.contains("Let me read that file."));
-        assert!(parsed.messages[0].content.contains("[tool: read (completed)]"));
+        assert!(parsed.messages[0]
+            .content
+            .contains("Let me read that file."));
+        assert!(parsed.messages[0]
+            .content
+            .contains("[tool: read (completed)]"));
     }
 
     #[test]
@@ -769,7 +775,13 @@ mod tests {
             storage.create_session("project123", "ses_sort_test", "/test/path", 1766529546325);
 
         // Create messages out of order
-        storage.create_message("ses_sort_test", "msg_second", "assistant", 1766529550000, None);
+        storage.create_message(
+            "ses_sort_test",
+            "msg_second",
+            "assistant",
+            1766529550000,
+            None,
+        );
         storage.create_text_part("msg_second", "prt_s", "Second message");
 
         storage.create_message("ses_sort_test", "msg_first", "user", 1766529546342, None);
@@ -867,8 +879,12 @@ mod tests {
     fn test_watcher_parse_source() {
         let watcher = OpenCodeWatcher;
         let storage = TestOpenCodeStorage::new();
-        let session_path =
-            storage.create_session("project123", "ses_watcher_test", "/test/path", 1766529546325);
+        let session_path = storage.create_session(
+            "project123",
+            "ses_watcher_test",
+            "/test/path",
+            1766529546325,
+        );
 
         storage.create_message("ses_watcher_test", "msg_w1", "user", 1766529546342, None);
         storage.create_text_part("msg_w1", "prt_w1", "Hello");
@@ -939,12 +955,8 @@ mod tests {
     #[test]
     fn test_message_with_empty_parts_dir() {
         let storage = TestOpenCodeStorage::new();
-        let session_path = storage.create_session(
-            "project123",
-            "ses_no_parts",
-            "/test/path",
-            1766529546325,
-        );
+        let session_path =
+            storage.create_session("project123", "ses_no_parts", "/test/path", 1766529546325);
 
         storage.create_message("ses_no_parts", "msg_np", "user", 1766529546342, None);
         // Don't create any parts

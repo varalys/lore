@@ -86,10 +86,7 @@ pub fn run(args: Args) -> Result<()> {
             Ok(sources) => sources,
             Err(e) => {
                 tracing::warn!("Failed to find sources for {}: {}", info.name, e);
-                println!(
-                    "  {}",
-                    format!("Error finding sources: {e}").red()
-                );
+                println!("  {}", format!("Error finding sources: {e}").red());
                 total_errors += 1;
                 continue;
             }
@@ -100,10 +97,7 @@ pub fn run(args: Args) -> Result<()> {
             continue;
         }
 
-        println!(
-            "  Found {} source files",
-            sources.len().to_string().green()
-        );
+        println!("  Found {} source files", sources.len().to_string().green());
 
         let mut watcher_imported = 0;
         let mut watcher_skipped = 0;
@@ -210,10 +204,8 @@ pub fn run(args: Args) -> Result<()> {
     } else {
         println!(
             "{}",
-            format!(
-                "Imported {total_imported}, skipped {total_skipped}, {total_errors} errors"
-            )
-            .bold()
+            format!("Imported {total_imported}, skipped {total_skipped}, {total_errors} errors")
+                .bold()
         );
 
         if total_imported > 0 {
