@@ -10,9 +10,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::process::Command;
 
-use crate::daemon::{
-    send_command_sync, DaemonCommand, DaemonResponse, DaemonState,
-};
+use crate::daemon::{send_command_sync, DaemonCommand, DaemonResponse, DaemonState};
 
 /// Daemon management subcommands.
 #[derive(Subcommand)]
@@ -50,22 +48,28 @@ pub enum DaemonSubcommand {
 
         /// Follow log output in real-time (like tail -f)
         #[arg(short, long)]
-        #[arg(long_help = "Continuously display new log lines as they are written.\n\
-            Press Ctrl+C to stop following.")]
+        #[arg(
+            long_help = "Continuously display new log lines as they are written.\n\
+            Press Ctrl+C to stop following."
+        )]
         follow: bool,
     },
 
     /// Install the daemon as a system service
-    #[command(long_about = "Installs the Lore daemon as a system service that starts\n\
+    #[command(
+        long_about = "Installs the Lore daemon as a system service that starts\n\
         automatically on user login.\n\n\
         On macOS: Creates a launchd plist in ~/Library/LaunchAgents/\n\
-        On Linux: Creates a systemd user unit in ~/.config/systemd/user/")]
+        On Linux: Creates a systemd user unit in ~/.config/systemd/user/"
+    )]
     Install,
 
     /// Uninstall the daemon system service
-    #[command(long_about = "Removes the Lore daemon system service and stops it if running.\n\n\
+    #[command(
+        long_about = "Removes the Lore daemon system service and stops it if running.\n\n\
         On macOS: Unloads and removes the launchd plist\n\
-        On Linux: Disables and removes the systemd user unit")]
+        On Linux: Disables and removes the systemd user unit"
+    )]
     Uninstall,
 }
 
@@ -119,16 +123,15 @@ fn run_start(foreground: bool) -> Result<()> {
         println!();
 
         // Run the daemon in the current process
-        let rt = tokio::runtime::Runtime::new()
-            .context("Failed to create tokio runtime")?;
+        let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
 
         rt.block_on(crate::daemon::run_daemon())?;
     } else {
         // Start the daemon as a background process
         println!("{}", "Starting daemon in background...".green());
 
-        let current_exe = std::env::current_exe()
-            .context("Failed to get current executable path")?;
+        let current_exe =
+            std::env::current_exe().context("Failed to get current executable path")?;
 
         // Spawn the daemon process with foreground flag
         // The child process will handle daemonization
@@ -186,7 +189,10 @@ fn run_stop() -> Result<()> {
             }
 
             // If still running after 3 seconds, try SIGTERM
-            println!("{}", "Daemon did not stop gracefully, sending SIGTERM...".yellow());
+            println!(
+                "{}",
+                "Daemon did not stop gracefully, sending SIGTERM...".yellow()
+            );
             kill_process(pid)?;
         }
         Ok(resp) => {
@@ -249,23 +255,45 @@ fn run_status() -> Result<()> {
 
     // Try to get detailed status via socket
     match send_command_sync(&state.socket_path, DaemonCommand::Status) {
-        Ok(DaemonResponse::Status { running: _, pid: actual_pid, uptime_seconds }) => {
+        Ok(DaemonResponse::Status {
+            running: _,
+            pid: actual_pid,
+            uptime_seconds,
+        }) => {
             println!("{}", "Daemon Status".green().bold());
             println!();
             println!("  {} {}", "Status:".dimmed(), "running".green());
             println!("  {} {}", "PID:".dimmed(), actual_pid);
-            println!("  {} {}", "Uptime:".dimmed(), format_duration(uptime_seconds));
+            println!(
+                "  {} {}",
+                "Uptime:".dimmed(),
+                format_duration(uptime_seconds)
+            );
 
             // Try to get stats
-            if let Ok(DaemonResponse::Stats(stats)) = send_command_sync(&state.socket_path, DaemonCommand::Stats) {
+            if let Ok(DaemonResponse::Stats(stats)) =
+                send_command_sync(&state.socket_path, DaemonCommand::Stats)
+            {
                 println!();
                 println!("{}", "Statistics".green().bold());
                 println!();
                 println!("  {} {}", "Files watched:".dimmed(), stats.files_watched);
-                println!("  {} {}", "Sessions imported:".dimmed(), stats.sessions_imported);
-                println!("  {} {}", "Messages imported:".dimmed(), stats.messages_imported);
+                println!(
+                    "  {} {}",
+                    "Sessions imported:".dimmed(),
+                    stats.sessions_imported
+                );
+                println!(
+                    "  {} {}",
+                    "Messages imported:".dimmed(),
+                    stats.messages_imported
+                );
                 if stats.errors > 0 {
-                    println!("  {} {}", "Errors:".dimmed(), stats.errors.to_string().red());
+                    println!(
+                        "  {} {}",
+                        "Errors:".dimmed(),
+                        stats.errors.to_string().red()
+                    );
                 }
             }
         }
@@ -281,7 +309,12 @@ fn run_status() -> Result<()> {
             tracing::debug!("Failed to get status: {}", e);
             println!("{}", "Daemon Status".green().bold());
             println!();
-            println!("  {} {} {}", "Status:".dimmed(), "running".green(), "(socket unavailable)".dimmed());
+            println!(
+                "  {} {} {}",
+                "Status:".dimmed(),
+                "running".green(),
+                "(socket unavailable)".dimmed()
+            );
             println!("  {} {}", "PID:".dimmed(), pid);
         }
     }
@@ -314,10 +347,7 @@ fn run_logs(lines: usize, follow: bool) -> Result<()> {
 
     if !state.log_file.exists() {
         println!("{}", "No log file found".yellow());
-        println!(
-            "{}",
-            format!("Expected at: {:?}", state.log_file).dimmed()
-        );
+        println!("{}", format!("Expected at: {:?}", state.log_file).dimmed());
         return Ok(());
     }
 
@@ -327,8 +357,7 @@ fn run_logs(lines: usize, follow: bool) -> Result<()> {
         println!("{}", "Press Ctrl+C to stop".dimmed());
         println!();
 
-        let file = File::open(&state.log_file)
-            .context("Failed to open log file")?;
+        let file = File::open(&state.log_file).context("Failed to open log file")?;
         let mut reader = BufReader::new(file);
 
         // Seek to end
@@ -352,14 +381,10 @@ fn run_logs(lines: usize, follow: bool) -> Result<()> {
         }
     } else {
         // Show last N lines
-        let file = File::open(&state.log_file)
-            .context("Failed to open log file")?;
+        let file = File::open(&state.log_file).context("Failed to open log file")?;
         let reader = BufReader::new(file);
 
-        let all_lines: Vec<String> = reader
-            .lines()
-            .map_while(Result::ok)
-            .collect();
+        let all_lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
 
         let start = if all_lines.len() > lines {
             all_lines.len() - lines
@@ -376,6 +401,7 @@ fn run_logs(lines: usize, follow: bool) -> Result<()> {
 }
 
 // Service installation constants
+#[cfg(any(target_os = "macos", test))]
 const LAUNCHD_LABEL: &str = "com.lore.daemon";
 #[cfg(any(target_os = "linux", test))]
 const SYSTEMD_SERVICE_NAME: &str = "lore";
@@ -387,6 +413,7 @@ const SYSTEMD_SERVICE_NAME: &str = "lore";
 /// - Keep the daemon running (KeepAlive)
 /// - Restart on failure
 /// - Direct logs to the lore logs directory
+#[cfg(any(target_os = "macos", test))]
 fn generate_launchd_plist(lore_exe: &std::path::Path, logs_dir: &std::path::Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -447,19 +474,25 @@ WantedBy=default.target
 }
 
 /// Gets the path to the launchd plist file.
+#[cfg(any(target_os = "macos", test))]
 fn get_launchd_plist_path() -> Result<std::path::PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
-    Ok(home.join("Library/LaunchAgents").join(format!("{LAUNCHD_LABEL}.plist")))
+    Ok(home
+        .join("Library/LaunchAgents")
+        .join(format!("{LAUNCHD_LABEL}.plist")))
 }
 
 /// Gets the path to the systemd user unit file.
 #[cfg(any(target_os = "linux", test))]
 fn get_systemd_unit_path() -> Result<std::path::PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
-    Ok(home.join(".config/systemd/user").join(format!("{SYSTEMD_SERVICE_NAME}.service")))
+    Ok(home
+        .join(".config/systemd/user")
+        .join(format!("{SYSTEMD_SERVICE_NAME}.service")))
 }
 
 /// Gets the logs directory path, creating it if necessary.
+#[cfg(target_os = "macos")]
 fn ensure_logs_dir() -> Result<std::path::PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     let logs_dir = home.join(".lore/logs");
@@ -539,7 +572,11 @@ fn install_launchd_service(lore_exe: &std::path::Path) -> Result<()> {
     println!("{}", "Service installed successfully!".green());
     println!();
     println!("  {} {}", "Plist:".dimmed(), plist_path.display());
-    println!("  {} {}", "Logs:".dimmed(), logs_dir.join("daemon.log").display());
+    println!(
+        "  {} {}",
+        "Logs:".dimmed(),
+        logs_dir.join("daemon.log").display()
+    );
     println!();
     println!(
         "{}",

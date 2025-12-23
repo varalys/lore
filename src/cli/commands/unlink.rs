@@ -19,8 +19,10 @@ use crate::storage::Database;
 pub struct Args {
     /// Session ID prefix to unlink
     #[arg(value_name = "SESSION")]
-    #[arg(long_help = "The session ID prefix to unlink. Must uniquely identify a\n\
-        single session. Use 'lore sessions' to find session IDs.")]
+    #[arg(
+        long_help = "The session ID prefix to unlink. Must uniquely identify a\n\
+        single session. Use 'lore sessions' to find session IDs."
+    )]
     pub session: String,
 
     /// Specific commit to unlink from (removes all links if omitted)
@@ -31,8 +33,10 @@ pub struct Args {
 
     /// Skip the confirmation prompt
     #[arg(short = 'y', long)]
-    #[arg(long_help = "Skip the confirmation prompt and proceed with unlinking.\n\
-        Use with caution when removing all links from a session.")]
+    #[arg(
+        long_help = "Skip the confirmation prompt and proceed with unlinking.\n\
+        Use with caution when removing all links from a session."
+    )]
     pub yes: bool,
 }
 
@@ -68,13 +72,14 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     if matching.len() > 1 {
-        println!(
-            "{}",
-            "Multiple sessions match that prefix:".yellow()
-        );
+        println!("{}", "Multiple sessions match that prefix:".yellow());
         for s in &matching {
             let id_short = &s.id.to_string()[..8];
-            println!("  {} - {}", id_short.cyan(), s.started_at.format("%Y-%m-%d %H:%M"));
+            println!(
+                "  {} - {}",
+                id_short.cyan(),
+                s.started_at.format("%Y-%m-%d %H:%M")
+            );
         }
         bail!(
             "Multiple sessions match '{}'. Please use a more specific prefix from the list above.",
@@ -156,10 +161,7 @@ pub fn run(args: Args) -> Result<()> {
 
         // Confirm unless --yes
         if !args.yes {
-            println!(
-                "This will unlink session {} from:",
-                session_short.cyan()
-            );
+            println!("This will unlink session {} from:", session_short.cyan());
             for link in &links {
                 if let Some(ref sha) = link.commit_sha {
                     let short_sha = &sha[..8.min(sha.len())];

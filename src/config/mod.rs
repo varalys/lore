@@ -90,8 +90,7 @@ impl Config {
             })?;
         }
 
-        let content = serde_yaml::to_string(self)
-            .context("Failed to serialize config")?;
+        let content = serde_yaml::to_string(self).context("Failed to serialize config")?;
 
         fs::write(path, content)
             .with_context(|| format!("Failed to write config file: {}", path.display()))?;
@@ -173,7 +172,12 @@ impl Config {
 
     /// Returns the list of valid configuration keys.
     pub fn valid_keys() -> &'static [&'static str] {
-        &["watchers", "auto_link", "auto_link_threshold", "commit_footer"]
+        &[
+            "watchers",
+            "auto_link",
+            "auto_link_threshold",
+            "commit_footer",
+        ]
     }
 }
 
@@ -232,7 +236,11 @@ mod tests {
     #[test]
     fn test_save_creates_parent_directories() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("nested").join("dir").join("config.yaml");
+        let path = temp_dir
+            .path()
+            .join("nested")
+            .join("dir")
+            .join("config.yaml");
 
         let config = Config::default();
         config.save_to_path(&path).unwrap();
@@ -247,7 +255,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(config.get("watchers"), Some("claude-code,cursor".to_string()));
+        assert_eq!(
+            config.get("watchers"),
+            Some("claude-code,cursor".to_string())
+        );
     }
 
     #[test]
@@ -281,11 +292,17 @@ mod tests {
     #[test]
     fn test_set_watchers() {
         let mut config = Config::default();
-        config.set("watchers", "claude-code, cursor, copilot").unwrap();
+        config
+            .set("watchers", "claude-code, cursor, copilot")
+            .unwrap();
 
         assert_eq!(
             config.watchers,
-            vec!["claude-code".to_string(), "cursor".to_string(), "copilot".to_string()]
+            vec![
+                "claude-code".to_string(),
+                "cursor".to_string(),
+                "copilot".to_string()
+            ]
         );
     }
 

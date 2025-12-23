@@ -120,9 +120,10 @@ impl MessageContent {
                     .filter_map(|b| match b {
                         ContentBlock::Text { text } => Some(text.clone()),
                         ContentBlock::ToolUse { name, .. } => Some(format!("[tool: {name}]")),
-                        ContentBlock::ToolResult { content, .. } => {
-                            Some(format!("[result: {}...]", &content.chars().take(50).collect::<String>()))
-                        }
+                        ContentBlock::ToolResult { content, .. } => Some(format!(
+                            "[result: {}...]",
+                            &content.chars().take(50).collect::<String>()
+                        )),
                         ContentBlock::Thinking { .. } => None, // Skip thinking in summaries
                     })
                     .collect::<Vec<_>>()
@@ -145,16 +146,14 @@ impl MessageContent {
     pub fn text(&self) -> String {
         match self {
             MessageContent::Text(s) => s.clone(),
-            MessageContent::Blocks(blocks) => {
-                blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 }
@@ -268,7 +267,12 @@ pub struct SearchResult {
 ///
 /// Repositories are discovered when sessions reference working directories
 /// that are inside git repositories.
+///
+/// Note: This struct is defined for future use when repository tracking
+/// is implemented. Currently, sessions link directly to commits without
+/// explicit repository records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct Repository {
     /// Unique identifier
     pub id: Uuid,
@@ -381,8 +385,8 @@ fn extract_files_from_bash_command(
 ) {
     // Common file-related commands
     let file_commands = [
-        "cat", "less", "more", "head", "tail", "vim", "nano", "code",
-        "cp", "mv", "rm", "touch", "mkdir", "chmod", "chown",
+        "cat", "less", "more", "head", "tail", "vim", "nano", "code", "cp", "mv", "rm", "touch",
+        "mkdir", "chmod", "chown",
     ];
 
     // Split by common separators

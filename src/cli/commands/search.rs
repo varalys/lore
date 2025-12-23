@@ -23,9 +23,11 @@ use crate::storage::models::SearchResult;
 pub struct Args {
     /// Text to search for in session messages
     #[arg(value_name = "QUERY")]
-    #[arg(long_help = "The text to search for. Uses SQLite FTS5 full-text search,\n\
+    #[arg(
+        long_help = "The text to search for. Uses SQLite FTS5 full-text search,\n\
         which supports word matching and basic boolean operators.\n\
-        The search index is built automatically on first use.")]
+        The search index is built automatically on first use."
+    )]
     pub query: String,
 
     /// Maximum number of results to return
@@ -34,8 +36,10 @@ pub struct Args {
 
     /// Filter by repository path prefix
     #[arg(long, value_name = "PATH")]
-    #[arg(long_help = "Only search sessions from repositories matching this path\n\
-        prefix. Useful for narrowing results to a specific project.")]
+    #[arg(
+        long_help = "Only search sessions from repositories matching this path\n\
+        prefix. Useful for narrowing results to a specific project."
+    )]
     pub repo: Option<String>,
 
     /// Filter by date (e.g., 7d, 2w, 1m, or 2024-01-01)
@@ -159,11 +163,7 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     // Parse the since filter if provided
-    let since = args
-        .since
-        .as_ref()
-        .map(|s| parse_since(s))
-        .transpose()?;
+    let since = args.since.as_ref().map(|s| parse_since(s)).transpose()?;
 
     // Validate role filter
     if let Some(ref role) = args.role {

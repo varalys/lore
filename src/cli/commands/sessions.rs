@@ -21,8 +21,10 @@ use crate::storage::Database;
 pub struct Args {
     /// Filter to sessions in this directory (prefix match)
     #[arg(short, long, value_name = "PATH")]
-    #[arg(long_help = "Filter sessions to those with a working directory matching\n\
-        this path prefix. Use '.' for the current directory.")]
+    #[arg(
+        long_help = "Filter sessions to those with a working directory matching\n\
+        this path prefix. Use '.' for the current directory."
+    )]
     pub repo: Option<String>,
 
     /// Maximum number of sessions to display

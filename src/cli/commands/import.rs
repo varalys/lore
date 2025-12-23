@@ -19,9 +19,11 @@ use crate::storage::Database;
 pub struct Args {
     /// Force re-import of already imported sessions
     #[arg(long)]
-    #[arg(long_help = "By default, Lore tracks which session files have been imported\n\
+    #[arg(
+        long_help = "By default, Lore tracks which session files have been imported\n\
         and skips them on subsequent runs. Use this flag to re-import\n\
-        all sessions, which may update existing records.")]
+        all sessions, which may update existing records."
+    )]
     pub force: bool,
 
     /// Preview what would be imported without making changes
@@ -45,10 +47,7 @@ pub fn run(args: Args) -> Result<()> {
     if session_files.is_empty() {
         println!();
         println!("{}", "No Claude Code sessions found.".yellow());
-        println!(
-            "{}",
-            "Sessions are stored in ~/.claude/projects/".dimmed()
-        );
+        println!("{}", "Sessions are stored in ~/.claude/projects/".dimmed());
         return Ok(());
     }
 
@@ -134,23 +133,20 @@ pub fn run(args: Args) -> Result<()> {
     if args.dry_run {
         println!(
             "{}",
-            format!(
-                "Dry run: would import {imported}, skip {skipped}, {errors} errors"
-            )
-            .bold()
+            format!("Dry run: would import {imported}, skip {skipped}, {errors} errors").bold()
         );
     } else {
         println!(
             "{}",
-            format!(
-                "Imported {imported}, skipped {skipped}, {errors} errors"
-            )
-            .bold()
+            format!("Imported {imported}, skipped {skipped}, {errors} errors").bold()
         );
 
         if imported > 0 {
             println!();
-            println!("{}", "Run 'lore sessions' to see imported sessions".dimmed());
+            println!(
+                "{}",
+                "Run 'lore sessions' to see imported sessions".dimmed()
+            );
         }
     }
 

@@ -149,11 +149,7 @@ fn run_install(force: bool) -> Result<()> {
 
         match status {
             InstallStatus::Installed => {
-                println!(
-                    "  {} {}",
-                    "Installed".green(),
-                    hook_type.filename()
-                );
+                println!("  {} {}", "Installed".green(), hook_type.filename());
                 installed_count += 1;
             }
             InstallStatus::Replaced => {
@@ -192,10 +188,7 @@ fn run_install(force: bool) -> Result<()> {
         );
     }
     if skipped_count > 0 && !force {
-        println!(
-            "{}",
-            "Use --force to overwrite existing hooks.".dimmed()
-        );
+        println!("{}", "Use --force to overwrite existing hooks.".dimmed());
     }
 
     Ok(())
@@ -319,20 +312,13 @@ fn run_uninstall() -> Result<()> {
             );
             restored_count += 1;
         } else {
-            println!(
-                "  {} {}",
-                "Removed".green(),
-                hook_type.filename()
-            );
+            println!("  {} {}", "Removed".green(), hook_type.filename());
         }
     }
 
     println!();
     if removed_count > 0 {
-        println!(
-            "Removed {} hook(s).",
-            removed_count.to_string().green()
-        );
+        println!("Removed {} hook(s).", removed_count.to_string().green());
         if restored_count > 0 {
             println!(
                 "Restored {} original hook(s) from backup.",
@@ -365,7 +351,11 @@ fn run_status() -> Result<()> {
             HookStatus::None => "not installed".dimmed().to_string(),
         };
 
-        println!("  {:<20} {}", format!("{}:", hook_type.filename()), status_str);
+        println!(
+            "  {:<20} {}",
+            format!("{}:", hook_type.filename()),
+            status_str
+        );
     }
 
     Ok(())
@@ -409,8 +399,9 @@ fn get_hooks_dir() -> Result<PathBuf> {
 
     // Create hooks directory if it doesn't exist
     if !hooks_dir.exists() {
-        fs::create_dir_all(&hooks_dir)
-            .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
+        fs::create_dir_all(&hooks_dir).with_context(|| {
+            format!("Failed to create hooks directory: {}", hooks_dir.display())
+        })?;
     }
 
     Ok(hooks_dir)

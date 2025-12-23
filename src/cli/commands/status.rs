@@ -234,10 +234,7 @@ fn run_text(db: &Database, registry: &WatcherRegistry) -> Result<()> {
 /// Currently shows a placeholder since the daemon is not yet implemented.
 fn print_daemon_status() {
     println!("{}", "Daemon:".bold());
-    println!(
-        "  {}",
-        "not running (daemon not yet implemented)".dimmed()
-    );
+    println!("  {}", "not running (daemon not yet implemented)".dimmed());
     println!();
 }
 

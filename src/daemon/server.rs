@@ -71,12 +71,10 @@ pub async fn run_server(
 ) -> Result<()> {
     // Remove existing socket file if present
     if socket_path.exists() {
-        std::fs::remove_file(socket_path)
-            .context("Failed to remove existing socket file")?;
+        std::fs::remove_file(socket_path).context("Failed to remove existing socket file")?;
     }
 
-    let listener = UnixListener::bind(socket_path)
-        .context("Failed to bind Unix socket")?;
+    let listener = UnixListener::bind(socket_path).context("Failed to bind Unix socket")?;
 
     tracing::info!("IPC server listening on {:?}", socket_path);
 
@@ -122,11 +120,13 @@ async fn handle_connection(
     let mut line = String::new();
 
     // Read a single line (one command per connection)
-    reader.read_line(&mut line).await
+    reader
+        .read_line(&mut line)
+        .await
         .context("Failed to read from socket")?;
 
-    let command: DaemonCommand = serde_json::from_str(line.trim())
-        .context("Failed to parse command")?;
+    let command: DaemonCommand =
+        serde_json::from_str(line.trim()).context("Failed to parse command")?;
 
     tracing::debug!("Received IPC command: {:?}", command);
 
@@ -145,7 +145,9 @@ async fn handle_connection(
         DaemonCommand::Stop => {
             // Signal the daemon to shut down
             // If the lock is poisoned, we still want to try to shut down
-            let mut guard = shutdown_tx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut guard = shutdown_tx
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(tx) = guard.take() {
                 let _ = tx.send(());
             }
@@ -158,15 +160,17 @@ async fn handle_connection(
         DaemonCommand::Ping => DaemonResponse::Pong,
     };
 
-    let response_json = serde_json::to_string(&response)
-        .context("Failed to serialize response")?;
+    let response_json = serde_json::to_string(&response).context("Failed to serialize response")?;
 
-    writer.write_all(response_json.as_bytes()).await
+    writer
+        .write_all(response_json.as_bytes())
+        .await
         .context("Failed to write response")?;
-    writer.write_all(b"\n").await
+    writer
+        .write_all(b"\n")
+        .await
         .context("Failed to write newline")?;
-    writer.flush().await
-        .context("Failed to flush writer")?;
+    writer.flush().await.context("Failed to flush writer")?;
 
     Ok(())
 }
@@ -185,29 +189,34 @@ async fn handle_connection(
 /// Returns an error if the connection fails, the command cannot be sent,
 /// or the response cannot be read or parsed.
 pub async fn send_command(socket_path: &Path, command: DaemonCommand) -> Result<DaemonResponse> {
-    let stream = UnixStream::connect(socket_path).await
+    let stream = UnixStream::connect(socket_path)
+        .await
         .context("Failed to connect to daemon socket")?;
 
     let (reader, mut writer) = stream.into_split();
 
     // Send command
-    let command_json = serde_json::to_string(&command)
-        .context("Failed to serialize command")?;
-    writer.write_all(command_json.as_bytes()).await
+    let command_json = serde_json::to_string(&command).context("Failed to serialize command")?;
+    writer
+        .write_all(command_json.as_bytes())
+        .await
         .context("Failed to write command")?;
-    writer.write_all(b"\n").await
+    writer
+        .write_all(b"\n")
+        .await
         .context("Failed to write newline")?;
-    writer.flush().await
-        .context("Failed to flush")?;
+    writer.flush().await.context("Failed to flush")?;
 
     // Read response
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
-    reader.read_line(&mut line).await
+    reader
+        .read_line(&mut line)
+        .await
         .context("Failed to read response")?;
 
-    let response: DaemonResponse = serde_json::from_str(line.trim())
-        .context("Failed to parse response")?;
+    let response: DaemonResponse =
+        serde_json::from_str(line.trim()).context("Failed to parse response")?;
 
     Ok(response)
 }
@@ -217,8 +226,7 @@ pub async fn send_command(socket_path: &Path, command: DaemonCommand) -> Result<
 /// Creates a temporary tokio runtime to send the command.
 /// Use this from non-async contexts like CLI commands.
 pub fn send_command_sync(socket_path: &Path, command: DaemonCommand) -> Result<DaemonResponse> {
-    let rt = tokio::runtime::Runtime::new()
-        .context("Failed to create tokio runtime")?;
+    let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
     rt.block_on(send_command(socket_path, command))
 }
 
@@ -259,7 +267,11 @@ mod tests {
 
         let parsed: DaemonResponse = serde_json::from_str(&json).expect("Failed to parse");
         match parsed {
-            DaemonResponse::Status { running, pid, uptime_seconds } => {
+            DaemonResponse::Status {
+                running,
+                pid,
+                uptime_seconds,
+            } => {
                 assert!(running);
                 assert_eq!(pid, 12345);
                 assert_eq!(uptime_seconds, 3600);
@@ -309,14 +321,21 @@ mod tests {
         let socket_path_clone = socket_path.clone();
         let stats_clone = stats.clone();
         let server_handle = tokio::spawn(async move {
-            run_server(&socket_path_clone, stats_clone, Some(shutdown_tx), broadcast_rx).await
+            run_server(
+                &socket_path_clone,
+                stats_clone,
+                Some(shutdown_tx),
+                broadcast_rx,
+            )
+            .await
         });
 
         // Give server time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Send ping command
-        let response = send_command(&socket_path, DaemonCommand::Ping).await
+        let response = send_command(&socket_path, DaemonCommand::Ping)
+            .await
             .expect("Failed to send command");
 
         match response {
@@ -325,7 +344,8 @@ mod tests {
         }
 
         // Send status command
-        let response = send_command(&socket_path, DaemonCommand::Status).await
+        let response = send_command(&socket_path, DaemonCommand::Status)
+            .await
             .expect("Failed to send command");
 
         match response {
@@ -336,7 +356,8 @@ mod tests {
         }
 
         // Send stop command
-        let response = send_command(&socket_path, DaemonCommand::Stop).await
+        let response = send_command(&socket_path, DaemonCommand::Stop)
+            .await
             .expect("Failed to send command");
 
         match response {
@@ -346,9 +367,6 @@ mod tests {
 
         // Signal broadcast shutdown and wait for server to stop
         let _ = broadcast_tx.send(());
-        let _ = tokio::time::timeout(
-            tokio::time::Duration::from_secs(1),
-            server_handle
-        ).await;
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(1), server_handle).await;
     }
 }

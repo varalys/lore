@@ -307,8 +307,7 @@ impl ParsedSession {
     /// Generates UUIDs from the session ID string if valid, otherwise creates new ones.
     /// Also builds parent-child relationships between messages.
     pub fn to_storage_models(&self) -> (Session, Vec<Message>) {
-        let session_uuid = Uuid::parse_str(&self.session_id)
-            .unwrap_or_else(|_| Uuid::new_v4());
+        let session_uuid = Uuid::parse_str(&self.session_id).unwrap_or_else(|_| Uuid::new_v4());
 
         let started_at = self
             .messages
@@ -559,7 +558,9 @@ mod tests {
 
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].role, MessageRole::User);
-        assert!(matches!(&parsed.messages[0].content, MessageContent::Text(s) if s == "Hello, Claude!"));
+        assert!(
+            matches!(&parsed.messages[0].content, MessageContent::Text(s) if s == "Hello, Claude!")
+        );
         assert_eq!(parsed.messages[0].uuid, user_uuid);
     }
 
@@ -735,8 +736,13 @@ mod tests {
         let uuid = "660e8400-e29b-41d4-a716-446655440002";
 
         let blocks_json = r#"[{"type":"text","text":"Let me run that command"},{"type":"tool_use","id":"tool_123","name":"Bash","input":{"command":"ls -la"}}]"#;
-        let assistant_line =
-            make_assistant_message_with_blocks(session_id, uuid, None, "claude-opus-4", blocks_json);
+        let assistant_line = make_assistant_message_with_blocks(
+            session_id,
+            uuid,
+            None,
+            "claude-opus-4",
+            blocks_json,
+        );
 
         let file = create_temp_session_file(&[&assistant_line]);
         let parsed = parse_session_file(file.path()).expect("Failed to parse");
@@ -746,7 +752,9 @@ mod tests {
             assert_eq!(blocks.len(), 2);
 
             // Check text block
-            assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "Let me run that command"));
+            assert!(
+                matches!(&blocks[0], ContentBlock::Text { text } if text == "Let me run that command")
+            );
 
             // Check tool_use block
             if let ContentBlock::ToolUse { id, name, input } = &blocks[1] {
@@ -824,8 +832,13 @@ mod tests {
         let uuid = "660e8400-e29b-41d4-a716-446655440002";
 
         let blocks_json = r#"[{"type":"thinking","thinking":"Let me analyze this problem...","signature":"abc123"},{"type":"text","text":"Here is my answer"}]"#;
-        let assistant_line =
-            make_assistant_message_with_blocks(session_id, uuid, None, "claude-opus-4", blocks_json);
+        let assistant_line = make_assistant_message_with_blocks(
+            session_id,
+            uuid,
+            None,
+            "claude-opus-4",
+            blocks_json,
+        );
 
         let file = create_temp_session_file(&[&assistant_line]);
         let parsed = parse_session_file(file.path()).expect("Failed to parse");
@@ -841,7 +854,9 @@ mod tests {
             }
 
             // Check text block
-            assert!(matches!(&blocks[1], ContentBlock::Text { text } if text == "Here is my answer"));
+            assert!(
+                matches!(&blocks[1], ContentBlock::Text { text } if text == "Here is my answer")
+            );
         } else {
             panic!("Expected Blocks content");
         }
@@ -1065,7 +1080,9 @@ mod tests {
 
         let file = create_temp_session_file(&[&user_line]);
         let path = file.path().to_path_buf();
-        let result = watcher.parse_source(&path).expect("Should parse successfully");
+        let result = watcher
+            .parse_source(&path)
+            .expect("Should parse successfully");
 
         assert_eq!(result.len(), 1);
         let (session, messages) = &result[0];
@@ -1081,7 +1098,9 @@ mod tests {
         // Create a file with no valid messages
         let file = create_temp_session_file(&["", "invalid json"]);
         let path = file.path().to_path_buf();
-        let result = watcher.parse_source(&path).expect("Should parse successfully");
+        let result = watcher
+            .parse_source(&path)
+            .expect("Should parse successfully");
 
         // Empty sessions should return empty vec
         assert!(result.is_empty());

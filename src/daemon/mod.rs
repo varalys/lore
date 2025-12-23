@@ -90,7 +90,9 @@ pub async fn run_daemon() -> Result<()> {
             server_stats,
             Some(stop_tx),
             server_broadcast_rx,
-        ).await {
+        )
+        .await
+        {
             tracing::error!("IPC server error: {}", e);
         }
     });
@@ -155,8 +157,10 @@ fn setup_logging(state: &DaemonState) -> Result<WorkerGuard> {
     // Use try_init to avoid panic if a subscriber is already set
     // (which happens when running in foreground from CLI)
     let _ = tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "lore=info".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "lore=info".into()),
+        )
         .with(file_layer)
         .try_init();
 

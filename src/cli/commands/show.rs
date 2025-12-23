@@ -53,22 +53,28 @@ pub struct Args {
 
     /// Treat the target as a commit and show linked sessions
     #[arg(long)]
-    #[arg(long_help = "Interpret the target as a git commit reference instead of\n\
+    #[arg(
+        long_help = "Interpret the target as a git commit reference instead of\n\
         a session ID. Shows all sessions linked to that commit.\n\
-        Accepts SHAs, HEAD, branch names, or any git ref.")]
+        Accepts SHAs, HEAD, branch names, or any git ref."
+    )]
     pub commit: bool,
 
     /// Show full message content without truncation
     #[arg(long)]
-    #[arg(long_help = "By default, long messages are truncated for readability.\n\
-        Use this flag to show the complete content of all messages.")]
+    #[arg(
+        long_help = "By default, long messages are truncated for readability.\n\
+        Use this flag to show the complete content of all messages."
+    )]
     pub full: bool,
 
     /// Include AI thinking blocks in output
     #[arg(long)]
-    #[arg(long_help = "Include the AI's internal thinking/reasoning blocks in the\n\
+    #[arg(
+        long_help = "Include the AI's internal thinking/reasoning blocks in the\n\
         output. These are normally hidden but can provide insight\n\
-        into the AI's decision-making process.")]
+        into the AI's decision-making process."
+    )]
     pub thinking: bool,
 
     /// Output format: text (default), json, or markdown
@@ -118,7 +124,9 @@ fn show_session(
 ) -> Result<()> {
     // Find session by ID prefix
     let sessions = db.list_sessions(100, None)?;
-    let session = sessions.iter().find(|s| s.id.to_string().starts_with(id_prefix));
+    let session = sessions
+        .iter()
+        .find(|s| s.id.to_string().starts_with(id_prefix));
 
     let session = match session {
         Some(s) => s,
@@ -268,9 +276,7 @@ fn print_message_content_text(content: &MessageContent, full: bool, show_thinkin
                         println!(
                             "{} {}",
                             format!("[Tool: {name}]").magenta(),
-                            serde_json::to_string(input)
-                                .unwrap_or_default()
-                                .dimmed()
+                            serde_json::to_string(input).unwrap_or_default().dimmed()
                         );
                     }
                     ContentBlock::ToolResult {
@@ -520,10 +526,8 @@ fn show_commit_sessions(db: &Database, commit: &str, format: OutputFormat) -> Re
 
     // Check for multiple SHA matches and warn if ambiguous (only for text output)
     if matches!(format, OutputFormat::Text) {
-        let unique_shas: std::collections::HashSet<_> = links
-            .iter()
-            .filter_map(|l| l.commit_sha.as_ref())
-            .collect();
+        let unique_shas: std::collections::HashSet<_> =
+            links.iter().filter_map(|l| l.commit_sha.as_ref()).collect();
 
         if unique_shas.len() > 1 {
             eprintln!(

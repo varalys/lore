@@ -36,8 +36,7 @@ impl DaemonState {
             .context("Could not find home directory")?
             .join(".lore");
 
-        fs::create_dir_all(&lore_dir)
-            .context("Failed to create ~/.lore directory")?;
+        fs::create_dir_all(&lore_dir).context("Failed to create ~/.lore directory")?;
 
         Ok(Self {
             pid_file: lore_dir.join("daemon.pid"),
@@ -79,10 +78,8 @@ impl DaemonState {
     ///
     /// Returns an error if the PID file cannot be created or written to.
     pub fn write_pid(&self, pid: u32) -> Result<()> {
-        let mut file = fs::File::create(&self.pid_file)
-            .context("Failed to create PID file")?;
-        write!(file, "{pid}")
-            .context("Failed to write PID")?;
+        let mut file = fs::File::create(&self.pid_file).context("Failed to create PID file")?;
+        write!(file, "{pid}").context("Failed to write PID")?;
         Ok(())
     }
 
@@ -95,8 +92,7 @@ impl DaemonState {
     /// Returns an error if the file exists but cannot be removed.
     pub fn remove_pid(&self) -> Result<()> {
         if self.pid_file.exists() {
-            fs::remove_file(&self.pid_file)
-                .context("Failed to remove PID file")?;
+            fs::remove_file(&self.pid_file).context("Failed to remove PID file")?;
         }
         Ok(())
     }
@@ -110,8 +106,7 @@ impl DaemonState {
     /// Returns an error if the file exists but cannot be removed.
     pub fn remove_socket(&self) -> Result<()> {
         if self.socket_path.exists() {
-            fs::remove_file(&self.socket_path)
-                .context("Failed to remove socket file")?;
+            fs::remove_file(&self.socket_path).context("Failed to remove socket file")?;
         }
         Ok(())
     }
@@ -135,9 +130,7 @@ impl DaemonState {
         {
             // SAFETY: kill(pid, 0) is a safe system call that only checks
             // if a process exists without sending any signal.
-            unsafe {
-                libc::kill(pid as libc::pid_t, 0) == 0
-            }
+            unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
         }
 
         #[cfg(not(unix))]
@@ -196,13 +189,19 @@ mod tests {
     #[test]
     fn test_is_running_no_pid_file() {
         let (state, _dir) = create_test_state();
-        assert!(!state.is_running(), "Should not be running without PID file");
+        assert!(
+            !state.is_running(),
+            "Should not be running without PID file"
+        );
     }
 
     #[test]
     fn test_get_pid_no_file() {
         let (state, _dir) = create_test_state();
-        assert!(state.get_pid().is_none(), "Should return None without PID file");
+        assert!(
+            state.get_pid().is_none(),
+            "Should return None without PID file"
+        );
     }
 
     #[test]
@@ -223,7 +222,10 @@ mod tests {
         assert!(state.pid_file.exists(), "PID file should exist after write");
 
         state.remove_pid().expect("Failed to remove PID");
-        assert!(!state.pid_file.exists(), "PID file should not exist after remove");
+        assert!(
+            !state.pid_file.exists(),
+            "PID file should not exist after remove"
+        );
     }
 
     #[test]
@@ -231,7 +233,9 @@ mod tests {
         let (state, _dir) = create_test_state();
 
         // Should not error when file doesn't exist
-        state.remove_pid().expect("Should not error on nonexistent file");
+        state
+            .remove_pid()
+            .expect("Should not error on nonexistent file");
     }
 
     #[test]
@@ -243,7 +247,10 @@ mod tests {
         assert!(state.socket_path.exists(), "Socket file should exist");
 
         state.remove_socket().expect("Failed to remove socket");
-        assert!(!state.socket_path.exists(), "Socket file should not exist after remove");
+        assert!(
+            !state.socket_path.exists(),
+            "Socket file should not exist after remove"
+        );
     }
 
     #[test]
@@ -256,7 +263,10 @@ mod tests {
         state.cleanup().expect("Failed to cleanup");
 
         assert!(!state.pid_file.exists(), "PID file should be cleaned up");
-        assert!(!state.socket_path.exists(), "Socket file should be cleaned up");
+        assert!(
+            !state.socket_path.exists(),
+            "Socket file should be cleaned up"
+        );
     }
 
     #[test]
@@ -291,6 +301,9 @@ mod tests {
         // Write invalid content to PID file
         fs::write(&state.pid_file, "not_a_number").expect("Failed to write");
 
-        assert!(state.get_pid().is_none(), "Should return None for invalid PID");
+        assert!(
+            state.get_pid().is_none(),
+            "Should return None for invalid PID"
+        );
     }
 }
