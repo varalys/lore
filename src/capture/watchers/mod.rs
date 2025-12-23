@@ -54,7 +54,9 @@ pub struct WatcherInfo {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// use lore::capture::watchers::default_registry;
+///
 /// let registry = default_registry();
 /// for watcher in registry.available_watchers() {
 ///     println!("{}: {}", watcher.info().name, watcher.info().description);
