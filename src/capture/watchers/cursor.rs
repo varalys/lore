@@ -1,14 +1,20 @@
 //! Cursor IDE session parser.
 //!
-//! Parses conversation data from Cursor's SQLite databases. Cursor stores
-//! AI chat conversations in workspace-specific databases at:
+//! **EXPERIMENTAL**: This watcher is experimental and may not work reliably.
+//! Cursor stores AI chat data in a cloud-synced format and does not reliably
+//! store conversation history locally. The data that is stored locally may be
+//! incomplete, encrypted, or in a format that changes between versions.
+//!
+//! This watcher attempts to parse conversation data from Cursor's SQLite databases.
+//! Cursor stores some data in workspace-specific databases at:
 //!
 //! - macOS: `~/Library/Application Support/Cursor/User/workspaceStorage/*/state.vscdb`
 //! - Linux: `~/.config/Cursor/User/workspaceStorage/*/state.vscdb`
 //! - Windows: `%APPDATA%/Cursor/User/workspaceStorage/*/state.vscdb`
 //!
 //! The database contains an `ItemTable` with key-value pairs where conversation
-//! data is stored as JSON under keys matching `workbench.panel.aichat*`.
+//! data may be stored as JSON under keys matching `workbench.panel.aichat*`.
+//! However, the actual conversation content is often not available locally.
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
@@ -23,6 +29,10 @@ use super::{Watcher, WatcherInfo};
 
 /// Watcher for Cursor IDE sessions.
 ///
+/// **EXPERIMENTAL**: This watcher is experimental. Cursor stores most AI chat
+/// data in the cloud rather than locally, so this watcher may not find any
+/// conversations or may return incomplete data.
+///
 /// Discovers and parses SQLite databases containing AI chat conversations
 /// from Cursor's workspace storage.
 pub struct CursorWatcher;
@@ -31,7 +41,7 @@ impl Watcher for CursorWatcher {
     fn info(&self) -> WatcherInfo {
         WatcherInfo {
             name: "cursor",
-            description: "Cursor IDE AI conversations",
+            description: "Cursor IDE AI conversations (experimental)",
             default_paths: vec![cursor_storage_path()],
         }
     }
@@ -344,7 +354,7 @@ mod tests {
         let info = watcher.info();
 
         assert_eq!(info.name, "cursor");
-        assert_eq!(info.description, "Cursor IDE AI conversations");
+        assert_eq!(info.description, "Cursor IDE AI conversations (experimental)");
         assert!(!info.default_paths.is_empty());
     }
 
