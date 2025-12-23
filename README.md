@@ -141,9 +141,72 @@ lore daemon install    # Install and enable service
 lore daemon uninstall  # Remove service
 ```
 
-This uses launchd on macOS (`~/Library/LaunchAgents/com.lore.daemon.plist`) and systemd on Linux (`~/.config/systemd/user/lore.service`).
+This uses launchd on macOS and systemd on Linux. The service restarts automatically on failure.
 
-The service restarts automatically on failure. Logs are written to `~/.lore/logs/`.
+#### Manual systemd Setup (Linux)
+
+If you prefer to configure systemd yourself:
+
+```bash
+mkdir -p ~/.config/systemd/user
+```
+
+Create `~/.config/systemd/user/lore.service`:
+
+```ini
+[Unit]
+Description=Lore AI session capture daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/lore daemon start --foreground
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Then enable and start:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now lore.service
+systemctl --user status lore.service
+```
+
+#### Manual launchd Setup (macOS)
+
+Create `~/Library/LaunchAgents/com.lore.daemon.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lore.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/lore</string>
+        <string>daemon</string>
+        <string>start</string>
+        <string>--foreground</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+```
+
+Then load:
+
+```bash
+launchctl load -w ~/Library/LaunchAgents/com.lore.daemon.plist
+```
 
 ## Auto-linking
 
