@@ -119,7 +119,6 @@ $ lore show 7f3a2b1
 | `lore show --commit <ref>` | View sessions linked to a commit |
 | `lore import` | Import sessions from AI tools |
 | `lore link <id>` | Link session to HEAD |
-| `lore link --auto` | Auto-link sessions by time and file overlap |
 | `lore unlink <id>` | Remove a session-commit link |
 | `lore search <query>` | Full-text search across all sessions |
 | `lore hooks install` | Install git hooks for automatic linking |
@@ -211,23 +210,6 @@ brew services stop lore
 ```
 
 Until then, use `lore daemon install` or manage launchd manually.
-
-## Auto-linking
-
-After importing sessions, you may have weeks or months of unlinked history. Auto-linking retroactively matches sessions to commits based on timing and file overlap, so you don't have to link each one manually.
-
-```bash
-# Preview what would be linked
-lore link --auto --dry-run
-
-# Link sessions to commits (default threshold: 0.5)
-lore link --auto
-
-# Require higher confidence for matches
-lore link --auto --threshold 0.7
-```
-
-The confidence score considers branch match, file overlap, and time proximity. A threshold of 0.5 means only links with at least 50% confidence are created.
 
 ## Git Hooks
 
