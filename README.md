@@ -130,7 +130,7 @@ $ lore show 7f3a2b1
 | `lore daemon start` | Start background watcher for real-time capture |
 | `lore daemon install` | Install daemon as a system service |
 | `lore daemon uninstall` | Remove daemon service |
-| `lore config` | View and update configuration |
+| `lore config` | View configuration paths |
 
 ## Supported Tools
 
