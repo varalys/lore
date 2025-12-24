@@ -21,19 +21,21 @@ Lore reads session data from AI coding tools, stores it in a local SQLite databa
 
 ### Capture
 
-Each AI tool stores conversation data in its own format and location. Lore includes parsers for each supported tool:
+Lore includes parsers for each supported tool:
 
-- **Claude Code**: JSONL files in `~/.claude/projects/<hash>/sessions/`
-- **Codex CLI**: JSONL files in `~/.codex/sessions/`
-- **Gemini CLI**: JSON files in `~/.gemini/tmp/<hash>/chats/`
-- **Amp**: JSON files in `~/.local/share/amp/threads/`
-- **Aider**: Markdown files (`.aider.chat.history.md`) in project directories
-- **Continue.dev**: JSON files in `~/.continue/sessions/`
-- **Cline**: JSON in VS Code's extension storage
-- **Roo Code**: JSON in VS Code's extension storage
-- **OpenCode**: JSON files in `~/.local/share/opencode/storage/`
+| Tool | Format |
+|------|--------|
+| Claude Code | JSONL |
+| Codex CLI | JSONL |
+| Gemini CLI | JSON |
+| Amp | JSON |
+| Aider | Markdown |
+| Continue.dev | JSON |
+| Cline | JSON |
+| Roo Code | JSON |
+| OpenCode | JSON |
 
-You can import existing sessions with `lore import`, or run `lore daemon start` to watch for new sessions in real-time.
+Import existing sessions with `lore import`, or run `lore daemon start` to watch for new sessions in real-time.
 
 ### Storage
 
