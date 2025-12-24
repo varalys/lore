@@ -1,11 +1,10 @@
 //! Configuration management.
 //!
 //! Handles loading and saving Lore configuration from `~/.lore/config.yaml`.
-//! Configuration controls which watchers are enabled, auto-linking behavior,
-//! and commit message formatting.
 //!
-//! Note: Repo-level configuration (`.lore/config.yaml` in repo root) is a future
-//! enhancement. Currently only global config at `~/.lore/config.yaml` is supported.
+//! Note: Configuration options are planned for a future release. Currently
+//! this module provides path information only. The Config struct and its
+//! methods are preserved for future use.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -54,6 +53,7 @@ impl Config {
     /// Saves configuration to the default config file.
     ///
     /// Creates the `~/.lore` directory if it does not exist.
+    #[allow(dead_code)]
     pub fn save(&self) -> Result<()> {
         let path = Self::config_path()?;
         self.save_to_path(&path)
@@ -83,6 +83,7 @@ impl Config {
     /// Saves configuration to a specific path.
     ///
     /// Creates parent directories if they do not exist.
+    #[allow(dead_code)]
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -107,6 +108,7 @@ impl Config {
     /// - `commit_footer` - "true" or "false"
     ///
     /// Returns `None` if the key is not recognized.
+    #[allow(dead_code)]
     pub fn get(&self, key: &str) -> Option<String> {
         match key {
             "watchers" => Some(self.watchers.join(",")),
@@ -126,6 +128,7 @@ impl Config {
     /// - `commit_footer` - "true" or "false"
     ///
     /// Returns an error if the key is not recognized or the value is invalid.
+    #[allow(dead_code)]
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
         match key {
             "watchers" => {
@@ -171,6 +174,7 @@ impl Config {
     }
 
     /// Returns the list of valid configuration keys.
+    #[allow(dead_code)]
     pub fn valid_keys() -> &'static [&'static str] {
         &[
             "watchers",
@@ -184,6 +188,7 @@ impl Config {
 /// Parses a boolean value from a string.
 ///
 /// Accepts "true", "false", "1", "0", "yes", "no" (case-insensitive).
+#[allow(dead_code)]
 fn parse_bool(value: &str) -> Result<bool> {
     match value.to_lowercase().as_str() {
         "true" | "1" | "yes" => Ok(true),
