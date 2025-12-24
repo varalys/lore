@@ -214,18 +214,20 @@ Until then, use `lore daemon install` or manage launchd manually.
 
 ## Auto-linking
 
-Lore can automatically link sessions to commits based on timing and file overlap:
+After importing sessions, you may have weeks or months of unlinked history. Auto-linking retroactively matches sessions to commits based on timing and file overlap, so you don't have to link each one manually.
 
 ```bash
 # Preview what would be linked
 lore link --auto --dry-run
 
-# Link with default confidence threshold (0.5)
+# Link sessions to commits (default threshold: 0.5)
 lore link --auto
 
-# Require higher confidence
+# Require higher confidence for matches
 lore link --auto --threshold 0.7
 ```
+
+The confidence score considers branch match, file overlap, and time proximity. A threshold of 0.5 means only links with at least 50% confidence are created.
 
 ## Git Hooks
 
