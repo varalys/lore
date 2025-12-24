@@ -4,7 +4,7 @@
 //! using temporary databases to ensure test isolation.
 
 use chrono::{Duration, Utc};
-use lore::storage::{
+use lore_cli::storage::{
     Database, LinkCreator, LinkType, Message, MessageContent, MessageRole, Session, SessionLink,
 };
 use std::io::Write;
@@ -380,10 +380,10 @@ mod show_tests {
 
         // Create message with block content
         let block_content = MessageContent::Blocks(vec![
-            lore::storage::ContentBlock::Text {
+            lore_cli::storage::ContentBlock::Text {
                 text: "Let me help with that.".to_string(),
             },
-            lore::storage::ContentBlock::ToolUse {
+            lore_cli::storage::ContentBlock::ToolUse {
                 id: "tool_123".to_string(),
                 name: "Bash".to_string(),
                 input: serde_json::json!({"command": "ls -la"}),
@@ -423,7 +423,7 @@ mod show_tests {
 
 mod import_tests {
     use super::*;
-    use lore::capture::watchers::claude_code;
+    use lore_cli::capture::watchers::claude_code;
 
     #[test]
     fn test_import_no_claude_sessions_returns_gracefully() {
@@ -852,7 +852,7 @@ mod error_handling_tests {
 
     #[test]
     fn test_malformed_jsonl_handled_gracefully() {
-        use lore::capture::watchers::claude_code;
+        use lore_cli::capture::watchers::claude_code;
 
         // Create a file with malformed content
         let mut file = NamedTempFile::new().expect("create temp file");
