@@ -1,11 +1,12 @@
 [package]
-name = "lore"
+name = "lore-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Reasoning history for code - capture the story behind your commits"
-authors = ["Chris Franzer"]
+description = "Capture AI coding sessions and link them to git commits"
+authors = ["Chris Garcia <chris@varalys.com>"]
 license = "Apache-2.0"
-repository = "https://github.com/redactyl/lore"
+repository = "https://github.com/varalys/lore"
+readme = "README.md"
 keywords = ["git", "ai", "developer-tools", "version-control"]
 categories = ["command-line-utilities", "development-tools"]
 

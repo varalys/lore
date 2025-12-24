@@ -1,8 +1,8 @@
 # Lore
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![CI](https://github.com/redactyl/lore/actions/workflows/ci.yml/badge.svg)](https://github.com/redactyl/lore/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/redactyl/lore)](https://github.com/redactyl/lore/releases)
+[![CI](https://github.com/varalys/lore/actions/workflows/ci.yml/badge.svg)](https://github.com/varalys/lore/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/varalys/lore)](https://github.com/varalys/lore/releases)
 
 Lore captures AI coding sessions and links them to git commits.
 
@@ -52,21 +52,26 @@ Full-text search uses SQLite FTS5 to index message content.
 Links connect sessions to commits. You can create them:
 
 - **Manually**: `lore link <session-id> --commit <sha>`
-- **Automatically**: `lore link --auto` matches sessions to commits by timestamp and file overlap
 - **Via hooks**: `lore hooks install` adds a post-commit hook that prompts for linking
 
 Links are bidirectional: given a session, find its commits; given a commit, find its sessions.
 
 ## Installation
 
+### From crates.io
+
+```bash
+cargo install lore-cli
+```
+
 ### From Releases
 
-Download the latest binary from [GitHub Releases](https://github.com/redactyl/lore/releases) and add it to your PATH.
+Download the latest binary from [GitHub Releases](https://github.com/varalys/lore/releases) and add it to your PATH.
 
 ### From Source
 
 ```bash
-git clone https://github.com/redactyl/lore.git
+git clone https://github.com/varalys/lore.git
 cd lore
 cargo install --path .
 ```

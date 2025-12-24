@@ -22,5 +22,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON and Markdown output formats
 - GitHub Actions CI and release workflows
 
-[Unreleased]: https://github.com/redactyl/lore/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/redactyl/lore/releases/tag/v0.1.0
+[Unreleased]: https://github.com/varalys/lore/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/varalys/lore/releases/tag/v0.1.0
