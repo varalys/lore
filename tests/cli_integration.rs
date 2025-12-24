@@ -46,12 +46,7 @@ fn create_test_session(
 }
 
 /// Creates a test message for the given session.
-fn create_test_message(
-    session_id: Uuid,
-    index: i32,
-    role: MessageRole,
-    content: &str,
-) -> Message {
+fn create_test_message(session_id: Uuid, index: i32, role: MessageRole, content: &str) -> Message {
     Message {
         id: Uuid::new_v4(),
         session_id,
@@ -116,9 +111,7 @@ mod sessions_tests {
     fn test_list_sessions_empty_database() {
         let (db, _dir) = create_test_db();
 
-        let sessions = db
-            .list_sessions(20, None)
-            .expect("Failed to list sessions");
+        let sessions = db.list_sessions(20, None).expect("Failed to list sessions");
 
         assert!(
             sessions.is_empty(),
@@ -158,9 +151,7 @@ mod sessions_tests {
         db.insert_session(&session3)
             .expect("Failed to insert session3");
 
-        let sessions = db
-            .list_sessions(20, None)
-            .expect("Failed to list sessions");
+        let sessions = db.list_sessions(20, None).expect("Failed to list sessions");
 
         assert_eq!(sessions.len(), 3, "Should have 3 sessions");
 
@@ -173,10 +164,7 @@ mod sessions_tests {
             sessions[1].id, session2.id,
             "Second most recent should be second"
         );
-        assert_eq!(
-            sessions[2].id, session1.id,
-            "Oldest session should be last"
-        );
+        assert_eq!(sessions[2].id, session1.id, "Oldest session should be last");
     }
 
     #[test]
@@ -219,12 +207,7 @@ mod sessions_tests {
             now - Duration::hours(1),
             None,
         );
-        let session3 = create_test_session(
-            "claude-code",
-            "/other/path/project",
-            now,
-            None,
-        );
+        let session3 = create_test_session("claude-code", "/other/path/project", now, None);
 
         db.insert_session(&session1).expect("insert");
         db.insert_session(&session2).expect("insert");
@@ -262,8 +245,7 @@ mod sessions_tests {
         let sessions = db.list_sessions(20, None).expect("list");
 
         // Verify we can serialize to JSON
-        let json = serde_json::to_string_pretty(&sessions)
-            .expect("Should serialize to JSON");
+        let json = serde_json::to_string_pretty(&sessions).expect("Should serialize to JSON");
 
         // Parse it back to verify it's valid JSON
         let parsed: Vec<Session> =
@@ -313,7 +295,10 @@ mod show_tests {
         assert!(found.is_some(), "Should find session by prefix");
 
         let found_session = found.unwrap();
-        assert_eq!(found_session.id, session_id, "Found session ID should match");
+        assert_eq!(
+            found_session.id, session_id,
+            "Found session ID should match"
+        );
 
         // Verify we can get messages
         let messages = db.get_messages(&found_session.id).expect("get messages");
@@ -325,12 +310,7 @@ mod show_tests {
         let (db, _dir) = create_test_db();
 
         // Insert a session
-        let session = create_test_session(
-            "claude-code",
-            "/project",
-            Utc::now(),
-            None,
-        );
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
         db.insert_session(&session).expect("insert");
 
         // Try to find with an invalid prefix
@@ -339,7 +319,10 @@ mod show_tests {
             .iter()
             .find(|s| s.id.to_string().starts_with("zzzzzzzz"));
 
-        assert!(found.is_none(), "Should not find session with invalid prefix");
+        assert!(
+            found.is_none(),
+            "Should not find session with invalid prefix"
+        );
     }
 
     #[test]
@@ -383,9 +366,7 @@ mod show_tests {
         let (db, _dir) = create_test_db();
 
         // Query for a commit with no links
-        let links = db
-            .get_links_by_commit("nonexistent123")
-            .expect("get links");
+        let links = db.get_links_by_commit("nonexistent123").expect("get links");
 
         assert!(links.is_empty(), "Should return empty for unlinked commit");
     }
@@ -470,8 +451,8 @@ mod import_tests {
         let file = create_test_session_jsonl(&session_id);
 
         // Parse the session
-        let parsed = claude_code::parse_session_file(file.path())
-            .expect("Should parse session file");
+        let parsed =
+            claude_code::parse_session_file(file.path()).expect("Should parse session file");
 
         assert!(
             !parsed.messages.is_empty(),
@@ -494,8 +475,8 @@ mod import_tests {
         let session_id = Uuid::new_v4().to_string();
         let file = create_test_session_jsonl(&session_id);
 
-        let parsed = claude_code::parse_session_file(file.path())
-            .expect("Should parse session file");
+        let parsed =
+            claude_code::parse_session_file(file.path()).expect("Should parse session file");
 
         assert_eq!(parsed.session_id, session_id, "Session ID should match");
         assert_eq!(parsed.messages.len(), 2, "Should have 2 messages");
@@ -522,20 +503,28 @@ mod import_tests {
         let session_id = Uuid::new_v4().to_string();
         let file = create_test_session_jsonl(&session_id);
 
-        let parsed = claude_code::parse_session_file(file.path())
-            .expect("Should parse session file");
+        let parsed =
+            claude_code::parse_session_file(file.path()).expect("Should parse session file");
 
         let (session, messages) = parsed.to_storage_models();
 
         // Verify session
-        assert_eq!(session.id.to_string(), session_id, "Session ID should match");
+        assert_eq!(
+            session.id.to_string(),
+            session_id,
+            "Session ID should match"
+        );
         assert_eq!(session.tool, "claude-code", "Tool should be claude-code");
         assert_eq!(session.message_count, 2, "Should have 2 messages");
 
         // Verify messages
         assert_eq!(messages.len(), 2, "Should have 2 messages");
         assert_eq!(messages[0].role, MessageRole::User, "First is user");
-        assert_eq!(messages[1].role, MessageRole::Assistant, "Second is assistant");
+        assert_eq!(
+            messages[1].role,
+            MessageRole::Assistant,
+            "Second is assistant"
+        );
 
         // Verify parent linking
         assert!(messages[0].parent_id.is_none(), "First has no parent");
@@ -584,8 +573,7 @@ mod import_tests {
         let session_id = Uuid::new_v4().to_string();
         let file = create_test_session_jsonl(&session_id);
 
-        let parsed = claude_code::parse_session_file(file.path())
-            .expect("Should parse");
+        let parsed = claude_code::parse_session_file(file.path()).expect("Should parse");
 
         let (session, messages) = parsed.to_storage_models();
 
@@ -598,7 +586,11 @@ mod import_tests {
         }
 
         // Verify
-        assert_eq!(db.session_count().expect("count"), 1, "Should have 1 session");
+        assert_eq!(
+            db.session_count().expect("count"),
+            1,
+            "Should have 1 session"
+        );
         assert_eq!(
             db.message_count().expect("count"),
             2,
@@ -656,7 +648,11 @@ mod link_tests {
             Some(commit_sha.to_string()),
             "Commit SHA should match"
         );
-        assert_eq!(links[0].link_type, LinkType::Commit, "Type should be Commit");
+        assert_eq!(
+            links[0].link_type,
+            LinkType::Commit,
+            "Type should be Commit"
+        );
         assert_eq!(
             links[0].created_by,
             LinkCreator::User,
@@ -756,7 +752,11 @@ mod link_tests {
             .find(|s| s.id.to_string().starts_with(session1_prefix));
 
         assert!(found.is_some(), "Should find by prefix");
-        assert_eq!(found.unwrap().id, session1.id, "Should find correct session");
+        assert_eq!(
+            found.unwrap().id,
+            session1.id,
+            "Should find correct session"
+        );
     }
 }
 
@@ -783,18 +783,22 @@ mod error_handling_tests {
 
         let result = db.get_session(&Uuid::new_v4()).expect("query should work");
 
-        assert!(result.is_none(), "Should return None for nonexistent session");
+        assert!(
+            result.is_none(),
+            "Should return None for nonexistent session"
+        );
     }
 
     #[test]
     fn test_get_messages_for_nonexistent_session_returns_empty() {
         let (db, _dir) = create_test_db();
 
-        let messages = db
-            .get_messages(&Uuid::new_v4())
-            .expect("query should work");
+        let messages = db.get_messages(&Uuid::new_v4()).expect("query should work");
 
-        assert!(messages.is_empty(), "Should return empty for nonexistent session");
+        assert!(
+            messages.is_empty(),
+            "Should return empty for nonexistent session"
+        );
     }
 
     #[test]
@@ -805,7 +809,10 @@ mod error_handling_tests {
             .get_links_by_session(&Uuid::new_v4())
             .expect("query should work");
 
-        assert!(links.is_empty(), "Should return empty for nonexistent session");
+        assert!(
+            links.is_empty(),
+            "Should return empty for nonexistent session"
+        );
     }
 
     #[test]
@@ -816,7 +823,10 @@ mod error_handling_tests {
             .get_links_by_commit("nonexistent_commit_sha")
             .expect("query should work");
 
-        assert!(links.is_empty(), "Should return empty for nonexistent commit");
+        assert!(
+            links.is_empty(),
+            "Should return empty for nonexistent commit"
+        );
     }
 
     #[test]
@@ -829,9 +839,10 @@ mod error_handling_tests {
         let sessions = db.list_sessions(100, None).expect("list");
 
         // Test with a clearly invalid prefix that would not match any valid UUID
-        let found = sessions
-            .iter()
-            .find(|s| s.id.to_string().starts_with("00000000-0000-0000-0000-000000000000"));
+        let found = sessions.iter().find(|s| {
+            s.id.to_string()
+                .starts_with("00000000-0000-0000-0000-000000000000")
+        });
 
         assert!(
             found.is_none(),
@@ -882,8 +893,7 @@ mod error_handling_tests {
             .expect("should exist");
 
         assert_eq!(
-            retrieved.working_directory,
-            "/home/user/my project (1)/test's code",
+            retrieved.working_directory, "/home/user/my project (1)/test's code",
             "Special characters should be preserved"
         );
     }

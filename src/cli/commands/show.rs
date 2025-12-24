@@ -3,14 +3,21 @@
 //! Displays the full conversation history for a session, or lists
 //! sessions linked to a specific commit. Supports truncation of
 //! long messages and optional display of AI thinking blocks.
+//!
+//! Supports multiple output formats:
+//! - Text: colored terminal output (default)
+//! - JSON: machine-readable structured output
+//! - Markdown: formatted for documentation or issue tracking
 
 use std::env;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
+use serde::Serialize;
 
+use crate::cli::OutputFormat;
 use crate::git;
-use crate::storage::{ContentBlock, Database, MessageContent, MessageRole};
+use crate::storage::{ContentBlock, Database, Message, MessageContent, MessageRole, Session};
 
 /// Safely truncates a string to at most `max_bytes` bytes at a character boundary.
 ///
@@ -29,21 +36,65 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 
 /// Arguments for the show command.
 #[derive(clap::Args)]
+#[command(after_help = "EXAMPLES:\n    \
+    lore show abc123                View session by ID prefix\n    \
+    lore show abc123 --full         Show full message content\n    \
+    lore show abc123 --thinking     Include AI thinking blocks\n    \
+    lore show --commit HEAD         List sessions linked to HEAD\n    \
+    lore show --commit abc123       List sessions linked to commit\n    \
+    lore show abc123 -f markdown    Output as markdown")]
 pub struct Args {
-    /// Session ID prefix or commit SHA to look up.
+    /// Session ID prefix or commit SHA to look up
+    #[arg(value_name = "ID")]
+    #[arg(long_help = "The target to look up. By default this is treated as a\n\
+        session ID prefix. Use --commit to interpret it as a git\n\
+        commit reference (SHA, HEAD, branch name, etc).")]
     pub target: String,
 
-    /// Interpret target as a commit SHA and show linked sessions.
+    /// Treat the target as a commit and show linked sessions
     #[arg(long)]
+    #[arg(
+        long_help = "Interpret the target as a git commit reference instead of\n\
+        a session ID. Shows all sessions linked to that commit.\n\
+        Accepts SHAs, HEAD, branch names, or any git ref."
+    )]
     pub commit: bool,
 
-    /// Show full message content without truncation.
+    /// Show full message content without truncation
     #[arg(long)]
+    #[arg(
+        long_help = "By default, long messages are truncated for readability.\n\
+        Use this flag to show the complete content of all messages."
+    )]
     pub full: bool,
 
-    /// Include AI thinking blocks in the output.
+    /// Include AI thinking blocks in output
     #[arg(long)]
+    #[arg(
+        long_help = "Include the AI's internal thinking/reasoning blocks in the\n\
+        output. These are normally hidden but can provide insight\n\
+        into the AI's decision-making process."
+    )]
     pub thinking: bool,
+
+    /// Output format: text (default), json, or markdown
+    #[arg(short, long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
+}
+
+/// JSON output structure for a session with its messages.
+#[derive(Serialize)]
+struct SessionOutput {
+    session: Session,
+    messages: Vec<Message>,
+    links: Vec<LinkInfo>,
+}
+
+/// Simplified link info for JSON output.
+#[derive(Serialize)]
+struct LinkInfo {
+    commit_sha: Option<String>,
+    confidence: Option<f64>,
 }
 
 /// Executes the show command.
@@ -55,23 +106,83 @@ pub fn run(args: Args) -> Result<()> {
 
     if args.commit {
         // Show sessions linked to a commit
-        show_commit_sessions(&db, &args.target)?;
+        show_commit_sessions(&db, &args.target, args.format)?;
     } else {
         // Show a specific session
-        show_session(&db, &args.target, args.full, args.thinking)?;
+        show_session(&db, &args.target, args.full, args.thinking, args.format)?;
     }
 
     Ok(())
 }
 
-fn show_session(db: &Database, id_prefix: &str, full: bool, show_thinking: bool) -> Result<()> {
+fn show_session(
+    db: &Database,
+    id_prefix: &str,
+    full: bool,
+    show_thinking: bool,
+    format: OutputFormat,
+) -> Result<()> {
     // Find session by ID prefix
     let sessions = db.list_sessions(100, None)?;
     let session = sessions
         .iter()
-        .find(|s| s.id.to_string().starts_with(id_prefix))
-        .context(format!("No session found matching '{id_prefix}'"))?;
+        .find(|s| s.id.to_string().starts_with(id_prefix));
 
+    let session = match session {
+        Some(s) => s,
+        None => {
+            if sessions.is_empty() {
+                anyhow::bail!(
+                    "No session found matching '{id_prefix}'. No sessions in database. \
+                     Run 'lore import' to import sessions from Claude Code."
+                );
+            } else {
+                anyhow::bail!(
+                    "No session found matching '{id_prefix}'. \
+                     Run 'lore sessions' to list available sessions."
+                );
+            }
+        }
+    };
+
+    let messages = db.get_messages(&session.id)?;
+    let links = db.get_links_by_session(&session.id)?;
+
+    match format {
+        OutputFormat::Json => {
+            let output = SessionOutput {
+                session: session.clone(),
+                messages,
+                links: links
+                    .iter()
+                    .map(|l| LinkInfo {
+                        commit_sha: l.commit_sha.clone(),
+                        confidence: l.confidence,
+                    })
+                    .collect(),
+            };
+            let json = serde_json::to_string_pretty(&output)?;
+            println!("{json}");
+        }
+        OutputFormat::Markdown => {
+            print_session_markdown(session, &messages, &links, full, show_thinking);
+        }
+        OutputFormat::Text => {
+            print_session_text(session, &messages, &links, full, show_thinking);
+        }
+    }
+
+    Ok(())
+}
+
+/// Prints session details in text format with colors.
+fn print_session_text(
+    session: &Session,
+    messages: &[Message],
+    links: &[crate::storage::SessionLink],
+    full: bool,
+    show_thinking: bool,
+) {
     // Header
     println!("{} {}", "Session".bold(), session.id.to_string().cyan());
     println!();
@@ -103,7 +214,6 @@ fn show_session(db: &Database, id_prefix: &str, full: bool, show_thinking: bool)
     }
 
     // Check for links
-    let links = db.get_links_by_session(&session.id)?;
     if !links.is_empty() {
         println!();
         println!("{}", "Linked to:".bold());
@@ -120,7 +230,6 @@ fn show_session(db: &Database, id_prefix: &str, full: bool, show_thinking: bool)
     println!("{}", "Conversation:".bold());
     println!();
 
-    let messages = db.get_messages(&session.id)?;
     for msg in messages {
         let role_str = match msg.role {
             MessageRole::User => "Human".green().bold(),
@@ -131,69 +240,209 @@ fn show_session(db: &Database, id_prefix: &str, full: bool, show_thinking: bool)
         let time = msg.timestamp.format("%H:%M:%S").to_string();
         println!("[{} {}]", role_str, time.dimmed());
 
-        // Format content
-        match &msg.content {
-            MessageContent::Text(text) => {
-                let display = if full || text.len() < 500 {
-                    text.clone()
-                } else {
-                    format!("{}...", truncate_str(text, 500))
-                };
-                println!("{display}");
-            }
-            MessageContent::Blocks(blocks) => {
-                for block in blocks {
-                    match block {
-                        ContentBlock::Text { text } => {
-                            let display = if full || text.len() < 500 {
-                                text.clone()
-                            } else {
-                                format!("{}...", truncate_str(text, 500))
-                            };
-                            println!("{display}");
-                        }
-                        ContentBlock::Thinking { thinking } => {
-                            if show_thinking {
-                                println!(
-                                    "{} {}",
-                                    "💭".dimmed(),
-                                    thinking.dimmed()
-                                );
-                            }
-                        }
-                        ContentBlock::ToolUse { name, input, .. } => {
-                            println!(
-                                "{} {}",
-                                format!("[Tool: {name}]").magenta(),
-                                serde_json::to_string(input)
-                                    .unwrap_or_default()
-                                    .dimmed()
-                            );
-                        }
-                        ContentBlock::ToolResult {
-                            content, is_error, ..
-                        } => {
-                            let label = if *is_error { "Error" } else { "Result" };
-                            let color_content = if *is_error {
-                                content.red().to_string()
-                            } else {
-                                content.dimmed().to_string()
-                            };
-                            let display = if full || content.len() < 200 {
-                                color_content
-                            } else {
-                                format!("{}...", truncate_str(&color_content, 200))
-                            };
-                            println!("{} {}", format!("[{label}]").dimmed(), display);
+        print_message_content_text(&msg.content, full, show_thinking);
+        println!();
+    }
+}
+
+/// Prints message content in text format.
+fn print_message_content_text(content: &MessageContent, full: bool, show_thinking: bool) {
+    match content {
+        MessageContent::Text(text) => {
+            let display = if full || text.len() < 500 {
+                text.clone()
+            } else {
+                format!("{}...", truncate_str(text, 500))
+            };
+            println!("{display}");
+        }
+        MessageContent::Blocks(blocks) => {
+            for block in blocks {
+                match block {
+                    ContentBlock::Text { text } => {
+                        let display = if full || text.len() < 500 {
+                            text.clone()
+                        } else {
+                            format!("{}...", truncate_str(text, 500))
+                        };
+                        println!("{display}");
+                    }
+                    ContentBlock::Thinking { thinking } => {
+                        if show_thinking {
+                            println!("{} {}", "<thinking>".dimmed(), thinking.dimmed());
                         }
                     }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        println!(
+                            "{} {}",
+                            format!("[Tool: {name}]").magenta(),
+                            serde_json::to_string(input).unwrap_or_default().dimmed()
+                        );
+                    }
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => {
+                        let label = if *is_error { "Error" } else { "Result" };
+                        let color_content = if *is_error {
+                            content.red().to_string()
+                        } else {
+                            content.dimmed().to_string()
+                        };
+                        let display = if full || content.len() < 200 {
+                            color_content
+                        } else {
+                            format!("{}...", truncate_str(&color_content, 200))
+                        };
+                        println!("{} {}", format!("[{label}]").dimmed(), display);
+                    }
                 }
+            }
+        }
+    }
+}
+
+/// Prints session details in markdown format.
+fn print_session_markdown(
+    session: &Session,
+    messages: &[Message],
+    links: &[crate::storage::SessionLink],
+    full: bool,
+    show_thinking: bool,
+) {
+    // Header
+    println!("# Session {}", session.id);
+    println!();
+
+    // Metadata table
+    println!("| Property | Value |");
+    println!("|----------|-------|");
+    println!("| Tool | {} |", session.tool);
+    if let Some(ref v) = session.tool_version {
+        println!("| Version | {v} |");
+    }
+    if let Some(ref m) = session.model {
+        println!("| Model | {m} |");
+    }
+    println!(
+        "| Started | {} |",
+        session.started_at.format("%Y-%m-%d %H:%M:%S")
+    );
+    if let Some(ended) = session.ended_at {
+        let duration = ended.signed_duration_since(session.started_at);
+        println!(
+            "| Ended | {} ({} minutes) |",
+            ended.format("%Y-%m-%d %H:%M:%S"),
+            duration.num_minutes()
+        );
+    }
+    println!("| Messages | {} |", session.message_count);
+    println!("| Directory | `{}` |", session.working_directory);
+    if let Some(ref branch) = session.git_branch {
+        println!("| Branch | `{branch}` |");
+    }
+    println!();
+
+    // Links
+    if !links.is_empty() {
+        println!("## Linked Commits");
+        println!();
+        for link in links {
+            if let Some(ref sha) = link.commit_sha {
+                let short_sha = &sha[..8.min(sha.len())];
+                print!("- `{short_sha}`");
+                if let Some(conf) = link.confidence {
+                    print!(" (confidence: {:.0}%)", conf * 100.0);
+                }
+                println!();
             }
         }
         println!();
     }
 
-    Ok(())
+    // Conversation
+    println!("## Conversation");
+    println!();
+
+    for msg in messages {
+        let role = match msg.role {
+            MessageRole::User => "Human",
+            MessageRole::Assistant => "Assistant",
+            MessageRole::System => "System",
+        };
+
+        let time = msg.timestamp.format("%H:%M:%S").to_string();
+        println!("### [{role}] {time}");
+        println!();
+
+        print_message_content_markdown(&msg.content, full, show_thinking);
+        println!();
+    }
+}
+
+/// Prints message content in markdown format.
+fn print_message_content_markdown(content: &MessageContent, full: bool, show_thinking: bool) {
+    match content {
+        MessageContent::Text(text) => {
+            let display = if full || text.len() < 500 {
+                text.clone()
+            } else {
+                format!("{}...", truncate_str(text, 500))
+            };
+            println!("{display}");
+        }
+        MessageContent::Blocks(blocks) => {
+            for block in blocks {
+                match block {
+                    ContentBlock::Text { text } => {
+                        let display = if full || text.len() < 500 {
+                            text.clone()
+                        } else {
+                            format!("{}...", truncate_str(text, 500))
+                        };
+                        println!("{display}");
+                    }
+                    ContentBlock::Thinking { thinking } => {
+                        if show_thinking {
+                            println!("<details>");
+                            println!("<summary>Thinking</summary>");
+                            println!();
+                            println!("{thinking}");
+                            println!();
+                            println!("</details>");
+                            println!();
+                        }
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        println!("**Tool: {name}**");
+                        println!();
+                        println!("```json");
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(input).unwrap_or_default()
+                        );
+                        println!("```");
+                        println!();
+                    }
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => {
+                        let label = if *is_error { "Error" } else { "Result" };
+                        let display = if full || content.len() < 200 {
+                            content.clone()
+                        } else {
+                            format!("{}...", truncate_str(content, 200))
+                        };
+                        println!("**{label}:**");
+                        println!();
+                        println!("```");
+                        println!("{display}");
+                        println!("```");
+                        println!();
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Resolves a commit reference to a SHA and returns both the resolved SHA
@@ -221,7 +470,26 @@ fn resolve_commit_reference(commit: &str) -> (String, Option<String>) {
     (commit.to_string(), None)
 }
 
-fn show_commit_sessions(db: &Database, commit: &str) -> Result<()> {
+/// Output structure for commit sessions in JSON format.
+#[derive(Serialize)]
+struct CommitSessionsOutput {
+    commit_sha: String,
+    ref_name: Option<String>,
+    commit_summary: Option<String>,
+    commit_timestamp: Option<String>,
+    sessions: Vec<CommitSessionInfo>,
+}
+
+/// Session info for commit sessions JSON output.
+#[derive(Serialize)]
+struct CommitSessionInfo {
+    session_id: String,
+    started_at: String,
+    message_count: i32,
+    confidence: Option<f64>,
+}
+
+fn show_commit_sessions(db: &Database, commit: &str, format: OutputFormat) -> Result<()> {
     // Resolve the commit reference (handles HEAD, branch names, etc.)
     let (resolved_sha, ref_name) = resolve_commit_reference(commit);
 
@@ -229,34 +497,49 @@ fn show_commit_sessions(db: &Database, commit: &str) -> Result<()> {
     let links = db.get_links_by_commit(&resolved_sha)?;
 
     if links.is_empty() {
-        let display = if let Some(ref name) = ref_name {
-            format!("'{name}' ({})", &resolved_sha[..8.min(resolved_sha.len())])
-        } else {
-            format!("'{commit}'")
-        };
-        println!(
-            "{}",
-            format!("No sessions linked to commit {display}").dimmed()
-        );
+        match format {
+            OutputFormat::Json => {
+                let output = CommitSessionsOutput {
+                    commit_sha: resolved_sha.clone(),
+                    ref_name,
+                    commit_summary: None,
+                    commit_timestamp: None,
+                    sessions: vec![],
+                };
+                let json = serde_json::to_string_pretty(&output)?;
+                println!("{json}");
+            }
+            OutputFormat::Text | OutputFormat::Markdown => {
+                let display = if let Some(ref name) = ref_name {
+                    format!("'{name}' ({})", &resolved_sha[..8.min(resolved_sha.len())])
+                } else {
+                    format!("'{commit}'")
+                };
+                println!(
+                    "{}",
+                    format!("No sessions linked to commit {display}").dimmed()
+                );
+            }
+        }
         return Ok(());
     }
 
-    // Check for multiple SHA matches and warn if ambiguous
-    let unique_shas: std::collections::HashSet<_> = links
-        .iter()
-        .filter_map(|l| l.commit_sha.as_ref())
-        .collect();
+    // Check for multiple SHA matches and warn if ambiguous (only for text output)
+    if matches!(format, OutputFormat::Text) {
+        let unique_shas: std::collections::HashSet<_> =
+            links.iter().filter_map(|l| l.commit_sha.as_ref()).collect();
 
-    if unique_shas.len() > 1 {
-        eprintln!(
-            "{}",
-            format!(
-                "Warning: Partial SHA '{}' matches {} commits",
-                &resolved_sha[..8.min(resolved_sha.len())],
-                unique_shas.len()
-            )
-            .yellow()
-        );
+        if unique_shas.len() > 1 {
+            eprintln!(
+                "{}",
+                format!(
+                    "Warning: Partial SHA '{}' matches {} commits",
+                    &resolved_sha[..8.min(resolved_sha.len())],
+                    unique_shas.len()
+                )
+                .yellow()
+            );
+        }
     }
 
     // Get commit info for the header (if in a git repo)
@@ -265,69 +548,121 @@ fn show_commit_sessions(db: &Database, commit: &str) -> Result<()> {
         .as_ref()
         .and_then(|p| git::get_commit_info(p, &resolved_sha).ok());
 
-    // Print commit header
-    let short_sha = &resolved_sha[..8.min(resolved_sha.len())];
-    if let Some(ref info) = commit_info {
-        let ref_display = ref_name
-            .as_ref()
-            .map(|n| format!(" ({n})"))
-            .unwrap_or_default();
-
-        println!(
-            "{} {}{}",
-            "Commit".bold(),
-            short_sha.yellow(),
-            ref_display.dimmed()
-        );
-        println!("  \"{}\"", info.summary);
-        println!("  {}", info.timestamp.format("%Y-%m-%d %H:%M"));
-    } else {
-        // Fallback if not in a git repo or commit not found
-        let ref_display = ref_name
-            .as_ref()
-            .map(|n| format!(" ({n})"))
-            .unwrap_or_default();
-        println!(
-            "{} {}{}",
-            "Commit".bold(),
-            short_sha.yellow(),
-            ref_display.dimmed()
-        );
-    }
-
-    println!();
-    println!(
-        "{}",
-        format!("Linked sessions ({}):", links.len()).bold()
-    );
-
+    // Collect session info
+    let mut session_infos = Vec::new();
     for link in &links {
         if let Some(session) = db.get_session(&link.session_id)? {
-            let id_short = &session.id.to_string()[..8];
-            let started = session.started_at.format("%Y-%m-%d %H:%M").to_string();
-
-            println!(
-                "  {}  {}  {} messages",
-                id_short.cyan(),
-                started.dimmed(),
-                session.message_count
-            );
-
-            if let Some(conf) = link.confidence {
-                println!(
-                    "    {} {:.0}%",
-                    "confidence:".dimmed(),
-                    conf * 100.0
-                );
-            }
+            session_infos.push((session, link.confidence));
         }
     }
 
-    println!();
-    println!(
-        "{}",
-        "Use 'lore show <session-id>' to view session details".dimmed()
-    );
+    match format {
+        OutputFormat::Json => {
+            let output = CommitSessionsOutput {
+                commit_sha: resolved_sha.clone(),
+                ref_name,
+                commit_summary: commit_info.as_ref().map(|i| i.summary.clone()),
+                commit_timestamp: commit_info.as_ref().map(|i| i.timestamp.to_rfc3339()),
+                sessions: session_infos
+                    .iter()
+                    .map(|(s, conf)| CommitSessionInfo {
+                        session_id: s.id.to_string(),
+                        started_at: s.started_at.to_rfc3339(),
+                        message_count: s.message_count,
+                        confidence: *conf,
+                    })
+                    .collect(),
+            };
+            let json = serde_json::to_string_pretty(&output)?;
+            println!("{json}");
+        }
+        OutputFormat::Markdown => {
+            let short_sha = &resolved_sha[..8.min(resolved_sha.len())];
+            println!("# Commit `{short_sha}`");
+            println!();
+
+            if let Some(ref info) = commit_info {
+                println!("**Summary:** {}", info.summary);
+                println!();
+                println!("**Date:** {}", info.timestamp.format("%Y-%m-%d %H:%M"));
+                println!();
+            }
+
+            println!("## Linked Sessions ({})", session_infos.len());
+            println!();
+            println!("| Session ID | Started | Messages | Confidence |");
+            println!("|------------|---------|----------|------------|");
+
+            for (session, conf) in &session_infos {
+                let id_short = &session.id.to_string()[..8];
+                let started = session.started_at.format("%Y-%m-%d %H:%M").to_string();
+                let conf_str = conf
+                    .map(|c| format!("{:.0}%", c * 100.0))
+                    .unwrap_or_else(|| "-".to_string());
+                println!(
+                    "| `{id_short}` | {started} | {} | {conf_str} |",
+                    session.message_count
+                );
+            }
+        }
+        OutputFormat::Text => {
+            let short_sha = &resolved_sha[..8.min(resolved_sha.len())];
+            if let Some(ref info) = commit_info {
+                let ref_display = ref_name
+                    .as_ref()
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default();
+
+                println!(
+                    "{} {}{}",
+                    "Commit".bold(),
+                    short_sha.yellow(),
+                    ref_display.dimmed()
+                );
+                println!("  \"{}\"", info.summary);
+                println!("  {}", info.timestamp.format("%Y-%m-%d %H:%M"));
+            } else {
+                let ref_display = ref_name
+                    .as_ref()
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default();
+                println!(
+                    "{} {}{}",
+                    "Commit".bold(),
+                    short_sha.yellow(),
+                    ref_display.dimmed()
+                );
+            }
+
+            println!();
+            println!(
+                "{}",
+                format!("Linked sessions ({}):", session_infos.len()).bold()
+            );
+
+            for (session, conf) in &session_infos {
+                let id_short = &session.id.to_string()[..8];
+                let started = session.started_at.format("%Y-%m-%d %H:%M").to_string();
+
+                println!(
+                    "  {}  {}  {} messages",
+                    id_short.cyan(),
+                    started.dimmed(),
+                    session.message_count
+                );
+
+                if let Some(c) = conf {
+                    println!("    {} {:.0}%", "confidence:".dimmed(), c * 100.0);
+                }
+            }
+
+            println!();
+            println!(
+                "{}",
+                "Use 'lore show <session-id>' to view session details".dimmed()
+            );
+        }
+    }
 
     Ok(())
 }

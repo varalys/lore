@@ -162,21 +162,15 @@ pub fn get_commit_info(repo_path: &Path, commit_ref: &str) -> Result<CommitInfo>
         .unwrap_or_else(Utc::now);
 
     // Try to get the branch name (check if HEAD points to this commit)
-    let branch = repo
-        .head()
-        .ok()
-        .and_then(|h| {
-            if h.peel_to_commit().ok()?.id() == commit.id() {
-                h.shorthand().map(|s| s.to_string())
-            } else {
-                None
-            }
-        });
+    let branch = repo.head().ok().and_then(|h| {
+        if h.peel_to_commit().ok()?.id() == commit.id() {
+            h.shorthand().map(|s| s.to_string())
+        } else {
+            None
+        }
+    });
 
-    let summary = commit
-        .summary()
-        .unwrap_or("")
-        .to_string();
+    let summary = commit.summary().unwrap_or("").to_string();
 
     Ok(CommitInfo {
         sha,
@@ -253,10 +247,7 @@ pub fn get_commit_files(repo_path: &Path, commit_ref: &str) -> Result<Vec<String
     diff.foreach(
         &mut |delta, _| {
             // Get the new file path (or old path for deletions)
-            let path = delta
-                .new_file()
-                .path()
-                .or_else(|| delta.old_file().path());
+            let path = delta.new_file().path().or_else(|| delta.old_file().path());
 
             if let Some(p) = path {
                 files.push(p.to_string_lossy().to_string());
@@ -294,7 +285,10 @@ mod tests {
         // Time proximity: 0.3 * (1 - 2/30) = 0.28
         // Recent bonus: 0.1 (within 5 min)
         // Total: 0.98
-        assert!(score > 0.9, "Full match should have high confidence: {score}");
+        assert!(
+            score > 0.9,
+            "Full match should have high confidence: {score}"
+        );
     }
 
     #[test]
@@ -340,7 +334,10 @@ mod tests {
         // Time proximity: 0.3 * (1 - 15/30) = 0.15
         // Recent bonus: 0 (> 5 min)
         // Total: 0.75
-        assert!(score > 0.7 && score < 0.8, "Partial match should have medium-high confidence: {score}");
+        assert!(
+            score > 0.7 && score < 0.8,
+            "Partial match should have medium-high confidence: {score}"
+        );
     }
 
     #[test]
@@ -348,21 +345,11 @@ mod tests {
         let session_files = vec!["src/main.rs".to_string()];
         let commit_files = vec!["src/main.rs".to_string()];
 
-        let score_recent = calculate_link_confidence(
-            Some("main"),
-            &session_files,
-            "main",
-            &commit_files,
-            1,
-        );
+        let score_recent =
+            calculate_link_confidence(Some("main"), &session_files, "main", &commit_files, 1);
 
-        let score_old = calculate_link_confidence(
-            Some("main"),
-            &session_files,
-            "main",
-            &commit_files,
-            25,
-        );
+        let score_old =
+            calculate_link_confidence(Some("main"), &session_files, "main", &commit_files, 25);
 
         assert!(
             score_recent > score_old,
@@ -375,13 +362,8 @@ mod tests {
         let session_files = vec!["a.rs".to_string(), "b.rs".to_string()];
         let commit_files = vec!["a.rs".to_string()];
 
-        let score = calculate_link_confidence(
-            Some("main"),
-            &session_files,
-            "main",
-            &commit_files,
-            0,
-        );
+        let score =
+            calculate_link_confidence(Some("main"), &session_files, "main", &commit_files, 0);
 
         assert!(score <= 1.0, "Score should be capped at 1.0: {score}");
     }
@@ -391,13 +373,8 @@ mod tests {
         let session_files: Vec<String> = vec![];
         let commit_files: Vec<String> = vec![];
 
-        let score = calculate_link_confidence(
-            Some("main"),
-            &session_files,
-            "main",
-            &commit_files,
-            5,
-        );
+        let score =
+            calculate_link_confidence(Some("main"), &session_files, "main", &commit_files, 5);
 
         // Should not panic and should give branch + time score
         assert!(score > 0.0, "Should handle empty files gracefully: {score}");
@@ -432,8 +409,7 @@ mod tests {
         let result = resolve_commit_ref(repo_path, "HEAD~1");
 
         // If the repo has multiple commits, this should succeed
-        if result.is_ok() {
-            let sha = result.unwrap();
+        if let Ok(sha) = result {
             assert_eq!(sha.len(), 40, "SHA should be 40 characters");
 
             // Should be different from HEAD
@@ -452,7 +428,11 @@ mod tests {
 
         // Now resolve using the full SHA
         let result = resolve_commit_ref(repo_path, &head_sha);
-        assert!(result.is_ok(), "Full SHA should resolve: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Full SHA should resolve: {:?}",
+            result.err()
+        );
 
         let resolved = result.unwrap();
         assert_eq!(resolved, head_sha, "Resolved SHA should match input");

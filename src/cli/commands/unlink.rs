@@ -12,16 +12,31 @@ use crate::storage::Database;
 
 /// Arguments for the unlink command.
 #[derive(clap::Args)]
+#[command(after_help = "EXAMPLES:\n    \
+    lore unlink abc123                  Unlink from all commits (prompts)\n    \
+    lore unlink abc123 -y               Unlink from all commits (no prompt)\n    \
+    lore unlink abc123 --commit 1a2b    Unlink from specific commit")]
 pub struct Args {
-    /// Session ID prefix to unlink.
+    /// Session ID prefix to unlink
+    #[arg(value_name = "SESSION")]
+    #[arg(
+        long_help = "The session ID prefix to unlink. Must uniquely identify a\n\
+        single session. Use 'lore sessions' to find session IDs."
+    )]
     pub session: String,
 
-    /// Specific commit SHA to unlink from. If not provided, removes all links.
-    #[arg(long)]
+    /// Specific commit to unlink from (removes all links if omitted)
+    #[arg(long, value_name = "SHA")]
+    #[arg(long_help = "If specified, only removes the link to this commit.\n\
+        If omitted, removes all links for the session.")]
     pub commit: Option<String>,
 
-    /// Skip confirmation prompt.
+    /// Skip the confirmation prompt
     #[arg(short = 'y', long)]
+    #[arg(
+        long_help = "Skip the confirmation prompt and proceed with unlinking.\n\
+        Use with caution when removing all links from a session."
+    )]
     pub yes: bool,
 }
 
@@ -41,19 +56,35 @@ pub fn run(args: Args) -> Result<()> {
         .collect();
 
     if matching.is_empty() {
-        bail!("No session found matching '{}'", args.session);
+        if all_sessions.is_empty() {
+            bail!(
+                "No session found matching '{}'. No sessions in database. \
+                 Run 'lore import' to import sessions first.",
+                args.session
+            );
+        } else {
+            bail!(
+                "No session found matching '{}'. \
+                 Run 'lore sessions' to list available sessions.",
+                args.session
+            );
+        }
     }
 
     if matching.len() > 1 {
-        println!(
-            "{}",
-            "Multiple sessions match that prefix:".yellow()
-        );
+        println!("{}", "Multiple sessions match that prefix:".yellow());
         for s in &matching {
             let id_short = &s.id.to_string()[..8];
-            println!("  {} - {}", id_short.cyan(), s.started_at.format("%Y-%m-%d %H:%M"));
+            println!(
+                "  {} - {}",
+                id_short.cyan(),
+                s.started_at.format("%Y-%m-%d %H:%M")
+            );
         }
-        bail!("Please use a more specific prefix");
+        bail!(
+            "Multiple sessions match '{}'. Please use a more specific prefix from the list above.",
+            args.session
+        );
     }
 
     let session = matching[0];
@@ -83,7 +114,10 @@ pub fn run(args: Args) -> Result<()> {
             .collect();
 
         if matching_links.is_empty() {
-            bail!("No link found between session {session_short} and commit {commit_sha}");
+            bail!(
+                "No link found between session {session_short} and commit {commit_sha}. \
+                 Run 'lore show {session_short}' to see linked commits for this session."
+            );
         }
 
         let link = matching_links[0];
@@ -127,10 +161,7 @@ pub fn run(args: Args) -> Result<()> {
 
         // Confirm unless --yes
         if !args.yes {
-            println!(
-                "This will unlink session {} from:",
-                session_short.cyan()
-            );
+            println!("This will unlink session {} from:", session_short.cyan());
             for link in &links {
                 if let Some(ref sha) = link.commit_sha {
                     let short_sha = &sha[..8.min(sha.len())];

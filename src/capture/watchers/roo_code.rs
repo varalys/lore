@@ -1,12 +1,12 @@
-//! Cline (Claude Dev) session parser.
+//! Roo Code session parser.
 //!
-//! Parses conversation history from Cline, an AI coding assistant VS Code
-//! extension formerly known as Claude Dev.
+//! Parses conversation history from Roo Code, an AI coding assistant VS Code
+//! extension that is a fork of Cline.
 //!
-//! Cline stores task conversations in the VS Code global storage directory:
-//! - macOS: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`
-//! - Linux: `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`
-//! - Windows: `%APPDATA%/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/`
+//! Roo Code stores task conversations in the VS Code global storage directory:
+//! - macOS: `~/Library/Application Support/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`
+//! - Linux: `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`
+//! - Windows: `%APPDATA%/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/`
 //!
 //! Each task has its own directory containing:
 //! - `api_conversation_history.json` - Raw API message exchanges
@@ -24,31 +24,31 @@ use crate::storage::models::{Message, MessageContent, MessageRole, Session};
 
 use super::{Watcher, WatcherInfo};
 
-/// Watcher for Cline (Claude Dev) sessions.
+/// Watcher for Roo Code sessions.
 ///
-/// Discovers and parses task conversation files from Cline's VS Code
+/// Discovers and parses task conversation files from Roo Code's VS Code
 /// extension storage.
-pub struct ClineWatcher;
+pub struct RooCodeWatcher;
 
-impl Watcher for ClineWatcher {
+impl Watcher for RooCodeWatcher {
     fn info(&self) -> WatcherInfo {
         WatcherInfo {
-            name: "cline",
-            description: "Cline (Claude Dev) VS Code extension sessions",
-            default_paths: vec![cline_tasks_path()],
+            name: "roo-code",
+            description: "Roo Code VS Code extension sessions",
+            default_paths: vec![roo_code_tasks_path()],
         }
     }
 
     fn is_available(&self) -> bool {
-        cline_tasks_path().exists()
+        roo_code_tasks_path().exists()
     }
 
     fn find_sources(&self) -> Result<Vec<PathBuf>> {
-        find_cline_tasks()
+        find_roo_code_tasks()
     }
 
     fn parse_source(&self, path: &Path) -> Result<Vec<(Session, Vec<Message>)>> {
-        let parsed = parse_cline_task(path)?;
+        let parsed = parse_roo_code_task(path)?;
         match parsed {
             Some((session, messages)) if !messages.is_empty() => Ok(vec![(session, messages)]),
             _ => Ok(vec![]),
@@ -56,19 +56,19 @@ impl Watcher for ClineWatcher {
     }
 
     fn watch_paths(&self) -> Vec<PathBuf> {
-        vec![cline_tasks_path()]
+        vec![roo_code_tasks_path()]
     }
 }
 
-/// Returns the path to Cline's tasks storage directory.
+/// Returns the path to Roo Code's tasks storage directory.
 ///
 /// This is platform-specific:
-/// - macOS: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks`
-/// - Linux: `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks`
-/// - Windows: `%APPDATA%/Code/User/globalStorage/saoudrizwan.claude-dev/tasks`
-fn cline_tasks_path() -> PathBuf {
+/// - macOS: `~/Library/Application Support/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks`
+/// - Linux: `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks`
+/// - Windows: `%APPDATA%/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks`
+fn roo_code_tasks_path() -> PathBuf {
     let base = get_vscode_global_storage();
-    base.join("saoudrizwan.claude-dev").join("tasks")
+    base.join("rooveterinaryinc.roo-cline").join("tasks")
 }
 
 /// Returns the VS Code global storage path.
@@ -99,11 +99,11 @@ fn get_vscode_global_storage() -> PathBuf {
     }
 }
 
-/// Finds all Cline task directories.
+/// Finds all Roo Code task directories.
 ///
 /// Each task has its own subdirectory containing conversation files.
-fn find_cline_tasks() -> Result<Vec<PathBuf>> {
-    let tasks_path = cline_tasks_path();
+fn find_roo_code_tasks() -> Result<Vec<PathBuf>> {
+    let tasks_path = roo_code_tasks_path();
 
     if !tasks_path.exists() {
         return Ok(Vec::new());
@@ -127,31 +127,33 @@ fn find_cline_tasks() -> Result<Vec<PathBuf>> {
     Ok(tasks)
 }
 
-/// Raw Cline API conversation message.
+/// Raw Roo Code API conversation message.
+/// Uses the same format as Cline.
 #[derive(Debug, Deserialize)]
-struct ClineApiMessage {
+struct RooCodeApiMessage {
     /// Role: "user" or "assistant"
     role: String,
 
     /// Message content (can be string or array of content blocks)
-    content: ClineContent,
+    content: RooCodeContent,
 
     /// Timestamp (milliseconds since epoch)
     #[serde(default)]
     ts: Option<i64>,
 }
 
-/// Content in Cline API format.
+/// Content in Roo Code API format.
+/// Uses the same format as Cline.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum ClineContent {
+enum RooCodeContent {
     /// Simple text content
     Text(String),
     /// Array of content blocks
-    Blocks(Vec<ClineContentBlock>),
+    Blocks(Vec<RooCodeContentBlock>),
 }
 
-impl ClineContent {
+impl RooCodeContent {
     /// Extracts text content from the message.
     fn to_text(&self) -> String {
         match self {
@@ -159,7 +161,7 @@ impl ClineContent {
             Self::Blocks(blocks) => blocks
                 .iter()
                 .filter_map(|b| match b {
-                    ClineContentBlock::Text { text } => Some(text.clone()),
+                    RooCodeContentBlock::Text { text } => Some(text.clone()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -168,10 +170,11 @@ impl ClineContent {
     }
 }
 
-/// A content block in Cline messages.
+/// A content block in Roo Code messages.
+/// Uses the same format as Cline.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ClineContentBlock {
+enum RooCodeContentBlock {
     /// Text content
     Text { text: String },
     /// Image content
@@ -197,9 +200,10 @@ enum ClineContentBlock {
     },
 }
 
-/// Task metadata from Cline.
+/// Task metadata from Roo Code.
+/// Uses the same format as Cline.
 #[derive(Debug, Deserialize, Default)]
-struct ClineTaskMetadata {
+struct RooCodeTaskMetadata {
     /// Timestamp (ISO 8601 or milliseconds)
     #[serde(default)]
     ts: Option<serde_json::Value>,
@@ -209,13 +213,13 @@ struct ClineTaskMetadata {
     dir: Option<String>,
 }
 
-/// Parses a Cline task from its conversation history file.
-fn parse_cline_task(history_path: &Path) -> Result<Option<(Session, Vec<Message>)>> {
+/// Parses a Roo Code task from its conversation history file.
+fn parse_roo_code_task(history_path: &Path) -> Result<Option<(Session, Vec<Message>)>> {
     let content =
-        fs::read_to_string(history_path).context("Failed to read Cline conversation history")?;
+        fs::read_to_string(history_path).context("Failed to read Roo Code conversation history")?;
 
-    let raw_messages: Vec<ClineApiMessage> =
-        serde_json::from_str(&content).context("Failed to parse Cline conversation JSON")?;
+    let raw_messages: Vec<RooCodeApiMessage> =
+        serde_json::from_str(&content).context("Failed to parse Roo Code conversation JSON")?;
 
     if raw_messages.is_empty() {
         return Ok(None);
@@ -233,7 +237,7 @@ fn parse_cline_task(history_path: &Path) -> Result<Option<(Session, Vec<Message>
         .map(|d| d.join("task_metadata.json"))
         .filter(|p| p.exists())
         .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|c| serde_json::from_str::<ClineTaskMetadata>(&c).ok())
+        .and_then(|c| serde_json::from_str::<RooCodeTaskMetadata>(&c).ok())
         .unwrap_or_default();
 
     // Generate session ID from task ID or create new one
@@ -277,7 +281,7 @@ fn parse_cline_task(history_path: &Path) -> Result<Option<(Session, Vec<Message>
 
     let session = Session {
         id: session_id,
-        tool: "cline".to_string(),
+        tool: "roo-code".to_string(),
         tool_version: None,
         started_at,
         ended_at,
@@ -340,7 +344,7 @@ mod tests {
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
-    /// Creates a temporary Cline conversation file with given JSON content.
+    /// Creates a temporary Roo Code conversation file with given JSON content.
     fn create_temp_conversation_file(json: &str) -> NamedTempFile {
         let mut file = NamedTempFile::with_suffix(".json").expect("Failed to create temp file");
         file.write_all(json.as_bytes())
@@ -363,25 +367,22 @@ mod tests {
 
     #[test]
     fn test_watcher_info() {
-        let watcher = ClineWatcher;
+        let watcher = RooCodeWatcher;
         let info = watcher.info();
 
-        assert_eq!(info.name, "cline");
-        assert_eq!(
-            info.description,
-            "Cline (Claude Dev) VS Code extension sessions"
-        );
+        assert_eq!(info.name, "roo-code");
+        assert_eq!(info.description, "Roo Code VS Code extension sessions");
     }
 
     #[test]
     fn test_watcher_watch_paths() {
-        let watcher = ClineWatcher;
+        let watcher = RooCodeWatcher;
         let paths = watcher.watch_paths();
 
         assert!(!paths.is_empty());
         assert!(paths[0]
             .to_string_lossy()
-            .contains("saoudrizwan.claude-dev"));
+            .contains("rooveterinaryinc.roo-cline"));
         assert!(paths[0].to_string_lossy().contains("tasks"));
     }
 
@@ -393,10 +394,10 @@ mod tests {
         ]"#;
 
         let file = create_temp_conversation_file(json);
-        let result = parse_cline_task(file.path()).expect("Should parse");
+        let result = parse_roo_code_task(file.path()).expect("Should parse");
 
         let (session, messages) = result.expect("Should have session");
-        assert_eq!(session.tool, "cline");
+        assert_eq!(session.tool, "roo-code");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, MessageRole::User);
         assert_eq!(messages[1].role, MessageRole::Assistant);
@@ -416,7 +417,7 @@ mod tests {
         ]"#;
 
         let file = create_temp_conversation_file(json);
-        let result = parse_cline_task(file.path()).expect("Should parse");
+        let result = parse_roo_code_task(file.path()).expect("Should parse");
 
         let (_, messages) = result.expect("Should have session");
         assert_eq!(messages.len(), 1);
@@ -433,7 +434,7 @@ mod tests {
         let json = "[]";
 
         let file = create_temp_conversation_file(json);
-        let result = parse_cline_task(file.path()).expect("Should parse");
+        let result = parse_roo_code_task(file.path()).expect("Should parse");
 
         assert!(result.is_none());
     }
@@ -457,7 +458,7 @@ mod tests {
         ]"#;
 
         let file = create_temp_conversation_file(json);
-        let result = parse_cline_task(file.path()).expect("Should parse");
+        let result = parse_roo_code_task(file.path()).expect("Should parse");
 
         let (_, messages) = result.expect("Should have session");
         assert_eq!(messages.len(), 2);
@@ -471,7 +472,7 @@ mod tests {
         ]"#;
 
         let file = create_temp_conversation_file(json);
-        let result = parse_cline_task(file.path()).expect("Should parse");
+        let result = parse_roo_code_task(file.path()).expect("Should parse");
 
         let (_, messages) = result.expect("Should have session");
         // Empty content should be filtered
@@ -480,13 +481,13 @@ mod tests {
 
     #[test]
     fn test_find_tasks_returns_ok_when_dir_missing() {
-        let result = find_cline_tasks();
+        let result = find_roo_code_tasks();
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_watcher_parse_source() {
-        let watcher = ClineWatcher;
+        let watcher = RooCodeWatcher;
         let json = r#"[{"role": "user", "content": "Test", "ts": 1704067200000}]"#;
 
         let file = create_temp_conversation_file(json);
@@ -496,7 +497,7 @@ mod tests {
 
         assert!(!result.is_empty());
         let (session, _) = &result[0];
-        assert_eq!(session.tool, "cline");
+        assert_eq!(session.tool, "roo-code");
     }
 
     #[test]
@@ -511,7 +512,7 @@ mod tests {
             .join("550e8400-e29b-41d4-a716-446655440000")
             .join("api_conversation_history.json");
 
-        let result = parse_cline_task(&history_path).expect("Should parse");
+        let result = parse_roo_code_task(&history_path).expect("Should parse");
 
         let (session, _) = result.expect("Should have session");
         assert_eq!(
@@ -528,7 +529,7 @@ mod tests {
         ]"#;
 
         let file = create_temp_conversation_file(json);
-        let result = parse_cline_task(file.path()).expect("Should parse");
+        let result = parse_roo_code_task(file.path()).expect("Should parse");
 
         let (session, messages) = result.expect("Should have session");
 
@@ -552,7 +553,7 @@ mod tests {
         ]"#;
 
         let file = create_temp_conversation_file(json);
-        let result = parse_cline_task(file.path()).expect("Should parse");
+        let result = parse_roo_code_task(file.path()).expect("Should parse");
 
         let (_, messages) = result.expect("Should have session");
         assert_eq!(messages.len(), 1);

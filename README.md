@@ -1,99 +1,266 @@
 # Lore
 
-**Reasoning history for code** — capture the story behind your commits.
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![CI](https://github.com/redactyl/lore/actions/workflows/ci.yml/badge.svg)](https://github.com/redactyl/lore/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/redactyl/lore)](https://github.com/redactyl/lore/releases)
 
-Git tells you *what* changed. Lore tells you *how* and *why* it changed.
+Lore captures AI coding sessions and links them to git commits.
 
-## The Problem
+When you use AI coding tools like Claude Code or Aider, the conversation history contains valuable context: the prompts you wrote, the approaches you tried, the decisions you made. Git captures the final code, but not this reasoning. Lore preserves both.
 
-In AI-assisted development, the reasoning happens in conversations:
+## Use Cases
 
-- The prompts you wrote
-- The iterations you went through  
-- The approaches you rejected
-- The context you provided
+- **Code review**: See the AI conversation that produced a PR, not just the diff
+- **Debugging**: Understand why code was written a certain way by reading the original discussion
+- **Knowledge transfer**: When someone leaves a project, their AI conversations stay with the code
+- **Learning**: Study how problems were solved by browsing linked sessions
 
-But git only captures the final code. The story is lost.
+## How It Works
 
-## What Lore Does
+Lore reads session data from AI coding tools, stores it in a local SQLite database, and creates links between sessions and git commits.
 
-Lore captures your AI coding sessions and links them to git commits, so you can:
+### Capture
 
-- **Review code with context**: See the reasoning behind a PR, not just the diff
-- **Debug with history**: Understand why code was written a certain way
-- **Onboard faster**: Learn how your team solves problems
-- **Preserve knowledge**: When people move on, the reasoning stays
+Each AI tool stores conversation data in its own format and location. Lore includes parsers for each supported tool:
+
+- **Claude Code**: JSONL files in `~/.claude/projects/<hash>/sessions/`
+- **Codex CLI**: JSONL files in `~/.codex/sessions/`
+- **Gemini CLI**: JSON files in `~/.gemini/tmp/<hash>/chats/`
+- **Amp**: JSON files in `~/.local/share/amp/threads/`
+- **Aider**: Markdown files (`.aider.chat.history.md`) in project directories
+- **Continue.dev**: JSON files in `~/.continue/sessions/`
+- **Cline**: JSON in VS Code's extension storage
+- **Roo Code**: JSON in VS Code's extension storage
+- **OpenCode**: JSON files in `~/.local/share/opencode/storage/`
+
+You can import existing sessions with `lore import`, or run `lore daemon start` to watch for new sessions in real-time.
+
+### Storage
+
+Sessions and messages are stored in a SQLite database at `~/.lore/lore.db`. The schema includes:
+
+- **sessions**: ID, tool, timestamps, working directory, message count
+- **messages**: ID, session ID, role (user/assistant), content, timestamp
+- **session_links**: Maps session IDs to git commit SHAs
+
+Full-text search uses SQLite FTS5 to index message content.
+
+### Linking
+
+Links connect sessions to commits. You can create them:
+
+- **Manually**: `lore link <session-id> --commit <sha>`
+- **Automatically**: `lore link --auto` matches sessions to commits by timestamp and file overlap
+- **Via hooks**: `lore hooks install` adds a post-commit hook that prompts for linking
+
+Links are bidirectional: given a session, find its commits; given a commit, find its sessions.
 
 ## Installation
 
-```bash
-# macOS
-brew install wemfore/tap/lore
+### From Releases
 
-# From source
+Download the latest binary from [GitHub Releases](https://github.com/redactyl/lore/releases) and add it to your PATH.
+
+### From Source
+
+```bash
+git clone https://github.com/redactyl/lore.git
+cd lore
 cargo install --path .
 ```
 
 ## Quick Start
 
 ```bash
-# Import your Claude Code sessions
+# Import existing sessions from AI coding tools
 lore import
 
-# List recent sessions
+# List sessions
 lore sessions
 
 # View a session
 lore show abc123
 
-# Link a session to your current commit
+# Link a session to the current commit
 lore link abc123
 
-# View sessions linked to a commit
+# Later, view what sessions informed a commit
 lore show --commit HEAD
+```
+
+## Example Workflow
+
+```bash
+# You're reviewing a PR and want to understand a change
+$ git log --oneline -1
+a1b2c3d feat: add rate limiting to API
+
+$ lore show --commit a1b2c3d
+Sessions linked to commit a1b2c3d:
+
+  Session: 7f3a2b1
+  Tool: claude-code
+  Duration: 45 minutes
+  Messages: 23
+
+# View the full conversation
+$ lore show 7f3a2b1
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `lore status` | Show current state and recent sessions |
-| `lore sessions` | List and filter sessions |
+| `lore status` | Show daemon status, watchers, and recent sessions |
+| `lore sessions` | List sessions (supports `--repo`, `--limit`, `--format`) |
 | `lore show <id>` | View session details |
-| `lore show --commit <sha>` | View sessions linked to a commit |
+| `lore show --commit <ref>` | View sessions linked to a commit |
+| `lore import` | Import sessions from AI tools |
 | `lore link <id>` | Link session to HEAD |
-| `lore link <id> --commit <sha>` | Link session to specific commit |
-| `lore import` | Import sessions from Claude Code |
-| `lore config` | View/edit configuration |
+| `lore link --auto` | Auto-link sessions by time and file overlap |
+| `lore unlink <id>` | Remove a session-commit link |
+| `lore search <query>` | Full-text search across all sessions |
+| `lore hooks install` | Install git hooks for automatic linking |
+| `lore daemon start` | Start background watcher for real-time capture |
+| `lore daemon install` | Install daemon as a system service |
+| `lore daemon uninstall` | Remove daemon service |
+| `lore config` | View and update configuration |
 
 ## Supported Tools
 
-- ✅ Claude Code
-- 🚧 Cursor (planned)
-- 🚧 GitHub Copilot (planned)
-- 🚧 Windsurf (planned)
+| Tool | Status | Storage Location |
+|------|--------|------------------|
+| Claude Code | Supported | `~/.claude/projects/` |
+| Codex CLI | Supported | `~/.codex/sessions/` |
+| Gemini CLI | Supported | `~/.gemini/tmp/*/chats/` |
+| Amp | Supported | `~/.local/share/amp/threads/` |
+| Aider | Supported | `.aider.chat.history.md` |
+| Continue.dev | Supported | `~/.continue/sessions/` |
+| Cline | Supported | VS Code extension storage |
+| Roo Code | Supported | VS Code extension storage |
+| OpenCode | Supported | `~/.local/share/opencode/storage/` |
 
-## How It Works
+**Building an AI coding tool?** We welcome contributions to support additional tools. Open an issue with your tool's session storage location and format, or submit a PR adding a watcher. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
-1. **Capture**: Lore reads session files from AI coding tools (currently Claude Code's `~/.claude/projects/`)
-2. **Store**: Sessions are stored in a local SQLite database (`~/.lore/lore.db`)
-3. **Link**: You can link sessions to git commits manually or automatically
-4. **View**: Browse reasoning history alongside your code
+## Background Daemon
 
-## Storage
+The daemon watches for new sessions in real-time and imports them automatically.
 
-All data is stored locally in `~/.lore/`:
+### Manual Start
+
+```bash
+lore daemon start    # Start watching
+lore daemon status   # Check what's being watched
+lore daemon logs     # View daemon logs
+lore daemon stop     # Stop watching
+```
+
+### Run as a Service
+
+Install the daemon as a system service to start automatically on login:
+
+```bash
+lore daemon install    # Install and enable service
+lore daemon uninstall  # Remove service
+```
+
+This uses launchd on macOS and systemd on Linux. The service restarts automatically on failure.
+
+#### Manual systemd Setup (Linux)
+
+If you prefer to configure systemd yourself:
+
+```bash
+mkdir -p ~/.config/systemd/user
+```
+
+Create `~/.config/systemd/user/lore.service`:
+
+```ini
+[Unit]
+Description=Lore AI session capture daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/lore daemon start --foreground
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Then enable and start:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now lore.service
+systemctl --user status lore.service
+```
+
+#### macOS with Homebrew
+
+Once a Homebrew formula is available:
+
+```bash
+brew services start lore
+brew services stop lore
+```
+
+Until then, use `lore daemon install` or manage launchd manually.
+
+## Auto-linking
+
+Lore can automatically link sessions to commits based on timing and file overlap:
+
+```bash
+# Preview what would be linked
+lore link --auto --dry-run
+
+# Link with default confidence threshold (0.5)
+lore link --auto
+
+# Require higher confidence
+lore link --auto --threshold 0.7
+```
+
+## Git Hooks
+
+Install hooks to automatically record session links on commit:
+
+```bash
+lore hooks install   # Install post-commit hook
+lore hooks status    # Check hook status
+lore hooks uninstall # Remove hooks
+```
+
+## Output Formats
+
+Commands support `--format` for scripting and integration:
+
+```bash
+lore sessions --format json
+lore show abc123 --format json
+lore show abc123 --format markdown
+lore status --format json
+```
+
+## Data Location
 
 ```
 ~/.lore/
-├── lore.db          # SQLite database
-└── config.yaml      # Configuration (future)
+├── lore.db       # SQLite database
+├── config.yaml   # Configuration
+└── logs/         # Daemon logs
 ```
+
+All data stays on your machine. There is no cloud sync or external service.
 
 ## License
 
-MIT
+Apache 2.0
 
 ## Contributing
 
-This is an early-stage project. Contributions welcome!
+See [CONTRIBUTING.md](CONTRIBUTING.md).
