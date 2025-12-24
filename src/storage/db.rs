@@ -5,21 +5,47 @@
 //! persistence with automatic schema migrations.
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use uuid::Uuid;
 
 use super::models::{Message, MessageContent, MessageRole, SearchResult, Session, SessionLink};
 
+/// Parses a UUID from a string, converting errors to rusqlite errors.
+///
+/// Used in row mapping functions where we need to return rusqlite::Result.
+fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
+/// Parses an RFC3339 datetime string, converting errors to rusqlite errors.
+///
+/// Used in row mapping functions where we need to return rusqlite::Result.
+fn parse_datetime(s: &str) -> rusqlite::Result<DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
+}
+
 /// Returns the default database path at `~/.lore/lore.db`.
 ///
 /// Creates the `.lore` directory if it does not exist.
 pub fn default_db_path() -> Result<PathBuf> {
     let config_dir = dirs::home_dir()
-        .context("Could not find home directory")?
+        .context("Could not find home directory. Ensure your HOME environment variable is set.")?
         .join(".lore");
 
-    std::fs::create_dir_all(&config_dir)?;
+    std::fs::create_dir_all(&config_dir).with_context(|| {
+        format!(
+            "Failed to create Lore data directory at {}. Check directory permissions.",
+            config_dir.display()
+        )
+    })?;
     Ok(config_dir.join("lore.db"))
 }
 
@@ -177,26 +203,7 @@ impl Database {
             .query_row(
                 "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count FROM sessions WHERE id = ?1",
                 params![id.to_string()],
-                |row| {
-                    Ok(Session {
-                        id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                        tool: row.get(1)?,
-                        tool_version: row.get(2)?,
-                        started_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
-                            .unwrap()
-                            .with_timezone(&chrono::Utc),
-                        ended_at: row.get::<_, Option<String>>(4)?.map(|s| {
-                            chrono::DateTime::parse_from_rfc3339(&s)
-                                .unwrap()
-                                .with_timezone(&chrono::Utc)
-                        }),
-                        model: row.get(5)?,
-                        working_directory: row.get(6)?,
-                        git_branch: row.get(7)?,
-                        source_path: row.get(8)?,
-                        message_count: row.get(9)?,
-                    })
-                },
+                Self::row_to_session,
             )
             .optional()
             .context("Failed to get session")
@@ -230,7 +237,8 @@ impl Database {
             stmt.query_map(params![limit], Self::row_to_session)?
         };
 
-        rows.collect::<Result<Vec<_>, _>>().context("Failed to list sessions")
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list sessions")
     }
 
     /// Checks if a session with the given source path already exists.
@@ -246,18 +254,18 @@ impl Database {
     }
 
     fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
+        let ended_at_str: Option<String> = row.get(4)?;
+        let ended_at = match ended_at_str {
+            Some(s) => Some(parse_datetime(&s)?),
+            None => None,
+        };
+
         Ok(Session {
-            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
+            id: parse_uuid(&row.get::<_, String>(0)?)?,
             tool: row.get(1)?,
             tool_version: row.get(2)?,
-            started_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            ended_at: row.get::<_, Option<String>>(4)?.map(|s| {
-                chrono::DateTime::parse_from_rfc3339(&s)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc)
-            }),
+            started_at: parse_datetime(&row.get::<_, String>(3)?)?,
+            ended_at,
             model: row.get(5)?,
             working_directory: row.get(6)?,
             git_branch: row.get(7)?,
@@ -325,28 +333,34 @@ impl Database {
             let role_str: String = row.get(5)?;
             let content_str: String = row.get(6)?;
 
+            let parent_id_str: Option<String> = row.get(2)?;
+            let parent_id = match parent_id_str {
+                Some(s) => Some(parse_uuid(&s)?),
+                None => None,
+            };
+
             Ok(Message {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                session_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                parent_id: row.get::<_, Option<String>>(2)?.map(|s| Uuid::parse_str(&s).unwrap()),
+                id: parse_uuid(&row.get::<_, String>(0)?)?,
+                session_id: parse_uuid(&row.get::<_, String>(1)?)?,
+                parent_id,
                 index: row.get(3)?,
-                timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
+                timestamp: parse_datetime(&row.get::<_, String>(4)?)?,
                 role: match role_str.as_str() {
                     "user" => MessageRole::User,
                     "assistant" => MessageRole::Assistant,
                     "system" => MessageRole::System,
                     _ => MessageRole::User,
                 },
-                content: serde_json::from_str(&content_str).unwrap_or(MessageContent::Text(content_str)),
+                content: serde_json::from_str(&content_str)
+                    .unwrap_or(MessageContent::Text(content_str)),
                 model: row.get(7)?,
                 git_branch: row.get(8)?,
                 cwd: row.get(9)?,
             })
         })?;
 
-        rows.collect::<Result<Vec<_>, _>>().context("Failed to get messages")
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to get messages")
     }
 
     // ==================== Session Links ====================
@@ -390,7 +404,8 @@ impl Database {
         let pattern = format!("{commit_sha}%");
         let rows = stmt.query_map(params![pattern], Self::row_to_link)?;
 
-        rows.collect::<Result<Vec<_>, _>>().context("Failed to get links")
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to get links")
     }
 
     /// Retrieves all links associated with a session.
@@ -406,7 +421,8 @@ impl Database {
 
         let rows = stmt.query_map(params![session_id.to_string()], Self::row_to_link)?;
 
-        rows.collect::<Result<Vec<_>, _>>().context("Failed to get links")
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to get links")
     }
 
     fn row_to_link(row: &rusqlite::Row) -> rusqlite::Result<SessionLink> {
@@ -416,8 +432,8 @@ impl Database {
         let created_by_str: String = row.get(7)?;
 
         Ok(SessionLink {
-            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-            session_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
+            id: parse_uuid(&row.get::<_, String>(0)?)?,
+            session_id: parse_uuid(&row.get::<_, String>(1)?)?,
             link_type: match link_type_str.as_str() {
                 "commit" => LinkType::Commit,
                 "branch" => LinkType::Branch,
@@ -427,9 +443,7 @@ impl Database {
             commit_sha: row.get(3)?,
             branch: row.get(4)?,
             remote: row.get(5)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at: parse_datetime(&row.get::<_, String>(6)?)?,
             created_by: match created_by_str.as_str() {
                 "auto" => LinkCreator::Auto,
                 _ => LinkCreator::User,
@@ -519,9 +533,7 @@ impl Database {
 
         let mut param_idx = 2;
         if working_dir.is_some() {
-            sql.push_str(&format!(
-                " AND s.working_directory LIKE ?{param_idx}"
-            ));
+            sql.push_str(&format!(" AND s.working_directory LIKE ?{param_idx}"));
             param_idx += 1;
         }
         if since.is_some() {
@@ -558,8 +570,8 @@ impl Database {
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             let role_str: String = row.get(2)?;
             Ok(SearchResult {
-                session_id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                message_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
+                session_id: parse_uuid(&row.get::<_, String>(0)?)?,
+                message_id: parse_uuid(&row.get::<_, String>(1)?)?,
                 role: match role_str.as_str() {
                     "user" => MessageRole::User,
                     "assistant" => MessageRole::Assistant,
@@ -567,9 +579,7 @@ impl Database {
                     _ => MessageRole::User,
                 },
                 snippet: row.get(3)?,
-                timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
+                timestamp: parse_datetime(&row.get::<_, String>(4)?)?,
                 working_directory: row.get(5)?,
             })
         })?;
@@ -590,9 +600,7 @@ impl Database {
         self.conn.execute("DELETE FROM messages_fts", [])?;
 
         // Reindex all messages
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content FROM messages"
-        )?;
+        let mut stmt = self.conn.prepare("SELECT id, content FROM messages")?;
 
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
@@ -626,17 +634,13 @@ impl Database {
     /// index is empty, indicating messages were imported before FTS
     /// was added.
     pub fn search_index_needs_rebuild(&self) -> Result<bool> {
-        let message_count: i32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM messages",
-            [],
-            |row| row.get(0),
-        )?;
+        let message_count: i32 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?;
 
-        let fts_count: i32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM messages_fts",
-            [],
-            |row| row.get(0),
-        )?;
+        let fts_count: i32 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM messages_fts", [], |row| row.get(0))?;
 
         // If we have messages but the FTS index is empty, it needs rebuilding
         Ok(message_count > 0 && fts_count == 0)
@@ -646,31 +650,25 @@ impl Database {
 
     /// Returns the total number of sessions in the database.
     pub fn session_count(&self) -> Result<i32> {
-        let count: i32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM sessions",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i32 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
         Ok(count)
     }
 
     /// Returns the total number of messages across all sessions.
     pub fn message_count(&self) -> Result<i32> {
-        let count: i32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM messages",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i32 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?;
         Ok(count)
     }
 
     /// Returns the total number of session links in the database.
     pub fn link_count(&self) -> Result<i32> {
-        let count: i32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM session_links",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i32 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM session_links", [], |row| row.get(0))?;
         Ok(count)
     }
 
@@ -749,12 +747,7 @@ impl Database {
 
         let rows = if let Some(wd) = working_dir {
             stmt.query_map(
-                params![
-                    format!("{wd}%"),
-                    window_start,
-                    window_end,
-                    commit_time_str
-                ],
+                params![format!("{wd}%"), window_start, window_end, commit_time_str],
                 Self::row_to_session,
             )?
         } else {
@@ -905,32 +898,19 @@ mod tests {
         let now = Utc::now();
 
         // Insert sessions with different timestamps (oldest first)
-        let session1 = create_test_session(
-            "claude-code",
-            "/project1",
-            now - Duration::hours(2),
-            None,
-        );
-        let session2 = create_test_session(
-            "cursor",
-            "/project2",
-            now - Duration::hours(1),
-            None,
-        );
-        let session3 = create_test_session(
-            "claude-code",
-            "/project3",
-            now,
-            None,
-        );
+        let session1 =
+            create_test_session("claude-code", "/project1", now - Duration::hours(2), None);
+        let session2 = create_test_session("cursor", "/project2", now - Duration::hours(1), None);
+        let session3 = create_test_session("claude-code", "/project3", now, None);
 
-        db.insert_session(&session1).expect("Failed to insert session1");
-        db.insert_session(&session2).expect("Failed to insert session2");
-        db.insert_session(&session3).expect("Failed to insert session3");
+        db.insert_session(&session1)
+            .expect("Failed to insert session1");
+        db.insert_session(&session2)
+            .expect("Failed to insert session2");
+        db.insert_session(&session3)
+            .expect("Failed to insert session3");
 
-        let sessions = db
-            .list_sessions(10, None)
-            .expect("Failed to list sessions");
+        let sessions = db.list_sessions(10, None).expect("Failed to list sessions");
 
         assert_eq!(sessions.len(), 3, "Should have 3 sessions");
         // Sessions should be ordered by started_at DESC (most recent first)
@@ -942,10 +922,7 @@ mod tests {
             sessions[1].id, session2.id,
             "Second most recent session should be second"
         );
-        assert_eq!(
-            sessions[2].id, session1.id,
-            "Oldest session should be last"
-        );
+        assert_eq!(sessions[2].id, session1.id, "Oldest session should be last");
     }
 
     #[test]
@@ -959,22 +936,15 @@ mod tests {
             now - Duration::hours(1),
             None,
         );
-        let session2 = create_test_session(
-            "claude-code",
-            "/home/user/project-b",
-            now,
-            None,
-        );
-        let session3 = create_test_session(
-            "claude-code",
-            "/other/path",
-            now,
-            None,
-        );
+        let session2 = create_test_session("claude-code", "/home/user/project-b", now, None);
+        let session3 = create_test_session("claude-code", "/other/path", now, None);
 
-        db.insert_session(&session1).expect("Failed to insert session1");
-        db.insert_session(&session2).expect("Failed to insert session2");
-        db.insert_session(&session3).expect("Failed to insert session3");
+        db.insert_session(&session1)
+            .expect("Failed to insert session1");
+        db.insert_session(&session2)
+            .expect("Failed to insert session2");
+        db.insert_session(&session3)
+            .expect("Failed to insert session3");
 
         // Filter by working directory prefix
         let sessions = db
@@ -989,18 +959,9 @@ mod tests {
 
         // Verify both matching sessions are returned
         let ids: Vec<Uuid> = sessions.iter().map(|s| s.id).collect();
-        assert!(
-            ids.contains(&session1.id),
-            "Should contain session1"
-        );
-        assert!(
-            ids.contains(&session2.id),
-            "Should contain session2"
-        );
-        assert!(
-            !ids.contains(&session3.id),
-            "Should not contain session3"
-        );
+        assert!(ids.contains(&session1.id), "Should contain session1");
+        assert!(ids.contains(&session2.id), "Should contain session2");
+        assert!(!ids.contains(&session3.id), "Should not contain session3");
     }
 
     #[test]
@@ -1008,12 +969,7 @@ mod tests {
         let (db, _dir) = create_test_db();
         let source_path = "/path/to/session.jsonl";
 
-        let session = create_test_session(
-            "claude-code",
-            "/project",
-            Utc::now(),
-            Some(source_path),
-        );
+        let session = create_test_session("claude-code", "/project", Utc::now(), Some(source_path));
 
         // Before insert, should not exist
         assert!(
@@ -1022,7 +978,8 @@ mod tests {
             "Session should not exist before insert"
         );
 
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         // After insert, should exist
         assert!(
@@ -1061,13 +1018,16 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let msg1 = create_test_message(session.id, 0, MessageRole::User, "Hello");
         let msg2 = create_test_message(session.id, 1, MessageRole::Assistant, "Hi there!");
 
-        db.insert_message(&msg1).expect("Failed to insert message 1");
-        db.insert_message(&msg2).expect("Failed to insert message 2");
+        db.insert_message(&msg1)
+            .expect("Failed to insert message 1");
+        db.insert_message(&msg2)
+            .expect("Failed to insert message 2");
 
         let messages = db
             .get_messages(&session.id)
@@ -1093,34 +1053,29 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         // Insert messages out of order
         let msg3 = create_test_message(session.id, 2, MessageRole::Assistant, "Third");
         let msg1 = create_test_message(session.id, 0, MessageRole::User, "First");
         let msg2 = create_test_message(session.id, 1, MessageRole::Assistant, "Second");
 
-        db.insert_message(&msg3).expect("Failed to insert message 3");
-        db.insert_message(&msg1).expect("Failed to insert message 1");
-        db.insert_message(&msg2).expect("Failed to insert message 2");
+        db.insert_message(&msg3)
+            .expect("Failed to insert message 3");
+        db.insert_message(&msg1)
+            .expect("Failed to insert message 1");
+        db.insert_message(&msg2)
+            .expect("Failed to insert message 2");
 
         let messages = db
             .get_messages(&session.id)
             .expect("Failed to get messages");
 
         assert_eq!(messages.len(), 3, "Should have 3 messages");
-        assert_eq!(
-            messages[0].index, 0,
-            "First message should have index 0"
-        );
-        assert_eq!(
-            messages[1].index, 1,
-            "Second message should have index 1"
-        );
-        assert_eq!(
-            messages[2].index, 2,
-            "Third message should have index 2"
-        );
+        assert_eq!(messages[0].index, 0, "First message should have index 0");
+        assert_eq!(messages[1].index, 1, "Second message should have index 1");
+        assert_eq!(messages[2].index, 2, "Third message should have index 2");
 
         // Verify content matches expected order
         assert_eq!(
@@ -1147,7 +1102,8 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let link1 = create_test_link(session.id, Some("abc123def456"), LinkType::Commit);
         let link2 = create_test_link(session.id, Some("def456abc789"), LinkType::Commit);
@@ -1189,7 +1145,8 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let full_sha = "abc123def456789012345678901234567890abcd";
         let link = create_test_link(session.id, Some(full_sha), LinkType::Commit);
@@ -1264,7 +1221,8 @@ mod tests {
         );
 
         let session1 = create_test_session("claude-code", "/project1", Utc::now(), None);
-        db.insert_session(&session1).expect("Failed to insert session1");
+        db.insert_session(&session1)
+            .expect("Failed to insert session1");
 
         assert_eq!(
             db.session_count().expect("Failed to get count"),
@@ -1273,7 +1231,8 @@ mod tests {
         );
 
         let session2 = create_test_session("cursor", "/project2", Utc::now(), None);
-        db.insert_session(&session2).expect("Failed to insert session2");
+        db.insert_session(&session2)
+            .expect("Failed to insert session2");
 
         assert_eq!(
             db.session_count().expect("Failed to get count"),
@@ -1293,7 +1252,8 @@ mod tests {
         );
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let msg1 = create_test_message(session.id, 0, MessageRole::User, "Hello");
         db.insert_message(&msg1).expect("Failed to insert message1");
@@ -1327,7 +1287,8 @@ mod tests {
         );
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let link1 = create_test_link(session.id, Some("abc123def456"), LinkType::Commit);
         db.insert_link(&link1).expect("Failed to insert link1");
@@ -1355,7 +1316,10 @@ mod tests {
         let db = Database::open(&db_path).expect("Failed to open test database");
 
         let retrieved_path = db.db_path();
-        assert!(retrieved_path.is_some(), "Database path should be available");
+        assert!(
+            retrieved_path.is_some(),
+            "Database path should be available"
+        );
 
         // Canonicalize both paths to handle macOS /var -> /private/var symlinks
         let expected = db_path.canonicalize().unwrap_or(db_path);
@@ -1375,7 +1339,8 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/home/user/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let msg1 = create_test_message(
             session.id,
@@ -1390,15 +1355,21 @@ mod tests {
             "You can use Result types for error handling. The anyhow crate is also helpful.",
         );
 
-        db.insert_message(&msg1).expect("Failed to insert message 1");
-        db.insert_message(&msg2).expect("Failed to insert message 2");
+        db.insert_message(&msg1)
+            .expect("Failed to insert message 1");
+        db.insert_message(&msg2)
+            .expect("Failed to insert message 2");
 
         // Search for "error"
         let results = db
             .search_messages("error", 10, None, None, None)
             .expect("Failed to search");
 
-        assert_eq!(results.len(), 2, "Should find 2 messages containing 'error'");
+        assert_eq!(
+            results.len(),
+            2,
+            "Should find 2 messages containing 'error'"
+        );
     }
 
     #[test]
@@ -1406,7 +1377,8 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let msg = create_test_message(session.id, 0, MessageRole::User, "Hello world");
         db.insert_message(&msg).expect("Failed to insert message");
@@ -1424,7 +1396,8 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let msg1 = create_test_message(
             session.id,
@@ -1439,8 +1412,10 @@ mod tests {
             "Rust is a systems programming language",
         );
 
-        db.insert_message(&msg1).expect("Failed to insert message 1");
-        db.insert_message(&msg2).expect("Failed to insert message 2");
+        db.insert_message(&msg1)
+            .expect("Failed to insert message 1");
+        db.insert_message(&msg2)
+            .expect("Failed to insert message 2");
 
         // Search with user role filter
         let user_results = db
@@ -1459,7 +1434,11 @@ mod tests {
             .search_messages("programming", 10, None, None, Some("assistant"))
             .expect("Failed to search");
 
-        assert_eq!(assistant_results.len(), 1, "Should find 1 assistant message");
+        assert_eq!(
+            assistant_results.len(),
+            1,
+            "Should find 1 assistant message"
+        );
         assert_eq!(
             assistant_results[0].role,
             MessageRole::Assistant,
@@ -1529,10 +1508,7 @@ mod tests {
             .search_index_needs_rebuild()
             .expect("Failed to check rebuild status");
 
-        assert!(
-            !needs_rebuild,
-            "Empty database should not need rebuild"
-        );
+        assert!(!needs_rebuild, "Empty database should not need rebuild");
     }
 
     #[test]
@@ -1543,7 +1519,12 @@ mod tests {
         db.insert_session(&session).expect("insert session");
 
         let msg1 = create_test_message(session.id, 0, MessageRole::User, "First test message");
-        let msg2 = create_test_message(session.id, 1, MessageRole::Assistant, "Second test response");
+        let msg2 = create_test_message(
+            session.id,
+            1,
+            MessageRole::Assistant,
+            "Second test response",
+        );
 
         db.insert_message(&msg1).expect("insert msg 1");
         db.insert_message(&msg2).expect("insert msg 2");
@@ -1633,10 +1614,7 @@ mod tests {
             .expect("search");
 
         assert_eq!(results.len(), 1, "Should find 1 result");
-        assert_eq!(
-            results[0].session_id, session.id,
-            "Session ID should match"
-        );
+        assert_eq!(results[0].session_id, session.id, "Session ID should match");
         assert_eq!(results[0].message_id, msg.id, "Message ID should match");
         assert_eq!(
             results[0].working_directory, "/home/user/my-project",
@@ -1652,7 +1630,8 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let link = create_test_link(session.id, Some("abc123def456"), LinkType::Commit);
         db.insert_link(&link).expect("Failed to insert link");
@@ -1664,9 +1643,7 @@ mod tests {
         assert_eq!(links_before.len(), 1, "Should have 1 link before delete");
 
         // Delete the link
-        let deleted = db
-            .delete_link(&link.id)
-            .expect("Failed to delete link");
+        let deleted = db.delete_link(&link.id).expect("Failed to delete link");
         assert!(deleted, "Should return true when link is deleted");
 
         // Verify link is gone
@@ -1693,7 +1670,8 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         // Create multiple links for the same session
         let link1 = create_test_link(session.id, Some("abc123"), LinkType::Commit);
@@ -1728,7 +1706,8 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         // Delete links for session that has none
         let count = db
@@ -1744,8 +1723,10 @@ mod tests {
         let session1 = create_test_session("claude-code", "/project1", Utc::now(), None);
         let session2 = create_test_session("claude-code", "/project2", Utc::now(), None);
 
-        db.insert_session(&session1).expect("Failed to insert session1");
-        db.insert_session(&session2).expect("Failed to insert session2");
+        db.insert_session(&session1)
+            .expect("Failed to insert session1");
+        db.insert_session(&session2)
+            .expect("Failed to insert session2");
 
         let link1 = create_test_link(session1.id, Some("abc123"), LinkType::Commit);
         let link2 = create_test_link(session2.id, Some("def456"), LinkType::Commit);
@@ -1776,7 +1757,8 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let link1 = create_test_link(session.id, Some("abc123def456"), LinkType::Commit);
         let link2 = create_test_link(session.id, Some("def456abc789"), LinkType::Commit);
@@ -1803,7 +1785,8 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let full_sha = "abc123def456789012345678901234567890abcd";
         let link = create_test_link(session.id, Some(full_sha), LinkType::Commit);
@@ -1826,7 +1809,8 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let link = create_test_link(session.id, Some("abc123"), LinkType::Commit);
         db.insert_link(&link).expect("Failed to insert link");
@@ -1851,8 +1835,10 @@ mod tests {
         let session1 = create_test_session("claude-code", "/project1", Utc::now(), None);
         let session2 = create_test_session("claude-code", "/project2", Utc::now(), None);
 
-        db.insert_session(&session1).expect("Failed to insert session1");
-        db.insert_session(&session2).expect("Failed to insert session2");
+        db.insert_session(&session1)
+            .expect("Failed to insert session1");
+        db.insert_session(&session2)
+            .expect("Failed to insert session2");
 
         let link = create_test_link(session1.id, Some("abc123"), LinkType::Commit);
         db.insert_link(&link).expect("Failed to insert link");
@@ -1903,12 +1889,8 @@ mod tests {
         let now = Utc::now();
 
         // Create a session that ended 2 hours ago
-        let mut session = create_test_session(
-            "claude-code",
-            "/project",
-            now - Duration::hours(3),
-            None,
-        );
+        let mut session =
+            create_test_session("claude-code", "/project", now - Duration::hours(3), None);
         session.ended_at = Some(now - Duration::hours(2));
 
         db.insert_session(&session).expect("insert session");
@@ -1961,12 +1943,8 @@ mod tests {
         let now = Utc::now();
 
         // Create an ongoing session (no ended_at)
-        let session = create_test_session(
-            "claude-code",
-            "/project",
-            now - Duration::minutes(20),
-            None,
-        );
+        let session =
+            create_test_session("claude-code", "/project", now - Duration::minutes(20), None);
         // ended_at is None by default
 
         db.insert_session(&session).expect("insert session");
@@ -1992,7 +1970,8 @@ mod tests {
 
         // Check with full SHA
         assert!(
-            db.link_exists(&session.id, "abc123def456").expect("check exists"),
+            db.link_exists(&session.id, "abc123def456")
+                .expect("check exists"),
             "Should find link with full SHA"
         );
 

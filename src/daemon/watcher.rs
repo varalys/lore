@@ -109,10 +109,7 @@ impl SessionWatcher {
             if dir.exists() {
                 tracing::info!("Will watch for session files in {:?}", dir);
             } else {
-                tracing::info!(
-                    "Watch directory does not exist yet: {:?}",
-                    dir
-                );
+                tracing::info!("Watch directory does not exist yet: {:?}", dir);
             }
         }
 
@@ -128,9 +125,7 @@ impl SessionWatcher {
                     let filtered: Vec<DebouncedEvent> = events
                         .into_iter()
                         .filter(|e| {
-                            let ext = e.path
-                                .extension()
-                                .and_then(|ext| ext.to_str());
+                            let ext = e.path.extension().and_then(|ext| ext.to_str());
                             matches!(ext, Some("jsonl") | Some("vscdb"))
                         })
                         .collect();
@@ -190,10 +185,7 @@ impl SessionWatcher {
     /// Called when the watcher starts to import any sessions that were
     /// created while the daemon was not running. Uses the watcher registry
     /// to find session sources from all available watchers.
-    async fn initial_scan(
-        &mut self,
-        stats: &Arc<RwLock<DaemonStats>>,
-    ) -> Result<()> {
+    async fn initial_scan(&mut self, stats: &Arc<RwLock<DaemonStats>>) -> Result<()> {
         tracing::info!("Performing initial scan of session files...");
 
         let registry = default_registry();
@@ -203,11 +195,7 @@ impl SessionWatcher {
             let watcher_name = watcher.info().name;
             match watcher.find_sources() {
                 Ok(sources) => {
-                    tracing::info!(
-                        "Found {} sources for {}",
-                        sources.len(),
-                        watcher_name
-                    );
+                    tracing::info!("Found {} sources for {}", sources.len(), watcher_name);
                     total_files += sources.len();
 
                     for path in sources {
@@ -300,8 +288,7 @@ impl SessionWatcher {
         let last_pos = self.file_positions.get(path).copied().unwrap_or(0);
 
         // Get current file size
-        let metadata = std::fs::metadata(path)
-            .context("Failed to get file metadata")?;
+        let metadata = std::fs::metadata(path).context("Failed to get file metadata")?;
         let current_size = metadata.len();
 
         if current_size <= last_pos {
@@ -396,7 +383,8 @@ impl SessionWatcher {
 
         // Update file position
         if let Ok(metadata) = std::fs::metadata(path) {
-            self.file_positions.insert(path.to_path_buf(), metadata.len());
+            self.file_positions
+                .insert(path.to_path_buf(), metadata.len());
         }
 
         Ok((total_sessions, total_messages))
@@ -421,31 +409,52 @@ mod tests {
         let watcher = SessionWatcher::new();
         assert!(watcher.is_ok(), "Should create watcher successfully");
 
-        let watcher = watcher.unwrap();
-        // Should have watch directories configured from the registry
-        let dirs = watcher.watch_dirs();
-        assert!(
-            !dirs.is_empty(),
-            "Should have at least one watch directory configured"
-        );
+        // SessionWatcher creation should succeed even if no watchers are
+        // available (e.g., in CI environments where ~/.claude doesn't exist).
+        // The watch_dirs list may be empty in such environments.
+        let _watcher = watcher.unwrap();
     }
 
     #[test]
     fn test_watch_dirs_from_registry() {
-        let watcher = SessionWatcher::new().unwrap();
-        let dirs = watcher.watch_dirs();
+        use crate::capture::watchers::default_registry;
 
-        // Should include paths from both Claude Code and Cursor watchers
-        let has_claude = dirs.iter().any(|d| d.to_string_lossy().contains(".claude"));
-        let has_cursor = dirs.iter().any(|d| d.to_string_lossy().contains("Cursor"));
+        // Test that the registry is configured with known watcher paths.
+        // Note: SessionWatcher.watch_dirs() only includes paths from AVAILABLE
+        // watchers. In CI environments, no watchers may be available because
+        // their directories (like ~/.claude) don't exist.
 
-        assert!(has_claude || has_cursor, "Should have at least one known watcher path");
+        // Instead of testing through SessionWatcher, we verify the registry
+        // directly by checking all_watchers() (not just available ones).
+        let registry = default_registry();
+        let all_watchers = registry.all_watchers();
+
+        // Collect watch paths from ALL watchers (including unavailable ones)
+        let all_paths: Vec<_> = all_watchers.iter().flat_map(|w| w.watch_paths()).collect();
+
+        let has_claude = all_paths
+            .iter()
+            .any(|d| d.to_string_lossy().contains(".claude"));
+        let has_cursor = all_paths
+            .iter()
+            .any(|d| d.to_string_lossy().contains("Cursor"));
+
+        // The registry should have paths configured for known watchers.
+        assert!(
+            has_claude || has_cursor,
+            "Registry should configure at least one known watcher path pattern \
+             (expected .claude or Cursor in paths). Found paths: {all_paths:?}"
+        );
     }
 
     #[test]
     fn test_tracked_file_count_initial() {
         let watcher = SessionWatcher::new().unwrap();
-        assert_eq!(watcher.tracked_file_count(), 0, "Should start with no tracked files");
+        assert_eq!(
+            watcher.tracked_file_count(),
+            0,
+            "Should start with no tracked files"
+        );
     }
 
     #[test]

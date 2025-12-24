@@ -22,26 +22,53 @@ const DEFAULT_WINDOW_MINUTES: i64 = 30;
 
 /// Arguments for the link command.
 #[derive(clap::Args)]
+#[command(after_help = "EXAMPLES:\n    \
+    lore link abc123                    Link session to HEAD\n    \
+    lore link abc123 def456             Link multiple sessions\n    \
+    lore link abc123 --commit 1a2b3c    Link to specific commit\n    \
+    lore link --auto                    Auto-link by time/file overlap\n    \
+    lore link --auto --threshold 0.8    Require 80% confidence\n    \
+    lore link --auto --dry-run          Preview auto-link results")]
 pub struct Args {
-    /// Session IDs to link (prefix match, can specify multiple).
-    /// Required unless --auto is specified.
+    /// Session ID prefixes to link (can specify multiple)
+    #[arg(value_name = "SESSION")]
+    #[arg(
+        long_help = "One or more session ID prefixes to link. You only need to\n\
+        provide enough characters to uniquely identify each session.\n\
+        Required unless --auto is specified."
+    )]
     pub sessions: Vec<String>,
 
-    /// Commit SHA to link to. Defaults to HEAD if not specified.
-    #[arg(long, default_value = "HEAD")]
+    /// Commit to link to (defaults to HEAD)
+    #[arg(long, default_value = "HEAD", value_name = "REF")]
+    #[arg(
+        long_help = "The git commit to link sessions to. Accepts any git reference:\n\
+        SHA, HEAD, HEAD~1, branch name, tag, etc. Defaults to HEAD."
+    )]
     pub commit: String,
 
-    /// Automatically find and link sessions based on time and file overlap.
+    /// Automatically find and link sessions based on heuristics
     #[arg(long)]
+    #[arg(
+        long_help = "Automatically find sessions that likely contributed to the\n\
+        commit based on time proximity and file overlap. Sessions are\n\
+        scored and linked if they meet the confidence threshold."
+    )]
     pub auto: bool,
 
-    /// Minimum confidence score (0.0-1.0) for auto-linking.
-    /// Overrides the config value.
-    #[arg(long)]
+    /// Minimum confidence score (0.0-1.0) for auto-linking
+    #[arg(long, value_name = "SCORE")]
+    #[arg(long_help = "The minimum confidence score (0.0 to 1.0) required for\n\
+        auto-linking. Higher values are more selective. Overrides\n\
+        the auto_link_threshold config setting.")]
     pub threshold: Option<f64>,
 
-    /// Show what would be linked without actually creating links.
+    /// Preview what would be linked without making changes
     #[arg(long)]
+    #[arg(
+        long_help = "Shows what links would be created without actually modifying\n\
+        the database. Useful for previewing auto-link results."
+    )]
     pub dry_run: bool,
 }
 
@@ -60,7 +87,9 @@ pub fn run(args: Args) -> Result<()> {
 /// Runs manual linking for explicitly specified session IDs.
 fn run_manual_link(args: Args) -> Result<()> {
     if args.sessions.is_empty() {
-        anyhow::bail!("No sessions specified. Use --auto for automatic linking or provide session IDs.");
+        anyhow::bail!(
+            "No sessions specified. Use --auto for automatic linking or provide session IDs."
+        );
     }
 
     let db = Database::open_default()?;
@@ -76,8 +105,24 @@ fn run_manual_link(args: Args) -> Result<()> {
     for session_prefix in &args.sessions {
         let session = all_sessions
             .iter()
-            .find(|s| s.id.to_string().starts_with(session_prefix))
-            .context(format!("No session found matching '{session_prefix}'"))?;
+            .find(|s| s.id.to_string().starts_with(session_prefix));
+
+        let session = match session {
+            Some(s) => s,
+            None => {
+                if all_sessions.is_empty() {
+                    anyhow::bail!(
+                        "No session found matching '{session_prefix}'. No sessions in database. \
+                         Run 'lore import' to import sessions first."
+                    );
+                } else {
+                    anyhow::bail!(
+                        "No session found matching '{session_prefix}'. \
+                         Run 'lore sessions' to list available sessions."
+                    );
+                }
+            }
+        };
 
         if args.dry_run {
             println!(
@@ -241,10 +286,7 @@ fn run_auto_link(args: Args) -> Result<()> {
             linked_count.to_string().green()
         );
     } else {
-        println!(
-            "Linked {} session(s)",
-            linked_count.to_string().green()
-        );
+        println!("Linked {} session(s)", linked_count.to_string().green());
     }
 
     if skipped_existing > 0 {
@@ -259,9 +301,8 @@ fn run_auto_link(args: Args) -> Result<()> {
 
 /// Resolves a commit reference to a full SHA.
 fn resolve_commit(commit_ref: &str) -> Result<String> {
-    let repo = git2::Repository::discover(".").context(
-        "Not in a git repository. Use --commit to specify a commit SHA.",
-    )?;
+    let repo = git2::Repository::discover(".")
+        .context("Not in a git repository. Use --commit to specify a commit SHA.")?;
 
     let obj = repo
         .revparse_single(commit_ref)

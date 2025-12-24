@@ -16,17 +16,29 @@ use crate::storage::models::{Message, Session};
 /// Aider session parser for markdown chat history files.
 pub mod aider;
 
+/// Amp CLI session parser for JSON files.
+pub mod amp;
+
 /// Claude Code session parser for JSONL files.
 pub mod claude_code;
 
 /// Cline (Claude Dev) session parser for VS Code extension storage.
 pub mod cline;
 
+/// Codex CLI session parser for JSONL files.
+pub mod codex;
+
 /// Continue.dev session parser for JSON session files.
 pub mod continue_dev;
 
-/// Cursor IDE session parser for SQLite databases (experimental).
-pub mod cursor;
+/// Gemini CLI session parser for JSON files.
+pub mod gemini;
+
+/// OpenCode CLI session parser for multi-file JSON storage.
+pub mod opencode;
+
+/// Roo Code session parser for VS Code extension storage.
+pub mod roo_code;
 
 /// Information about a tool that can be watched for sessions.
 ///
@@ -54,7 +66,9 @@ pub struct WatcherInfo {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// use lore::capture::watchers::default_registry;
+///
 /// let registry = default_registry();
 /// for watcher in registry.available_watchers() {
 ///     println!("{}: {}", watcher.info().name, watcher.info().description);
@@ -158,17 +172,25 @@ impl WatcherRegistry {
 ///
 /// This includes watchers for:
 /// - Aider (markdown files in project directories)
+/// - Amp CLI (JSON files in ~/.local/share/amp/threads/)
 /// - Claude Code (JSONL files in ~/.claude/projects/)
 /// - Cline (JSON files in VS Code extension storage)
+/// - Codex CLI (JSONL files in ~/.codex/sessions/)
 /// - Continue.dev (JSON files in ~/.continue/sessions/)
-/// - Cursor IDE (SQLite databases in workspace storage, experimental)
+/// - Gemini CLI (JSON files in ~/.gemini/tmp/)
+/// - OpenCode CLI (JSON files in ~/.local/share/opencode/storage/)
+/// - Roo Code (JSON files in VS Code extension storage)
 pub fn default_registry() -> WatcherRegistry {
     let mut registry = WatcherRegistry::new();
     registry.register(Box::new(aider::AiderWatcher));
+    registry.register(Box::new(amp::AmpWatcher));
     registry.register(Box::new(claude_code::ClaudeCodeWatcher));
     registry.register(Box::new(cline::ClineWatcher));
+    registry.register(Box::new(codex::CodexWatcher));
     registry.register(Box::new(continue_dev::ContinueDevWatcher));
-    registry.register(Box::new(cursor::CursorWatcher));
+    registry.register(Box::new(gemini::GeminiWatcher));
+    registry.register(Box::new(opencode::OpenCodeWatcher));
+    registry.register(Box::new(roo_code::RooCodeWatcher));
     registry
 }
 
@@ -271,14 +293,18 @@ mod tests {
         let watchers = registry.all_watchers();
 
         // Should have all built-in watchers
-        assert!(watchers.len() >= 5);
+        assert!(watchers.len() >= 9);
 
         // Check that all watchers are registered
         assert!(registry.get_watcher("aider").is_some());
+        assert!(registry.get_watcher("amp").is_some());
         assert!(registry.get_watcher("claude-code").is_some());
         assert!(registry.get_watcher("cline").is_some());
+        assert!(registry.get_watcher("codex").is_some());
         assert!(registry.get_watcher("continue").is_some());
-        assert!(registry.get_watcher("cursor").is_some());
+        assert!(registry.get_watcher("gemini").is_some());
+        assert!(registry.get_watcher("opencode").is_some());
+        assert!(registry.get_watcher("roo-code").is_some());
     }
 
     #[test]
