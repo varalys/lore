@@ -3,9 +3,6 @@
 //! Creates associations between development sessions and the commits
 //! they produced. Links are stored in the database and can be queried
 //! by commit SHA to find related sessions.
-//!
-//! Supports both manual linking (specifying session IDs) and automatic
-//! linking based on time proximity and file overlap heuristics.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -13,11 +10,19 @@ use colored::Colorize;
 use std::path::Path;
 use uuid::Uuid;
 
+use crate::storage::{Database, LinkCreator, LinkType, SessionLink};
+
+// NOTE: These imports are used by the auto-linking feature which is currently disabled.
+// Keeping them for when auto-linking is re-enabled after further testing.
+#[allow(unused_imports)]
 use crate::config::Config;
+#[allow(unused_imports)]
 use crate::git::{calculate_link_confidence, get_commit_files, get_commit_info};
-use crate::storage::{extract_session_files, Database, LinkCreator, LinkType, SessionLink};
+#[allow(unused_imports)]
+use crate::storage::extract_session_files;
 
 /// Default time window in minutes for finding sessions near a commit.
+#[allow(dead_code)]
 const DEFAULT_WINDOW_MINUTES: i64 = 30;
 
 /// Arguments for the link command.
@@ -26,16 +31,13 @@ const DEFAULT_WINDOW_MINUTES: i64 = 30;
     lore link abc123                    Link session to HEAD\n    \
     lore link abc123 def456             Link multiple sessions\n    \
     lore link abc123 --commit 1a2b3c    Link to specific commit\n    \
-    lore link --auto                    Auto-link by time/file overlap\n    \
-    lore link --auto --threshold 0.8    Require 80% confidence\n    \
-    lore link --auto --dry-run          Preview auto-link results")]
+    lore link abc123 --dry-run          Preview without linking")]
 pub struct Args {
     /// Session ID prefixes to link (can specify multiple)
     #[arg(value_name = "SESSION")]
     #[arg(
         long_help = "One or more session ID prefixes to link. You only need to\n\
-        provide enough characters to uniquely identify each session.\n\
-        Required unless --auto is specified."
+        provide enough characters to uniquely identify each session."
     )]
     pub sessions: Vec<String>,
 
@@ -47,27 +49,20 @@ pub struct Args {
     )]
     pub commit: String,
 
-    /// Automatically find and link sessions based on heuristics
-    #[arg(long)]
-    #[arg(
-        long_help = "Automatically find sessions that likely contributed to the\n\
-        commit based on time proximity and file overlap. Sessions are\n\
-        scored and linked if they meet the confidence threshold."
-    )]
+    // NOTE: Auto-linking is disabled pending further testing.
+    // The heuristics need refinement to avoid incorrect links.
+    // See git history for the implementation.
+    #[arg(skip)]
     pub auto: bool,
 
-    /// Minimum confidence score (0.0-1.0) for auto-linking
-    #[arg(long, value_name = "SCORE")]
-    #[arg(long_help = "The minimum confidence score (0.0 to 1.0) required for\n\
-        auto-linking. Higher values are more selective. Overrides\n\
-        the auto_link_threshold config setting.")]
+    #[arg(skip)]
     pub threshold: Option<f64>,
 
     /// Preview what would be linked without making changes
     #[arg(long)]
     #[arg(
         long_help = "Shows what links would be created without actually modifying\n\
-        the database. Useful for previewing auto-link results."
+        the database. Useful for previewing results."
     )]
     pub dry_run: bool,
 }
@@ -160,6 +155,10 @@ fn run_manual_link(args: Args) -> Result<()> {
 }
 
 /// Runs automatic linking based on heuristics.
+///
+/// NOTE: This feature is currently disabled pending further testing.
+/// The heuristics need refinement to avoid creating incorrect links.
+#[allow(dead_code)]
 fn run_auto_link(args: Args) -> Result<()> {
     let db = Database::open_default()?;
     let config = Config::load()?;
@@ -316,6 +315,7 @@ fn resolve_commit(commit_ref: &str) -> Result<String> {
 }
 
 /// Gets the root path of the git repository.
+#[allow(dead_code)]
 fn get_repo_root(path: &Path) -> Result<String> {
     let repo = git2::Repository::discover(path).context("Not a git repository")?;
 
