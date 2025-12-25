@@ -168,11 +168,18 @@ pub fn run(args: Args) -> Result<()> {
     println!("Enabled watchers: {}", selected_watchers.join(", ").cyan());
 
     // Check if there are any sessions to import
-    let has_sessions = detected.iter().any(|t| t.has_sessions);
+    let tools_with_sessions: Vec<_> = detected.iter().filter(|t| t.has_sessions).collect();
+    let total_sessions: usize = tools_with_sessions.iter().map(|t| t.session_count).sum();
+    let has_sessions = !tools_with_sessions.is_empty();
 
     if has_sessions {
         println!();
-        if prompt_yes_no("Import existing sessions now?", true)? {
+        let prompt = format!(
+            "Import existing sessions now? ({} sessions from {} tools)",
+            total_sessions,
+            tools_with_sessions.len()
+        );
+        if prompt_yes_no(&prompt, true)? {
             println!();
             let stats = import::run_import(false, false)?;
             println!();
