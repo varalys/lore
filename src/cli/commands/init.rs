@@ -71,11 +71,12 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     // Detect installed AI coding tools
-    println!("{}", "Detecting AI coding tools...".bold());
-    println!();
+    println!("{}", "Detecting installed AI coding tools...".bold());
 
     let registry = default_registry();
     let detected = detect_tools(&registry);
+
+    println!();
 
     if detected.is_empty() {
         println!("  {}", "No AI coding tools detected.".dimmed());
