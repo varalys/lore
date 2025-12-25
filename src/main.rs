@@ -297,8 +297,8 @@ fn main() -> Result<()> {
     {
         match prompt_for_init()? {
             PromptResult::Yes => {
-                // Run the init wizard
-                commands::init::run(commands::init::Args { force: false })?;
+                // Run the init wizard with force=true since user explicitly chose setup
+                commands::init::run(commands::init::Args { force: true })?;
                 println!();
                 println!(
                     "Setup complete! Running 'lore {}'...",
