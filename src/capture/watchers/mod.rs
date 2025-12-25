@@ -146,6 +146,24 @@ impl WatcherRegistry {
             .collect()
     }
 
+    /// Returns watchers that are both available and enabled in config.
+    ///
+    /// Only watchers whose names appear in the `enabled_watchers` list
+    /// and are also available on the system are returned.
+    ///
+    /// This method is intended for use by the import command and daemon
+    /// to filter which watchers actively scan for sessions.
+    #[allow(dead_code)]
+    pub fn enabled_watchers(&self, enabled_watchers: &[String]) -> Vec<&dyn Watcher> {
+        self.watchers
+            .iter()
+            .filter(|w| {
+                w.is_available() && enabled_watchers.iter().any(|name| name == w.info().name)
+            })
+            .map(|w| w.as_ref())
+            .collect()
+    }
+
     /// Retrieves a watcher by its name.
     ///
     /// Returns `None` if no watcher with the given name is registered.
@@ -318,5 +336,46 @@ mod tests {
         assert_eq!(info.name, "test");
         assert_eq!(info.description, "Test watcher");
         assert!(!info.default_paths.is_empty());
+    }
+
+    #[test]
+    fn test_registry_enabled_watchers() {
+        let mut registry = WatcherRegistry::new();
+        registry.register(Box::new(TestWatcher {
+            name: "watcher-a",
+            available: true,
+        }));
+        registry.register(Box::new(TestWatcher {
+            name: "watcher-b",
+            available: true,
+        }));
+        registry.register(Box::new(TestWatcher {
+            name: "watcher-c",
+            available: false,
+        }));
+
+        // Test filtering by enabled list
+        let enabled = vec!["watcher-a".to_string(), "watcher-c".to_string()];
+        let watchers = registry.enabled_watchers(&enabled);
+
+        // Only watcher-a should be returned (available and enabled)
+        // watcher-b is available but not enabled
+        // watcher-c is enabled but not available
+        assert_eq!(watchers.len(), 1);
+        assert_eq!(watchers[0].info().name, "watcher-a");
+    }
+
+    #[test]
+    fn test_registry_enabled_watchers_empty_list() {
+        let mut registry = WatcherRegistry::new();
+        registry.register(Box::new(TestWatcher {
+            name: "watcher",
+            available: true,
+        }));
+
+        // Empty enabled list should return empty
+        let enabled: Vec<String> = vec![];
+        let watchers = registry.enabled_watchers(&enabled);
+        assert!(watchers.is_empty());
     }
 }

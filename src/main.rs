@@ -43,6 +43,14 @@ struct Cli {
 /// Available CLI subcommands.
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize Lore with guided setup
+    #[command(
+        long_about = "Runs a guided setup wizard that detects installed AI coding tools\n\
+        and creates an initial configuration file. Use this when first\n\
+        installing Lore or to reconfigure your setup."
+    )]
+    Init(commands::init::Args),
+
     /// Show Lore status, database stats, and recent sessions
     #[command(
         long_about = "Displays an overview of the Lore database including session counts,\n\
@@ -151,6 +159,7 @@ fn main() -> Result<()> {
         .init();
 
     match cli.command {
+        Commands::Init(args) => commands::init::run(args),
         Commands::Status(args) => commands::status::run(args),
         Commands::Sessions(args) => commands::sessions::run(args),
         Commands::Show(args) => commands::show::run(args),

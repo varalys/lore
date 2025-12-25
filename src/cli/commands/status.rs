@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::capture::watchers::{default_registry, WatcherRegistry};
 use crate::cli::OutputFormat;
+use crate::config::Config;
 use crate::git;
 use crate::storage::Database;
 
@@ -46,6 +47,7 @@ struct DaemonStatus {
 struct WatcherStatus {
     name: String,
     available: bool,
+    enabled: bool,
     session_files: Option<usize>,
 }
 
@@ -83,13 +85,14 @@ struct RecentSessionInfo {
 pub fn run(args: Args) -> Result<()> {
     let registry = default_registry();
     let db = Database::open_default()?;
+    let config = Config::load()?;
 
     match args.format {
         OutputFormat::Json => {
-            run_json(&db, &registry)?;
+            run_json(&db, &registry, &config)?;
         }
         OutputFormat::Text | OutputFormat::Markdown => {
-            run_text(&db, &registry)?;
+            run_text(&db, &registry, &config)?;
         }
     }
 
@@ -97,11 +100,12 @@ pub fn run(args: Args) -> Result<()> {
 }
 
 /// Runs the status command with JSON output.
-fn run_json(db: &Database, registry: &WatcherRegistry) -> Result<()> {
+fn run_json(db: &Database, registry: &WatcherRegistry, config: &Config) -> Result<()> {
     // Collect watcher status
     let mut watchers = Vec::new();
     for watcher in registry.all_watchers() {
         let info = watcher.info();
+        let is_enabled = config.watchers.iter().any(|w| w == info.name);
         let session_files = if watcher.is_available() {
             watcher.find_sources().ok().map(|s| s.len())
         } else {
@@ -110,6 +114,7 @@ fn run_json(db: &Database, registry: &WatcherRegistry) -> Result<()> {
         watchers.push(WatcherStatus {
             name: info.name.to_string(),
             available: watcher.is_available(),
+            enabled: is_enabled,
             session_files,
         });
     }
@@ -117,6 +122,7 @@ fn run_json(db: &Database, registry: &WatcherRegistry) -> Result<()> {
     watchers.push(WatcherStatus {
         name: "copilot".to_string(),
         available: false,
+        enabled: false,
         session_files: None,
     });
 
@@ -191,7 +197,7 @@ fn get_current_commit_info(db: &Database) -> Result<Option<CurrentCommitInfo>> {
 }
 
 /// Runs the status command with text output.
-fn run_text(db: &Database, registry: &WatcherRegistry) -> Result<()> {
+fn run_text(db: &Database, registry: &WatcherRegistry, config: &Config) -> Result<()> {
     println!("{}", "Lore".bold().cyan());
     println!("{}", "Reasoning history for code".dimmed());
     println!();
@@ -200,7 +206,7 @@ fn run_text(db: &Database, registry: &WatcherRegistry) -> Result<()> {
     print_daemon_status();
 
     // Watchers section
-    print_watchers_status(registry);
+    print_watchers_status(registry, config);
 
     // Database statistics
     print_database_stats(db)?;
@@ -240,22 +246,30 @@ fn print_daemon_status() {
 
 /// Prints the watchers availability section.
 ///
-/// Shows which session watchers are available and how many session files
-/// each has discovered.
-fn print_watchers_status(registry: &WatcherRegistry) {
+/// Shows which session watchers are enabled, available, and how many session files
+/// each has discovered. Distinguishes between enabled (in config) and available
+/// (tool installed).
+fn print_watchers_status(registry: &WatcherRegistry, config: &Config) {
     println!("{}", "Watchers:".bold());
 
     for watcher in registry.all_watchers() {
         let info = watcher.info();
         let name = info.name;
+        let is_enabled = config.watchers.iter().any(|w| w == name);
 
         if watcher.is_available() {
+            let status_str = if is_enabled {
+                "enabled".green().to_string()
+            } else {
+                "available (not enabled)".yellow().to_string()
+            };
+
             match watcher.find_sources() {
                 Ok(sources) if !sources.is_empty() => {
                     println!(
                         "  {}: {} ({} session files)",
                         name.cyan(),
-                        "available".green(),
+                        status_str,
                         sources.len()
                     );
                 }
@@ -263,14 +277,14 @@ fn print_watchers_status(registry: &WatcherRegistry) {
                     println!(
                         "  {}: {} (no sessions found)",
                         name.cyan(),
-                        "available".green()
+                        status_str
                     );
                 }
                 Err(_) => {
                     println!(
                         "  {}: {} (error reading sources)",
                         name.cyan(),
-                        "available".green()
+                        status_str
                     );
                 }
             }

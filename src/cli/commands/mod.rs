@@ -6,6 +6,9 @@
 /// Configuration viewing and management.
 pub mod config;
 
+/// Guided first-run setup.
+pub mod init;
+
 /// Background daemon management (start, stop, status, logs).
 pub mod daemon;
 
