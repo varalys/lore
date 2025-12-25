@@ -79,10 +79,10 @@ cargo install --path .
 ## Quick Start
 
 ```bash
-# Import existing sessions from AI coding tools
-lore import
+# First time? Run init for guided setup
+lore init
 
-# List sessions
+# Or just start using lore - it will prompt for setup automatically
 lore sessions
 
 # View a session
@@ -118,11 +118,12 @@ $ lore show 7f3a2b1
 
 | Command | Description |
 |---------|-------------|
+| `lore init` | Guided first-run setup (auto-detects AI tools) |
 | `lore status` | Show daemon status, watchers, and recent sessions |
 | `lore sessions` | List sessions (supports `--repo`, `--limit`, `--format`) |
 | `lore show <id>` | View session details |
 | `lore show --commit <ref>` | View sessions linked to a commit |
-| `lore import` | Import sessions from AI tools |
+| `lore import` | Import sessions from all enabled watchers |
 | `lore link <id>` | Link session to HEAD |
 | `lore unlink <id>` | Remove a session-commit link |
 | `lore search <query>` | Full-text search across all sessions |
@@ -130,7 +131,9 @@ $ lore show 7f3a2b1
 | `lore daemon start` | Start background watcher for real-time capture |
 | `lore daemon install` | Install daemon as a system service |
 | `lore daemon uninstall` | Remove daemon service |
-| `lore config` | View configuration paths |
+| `lore config` | View configuration |
+| `lore config get <key>` | Get a config value |
+| `lore config set <key> <val>` | Set a config value |
 
 ## Supported Tools
 
@@ -235,6 +238,29 @@ lore sessions --format json
 lore show abc123 --format json
 lore show abc123 --format markdown
 lore status --format json
+```
+
+## Configuration
+
+On first run, Lore prompts for setup automatically. You can also run `lore init` manually.
+
+The init wizard:
+1. Detects installed AI coding tools
+2. Shows which tools have existing sessions
+3. Lets you choose which watchers to enable
+4. Offers to import existing sessions
+
+Configure which tools to track:
+
+```bash
+lore config set watchers claude-code,aider,gemini
+lore config get watchers
+```
+
+For scripting, use `--no-init` to skip the first-run prompt:
+
+```bash
+lore --no-init sessions --format json
 ```
 
 ## Data Location

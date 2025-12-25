@@ -8,6 +8,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::capture::watchers::{default_registry, WatcherRegistry};
+use crate::cli::commands::import;
 use crate::config::Config;
 use crate::storage::db::default_db_path;
 
@@ -165,9 +166,38 @@ pub fn run(args: Args) -> Result<()> {
     println!("{}", "Setup complete!".green().bold());
     println!();
     println!("Enabled watchers: {}", selected_watchers.join(", ").cyan());
+
+    // Check if there are any sessions to import
+    let has_sessions = detected.iter().any(|t| t.has_sessions);
+
+    if has_sessions {
+        println!();
+        if prompt_yes_no("Import existing sessions now?", true)? {
+            println!();
+            let stats = import::run_import(false, false)?;
+            println!();
+            println!(
+                "{}",
+                format!(
+                    "Imported {} sessions from {} tools",
+                    stats.imported, stats.tools_count
+                )
+                .bold()
+            );
+            if stats.skipped > 0 || stats.errors > 0 {
+                println!(
+                    "  ({} skipped, {} errors)",
+                    stats.skipped, stats.errors
+                );
+            }
+        }
+    }
+
     println!();
     println!("Next steps:");
-    println!("  {} - Import existing sessions", "lore import".cyan());
+    if !has_sessions {
+        println!("  {} - Import existing sessions", "lore import".cyan());
+    }
     println!("  {} - Check current status", "lore status".cyan());
     println!("  {} - View configuration", "lore config".cyan());
 
@@ -281,6 +311,30 @@ fn prompt_watcher_selection(detected: &[DetectedTool]) -> Result<Vec<String>> {
     selected.retain(|x| seen.insert(x.clone()));
 
     Ok(selected)
+}
+
+/// Prompts the user for a yes/no answer.
+///
+/// Displays the prompt with the default choice indicated. Returns the
+/// user's choice, or the default if they press Enter without input.
+fn prompt_yes_no(prompt: &str, default: bool) -> Result<bool> {
+    let hint = if default { "[Y/n]" } else { "[y/N]" };
+    print!("{prompt} {hint} ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+
+    if input.is_empty() {
+        return Ok(default);
+    }
+
+    match input.as_str() {
+        "y" | "yes" => Ok(true),
+        "n" | "no" => Ok(false),
+        _ => Ok(default),
+    }
 }
 
 /// Returns the path where Cursor stores its data.

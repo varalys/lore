@@ -153,7 +153,6 @@ impl WatcherRegistry {
     ///
     /// This method is intended for use by the import command and daemon
     /// to filter which watchers actively scan for sessions.
-    #[allow(dead_code)]
     pub fn enabled_watchers(&self, enabled_watchers: &[String]) -> Vec<&dyn Watcher> {
         self.watchers
             .iter()
