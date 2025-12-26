@@ -114,6 +114,33 @@ Sessions linked to commit a1b2c3d:
 $ lore show 7f3a2b1
 ```
 
+## Search
+
+Find any conversation across all your AI coding sessions:
+
+```bash
+# Basic search
+lore search "authentication"
+
+# Filter by tool
+lore search "bug fix" --tool claude-code
+
+# Filter by date range
+lore search "refactor" --since 2025-12-01 --until 2025-12-15
+
+# Filter by project or branch
+lore search "api" --project myapp
+lore search "feature" --branch main
+
+# Combine filters
+lore search "database" --tool aider --project backend --since 2025-12-01
+
+# Show more context around matches
+lore search "error handling" --context 3
+```
+
+Search matches message content, project names, branches, and tool names. Results show surrounding context so you can understand the conversation flow.
+
 ## Commands
 
 | Command | Description |
@@ -126,7 +153,7 @@ $ lore show 7f3a2b1
 | `lore import` | Import sessions from all enabled watchers |
 | `lore link <id>` | Link session to HEAD |
 | `lore unlink <id>` | Remove a session-commit link |
-| `lore search <query>` | Full-text search across all sessions |
+| `lore search <query>` | Full-text search with filters and context |
 | `lore hooks install` | Install git hooks for automatic linking |
 | `lore daemon start` | Start background watcher for real-time capture |
 | `lore daemon install` | Install daemon as a system service |

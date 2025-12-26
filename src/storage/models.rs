@@ -261,6 +261,128 @@ pub struct SearchResult {
 
     /// Working directory of the session containing this message.
     pub working_directory: String,
+
+    /// AI tool that captured this session (e.g., "claude-code", "aider").
+    #[serde(default)]
+    pub tool: String,
+
+    /// Git branch name if available.
+    #[serde(default)]
+    pub git_branch: Option<String>,
+
+    /// Total message count in the session.
+    #[serde(default)]
+    pub session_message_count: i32,
+
+    /// When the session started.
+    #[serde(default)]
+    pub session_started_at: Option<DateTime<Utc>>,
+
+    /// Index of the matching message within its session.
+    #[serde(default)]
+    pub message_index: i32,
+}
+
+/// Options for filtering search results.
+///
+/// Used by the search command to narrow down results by tool, date range,
+/// project, branch, and other criteria. The context field is used by the
+/// CLI layer, not the database layer.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct SearchOptions {
+    /// The search query text.
+    pub query: String,
+
+    /// Maximum number of results to return.
+    pub limit: usize,
+
+    /// Filter by AI tool name (e.g., "claude-code", "aider").
+    pub tool: Option<String>,
+
+    /// Only include sessions after this date.
+    pub since: Option<DateTime<Utc>>,
+
+    /// Only include sessions before this date.
+    pub until: Option<DateTime<Utc>>,
+
+    /// Filter by project/directory name (partial match).
+    pub project: Option<String>,
+
+    /// Filter by git branch name (partial match).
+    pub branch: Option<String>,
+
+    /// Filter by message role (user, assistant, system).
+    pub role: Option<String>,
+
+    /// Filter by repository path prefix.
+    pub repo: Option<String>,
+
+    /// Number of context messages to include before and after matches.
+    pub context: usize,
+}
+
+/// A search result with surrounding context messages.
+///
+/// Groups matches by session and includes neighboring messages for context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResultWithContext {
+    /// The session containing the matches.
+    pub session_id: Uuid,
+
+    /// AI tool that captured this session.
+    pub tool: String,
+
+    /// Project name (extracted from working directory).
+    pub project: String,
+
+    /// Full working directory path.
+    pub working_directory: String,
+
+    /// Git branch if available.
+    pub git_branch: Option<String>,
+
+    /// When the session started.
+    pub session_started_at: DateTime<Utc>,
+
+    /// Total messages in the session.
+    pub session_message_count: i32,
+
+    /// The matching messages with their context.
+    pub matches: Vec<MatchWithContext>,
+}
+
+/// A single match with its surrounding context messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchWithContext {
+    /// The matching message.
+    pub message: ContextMessage,
+
+    /// Messages before the match (for context).
+    pub before: Vec<ContextMessage>,
+
+    /// Messages after the match (for context).
+    pub after: Vec<ContextMessage>,
+}
+
+/// A simplified message representation for context display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextMessage {
+    /// Message ID.
+    pub id: Uuid,
+
+    /// Role of the sender.
+    pub role: MessageRole,
+
+    /// Text content (truncated for display).
+    pub content: String,
+
+    /// Message index in the session.
+    pub index: i32,
+
+    /// Whether this is the matching message.
+    #[serde(default)]
+    pub is_match: bool,
 }
 
 /// A tracked git repository.
