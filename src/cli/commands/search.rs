@@ -515,6 +515,17 @@ pub fn run(args: Args) -> Result<()> {
                     .dimmed()
                 );
             }
+
+            // Show tip for viewing full session
+            if let Some(first) = grouped.first() {
+                let session_id = first.session_id.to_string();
+                let short_id = &session_id[..8.min(session_id.len())];
+                println!();
+                println!(
+                    "{}",
+                    format!("Tip: lore show {short_id} to view full session").dimmed()
+                );
+            }
         }
     }
 
