@@ -8,6 +8,8 @@ Lore captures AI coding sessions and links them to git commits.
 
 When you use AI coding tools like Claude Code or Aider, the conversation history contains valuable context. This includes everything from the prompts you wrote, the approaches you tried, and the decisions you made. Git captures the final code, but does not contain reasoning history for your commits. Lore preserves both.
 
+![Lore init](assets/init-screenshot.png)
+
 ## Use Cases
 
 - **Code review**: See the AI conversation that produced a PR, not just the diff
