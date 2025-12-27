@@ -174,6 +174,7 @@ Search matches message content, project names, branches, and tool names. Results
 | Continue.dev | Supported | `~/.continue/sessions/` |
 | Cline | Supported | VS Code extension storage |
 | Roo Code | Supported | VS Code extension storage |
+| Kilo Code | Supported | VS Code extension storage |
 | OpenCode | Supported | `~/.local/share/opencode/storage/` |
 
 **Building an AI coding tool?** We welcome contributions to support additional tools. Open an issue with your tool's session storage location and format, or submit a PR adding a watcher. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
