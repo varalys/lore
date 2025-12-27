@@ -34,6 +34,9 @@ pub mod continue_dev;
 /// Gemini CLI session parser for JSON files.
 pub mod gemini;
 
+/// Kilo Code session parser for VS Code extension storage.
+pub mod kilo_code;
+
 /// OpenCode CLI session parser for multi-file JSON storage.
 pub mod opencode;
 
@@ -195,6 +198,7 @@ impl WatcherRegistry {
 /// - Codex CLI (JSONL files in ~/.codex/sessions/)
 /// - Continue.dev (JSON files in ~/.continue/sessions/)
 /// - Gemini CLI (JSON files in ~/.gemini/tmp/)
+/// - Kilo Code (JSON files in VS Code extension storage)
 /// - OpenCode CLI (JSON files in ~/.local/share/opencode/storage/)
 /// - Roo Code (JSON files in VS Code extension storage)
 pub fn default_registry() -> WatcherRegistry {
@@ -206,6 +210,7 @@ pub fn default_registry() -> WatcherRegistry {
     registry.register(Box::new(codex::CodexWatcher));
     registry.register(Box::new(continue_dev::ContinueDevWatcher));
     registry.register(Box::new(gemini::GeminiWatcher));
+    registry.register(Box::new(kilo_code::KiloCodeWatcher));
     registry.register(Box::new(opencode::OpenCodeWatcher));
     registry.register(Box::new(roo_code::RooCodeWatcher));
     registry
@@ -310,7 +315,7 @@ mod tests {
         let watchers = registry.all_watchers();
 
         // Should have all built-in watchers
-        assert!(watchers.len() >= 9);
+        assert!(watchers.len() >= 10);
 
         // Check that all watchers are registered
         assert!(registry.get_watcher("aider").is_some());
@@ -320,6 +325,7 @@ mod tests {
         assert!(registry.get_watcher("codex").is_some());
         assert!(registry.get_watcher("continue").is_some());
         assert!(registry.get_watcher("gemini").is_some());
+        assert!(registry.get_watcher("kilo-code").is_some());
         assert!(registry.get_watcher("opencode").is_some());
         assert!(registry.get_watcher("roo-code").is_some());
     }

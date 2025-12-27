@@ -59,10 +59,7 @@ pub fn run(args: Args) -> Result<()> {
         println!("  Database:    {}", db_path.display());
         println!("  Config:      {}", config_path.display());
         println!();
-        println!(
-            "Use {} to reconfigure.",
-            "lore init --force".cyan()
-        );
+        println!("Use {} to reconfigure.", "lore init --force".cyan());
         return Ok(());
     }
 
@@ -85,19 +82,18 @@ pub fn run(args: Args) -> Result<()> {
         println!(
             "Lore supports: Claude Code, Aider, Continue.dev, Cline, Codex, Gemini CLI, and more."
         );
-        println!("Install one of these tools and run {} again.", "lore init".cyan());
+        println!(
+            "Install one of these tools and run {} again.",
+            "lore init".cyan()
+        );
         return Ok(());
     }
 
     // Show detected tools
-    let tools_with_sessions: Vec<&DetectedTool> = detected
-        .iter()
-        .filter(|t| t.has_sessions)
-        .collect();
-    let tools_without_sessions: Vec<&DetectedTool> = detected
-        .iter()
-        .filter(|t| !t.has_sessions)
-        .collect();
+    let tools_with_sessions: Vec<&DetectedTool> =
+        detected.iter().filter(|t| t.has_sessions).collect();
+    let tools_without_sessions: Vec<&DetectedTool> =
+        detected.iter().filter(|t| !t.has_sessions).collect();
 
     if !tools_with_sessions.is_empty() {
         println!("  {} with existing sessions:", "Found".green());
@@ -115,11 +111,7 @@ pub fn run(args: Args) -> Result<()> {
         println!();
         println!("  {} (no sessions yet):", "Available".dimmed());
         for tool in &tools_without_sessions {
-            println!(
-                "    {} - {}",
-                tool.name.cyan(),
-                tool.description.dimmed()
-            );
+            println!("    {} - {}", tool.name.cyan(), tool.description.dimmed());
         }
     }
 
@@ -192,10 +184,7 @@ pub fn run(args: Args) -> Result<()> {
                 .bold()
             );
             if stats.skipped > 0 || stats.errors > 0 {
-                println!(
-                    "  ({} skipped, {} errors)",
-                    stats.skipped, stats.errors
-                );
+                println!("  ({} skipped, {} errors)", stats.skipped, stats.errors);
             }
         }
     }
@@ -250,27 +239,30 @@ fn prompt_watcher_selection(detected: &[DetectedTool]) -> Result<Vec<String>> {
     // Default: enable all watchers with sessions, plus any that are available
     let default_selection: Vec<String> = detected.iter().map(|t| t.name.clone()).collect();
 
-    println!(
-        "{}",
-        "Which tools would you like to enable?".bold()
-    );
+    println!("{}", "Which tools would you like to enable?".bold());
     println!();
 
     // Show numbered options
     for (i, tool) in detected.iter().enumerate() {
         let num = i + 1;
         let status = if tool.has_sessions {
-            format!("({} sessions)", tool.session_count).green().to_string()
+            format!("({} sessions)", tool.session_count)
+                .green()
+                .to_string()
         } else {
             "(no sessions yet)".dimmed().to_string()
         };
-        println!("  [{}] {} - {} {}", num, tool.name.cyan(), tool.description, status);
+        println!(
+            "  [{}] {} - {} {}",
+            num,
+            tool.name.cyan(),
+            tool.description,
+            status
+        );
     }
 
     println!();
-    println!(
-        "Enter tool numbers separated by commas, or press Enter to enable all:"
-    );
+    println!("Enter tool numbers separated by commas, or press Enter to enable all:");
     print!("{}", "> ".cyan());
     io::stdout().flush()?;
 
@@ -293,11 +285,7 @@ fn prompt_watcher_selection(detected: &[DetectedTool]) -> Result<Vec<String>> {
             if num >= 1 && num <= detected.len() {
                 selected.push(detected[num - 1].name.clone());
             } else {
-                println!(
-                    "{}: {} is not a valid option",
-                    "Warning".yellow(),
-                    num
-                );
+                println!("{}: {} is not a valid option", "Warning".yellow(), num);
             }
         } else if !part.is_empty() {
             // Try to match by name

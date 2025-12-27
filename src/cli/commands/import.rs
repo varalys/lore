@@ -207,10 +207,7 @@ pub fn run(args: Args) -> Result<()> {
     } else {
         println!(
             "{}",
-            format!(
-                "Imported {total_imported} sessions from {tools_imported_from} tools"
-            )
-            .bold()
+            format!("Imported {total_imported} sessions from {tools_imported_from} tools").bold()
         );
         if total_skipped > 0 || total_errors > 0 {
             println!("  ({total_skipped} skipped, {total_errors} errors)");

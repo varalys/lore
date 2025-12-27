@@ -931,9 +931,9 @@ impl Database {
         }
 
         // Reindex all sessions for metadata search
-        let mut session_stmt =
-            self.conn
-                .prepare("SELECT id, tool, working_directory, git_branch FROM sessions")?;
+        let mut session_stmt = self
+            .conn
+            .prepare("SELECT id, tool, working_directory, git_branch FROM sessions")?;
 
         let session_rows = session_stmt.query_map([], |row| {
             let id: String = row.get(0)?;
@@ -1112,7 +1112,9 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::models::{LinkCreator, LinkType, MessageContent, MessageRole, SearchOptions};
+    use crate::storage::models::{
+        LinkCreator, LinkType, MessageContent, MessageRole, SearchOptions,
+    };
     use chrono::{Duration, Utc};
     use tempfile::tempdir;
 
@@ -2425,8 +2427,10 @@ mod tests {
     fn test_search_with_project_filter() {
         let (db, _dir) = create_test_db();
 
-        let session1 = create_test_session("claude-code", "/home/user/frontend-app", Utc::now(), None);
-        let session2 = create_test_session("claude-code", "/home/user/backend-api", Utc::now(), None);
+        let session1 =
+            create_test_session("claude-code", "/home/user/frontend-app", Utc::now(), None);
+        let session2 =
+            create_test_session("claude-code", "/home/user/backend-api", Utc::now(), None);
 
         db.insert_session(&session1).expect("insert session1");
         db.insert_session(&session2).expect("insert session2");
@@ -2512,7 +2516,8 @@ mod tests {
     fn test_search_metadata_matches_project() {
         let (db, _dir) = create_test_db();
 
-        let session = create_test_session("claude-code", "/home/user/redactyl-app", Utc::now(), None);
+        let session =
+            create_test_session("claude-code", "/home/user/redactyl-app", Utc::now(), None);
         db.insert_session(&session).expect("insert session");
 
         // Add a message that does NOT contain "redactyl"
@@ -2619,7 +2624,8 @@ mod tests {
         db.insert_session(&session).expect("insert session");
 
         for i in 0..3 {
-            let msg = create_test_message(session.id, i, MessageRole::User, &format!("Message {i}"));
+            let msg =
+                create_test_message(session.id, i, MessageRole::User, &format!("Message {i}"));
             db.insert_message(&msg).expect("insert message");
         }
 
@@ -2628,7 +2634,10 @@ mod tests {
             .get_context_messages(&session.id, 0, 2)
             .expect("get context");
 
-        assert!(before.is_empty(), "Should have no messages before first message");
+        assert!(
+            before.is_empty(),
+            "Should have no messages before first message"
+        );
         assert_eq!(after.len(), 2, "Should have 2 messages after");
     }
 
@@ -2640,7 +2649,8 @@ mod tests {
         db.insert_session(&session).expect("insert session");
 
         for i in 0..3 {
-            let msg = create_test_message(session.id, i, MessageRole::User, &format!("Message {i}"));
+            let msg =
+                create_test_message(session.id, i, MessageRole::User, &format!("Message {i}"));
             db.insert_message(&msg).expect("insert message");
         }
 
@@ -2650,7 +2660,10 @@ mod tests {
             .expect("get context");
 
         assert_eq!(before.len(), 2, "Should have 2 messages before");
-        assert!(after.is_empty(), "Should have no messages after last message");
+        assert!(
+            after.is_empty(),
+            "Should have no messages after last message"
+        );
     }
 
     #[test]
@@ -2685,8 +2698,10 @@ mod tests {
         db.insert_session(&session1).expect("insert session1");
         db.insert_session(&session2).expect("insert session2");
 
-        let msg1 = create_test_message(session1.id, 0, MessageRole::User, "API implementation work");
-        let msg2 = create_test_message(session2.id, 0, MessageRole::User, "API implementation work");
+        let msg1 =
+            create_test_message(session1.id, 0, MessageRole::User, "API implementation work");
+        let msg2 =
+            create_test_message(session2.id, 0, MessageRole::User, "API implementation work");
 
         db.insert_message(&msg1).expect("insert msg1");
         db.insert_message(&msg2).expect("insert msg2");
@@ -2709,7 +2724,10 @@ mod tests {
         );
         // All results should be from claude-code (the filtered tool)
         for result in &results {
-            assert_eq!(result.tool, "claude-code", "All results should be from claude-code");
+            assert_eq!(
+                result.tool, "claude-code",
+                "All results should be from claude-code"
+            );
         }
     }
 }

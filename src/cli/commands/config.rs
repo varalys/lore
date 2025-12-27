@@ -184,12 +184,7 @@ fn run_set(key: &str, value: &str) -> Result<()> {
     config.set(key, value)?;
     config.save_to_path(&config_path)?;
 
-    println!(
-        "{} {} = {}",
-        "Set".green(),
-        key.cyan(),
-        value.cyan()
-    );
+    println!("{} {} = {}", "Set".green(), key.cyan(), value.cyan());
 
     Ok(())
 }
@@ -270,7 +265,11 @@ mod tests {
         let reloaded = Config::load_from_path(&config_path).unwrap();
         assert_eq!(
             reloaded.watchers,
-            vec!["aider".to_string(), "claude-code".to_string(), "cline".to_string()]
+            vec![
+                "aider".to_string(),
+                "claude-code".to_string(),
+                "cline".to_string()
+            ]
         );
     }
 }

@@ -274,18 +274,10 @@ fn print_watchers_status(registry: &WatcherRegistry, config: &Config) {
                     );
                 }
                 Ok(_) => {
-                    println!(
-                        "  {}: {} (no sessions found)",
-                        name.cyan(),
-                        status_str
-                    );
+                    println!("  {}: {} (no sessions found)", name.cyan(), status_str);
                 }
                 Err(_) => {
-                    println!(
-                        "  {}: {} (error reading sources)",
-                        name.cyan(),
-                        status_str
-                    );
+                    println!("  {}: {} (error reading sources)", name.cyan(), status_str);
                 }
             }
         } else {

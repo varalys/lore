@@ -100,8 +100,10 @@ pub struct Args {
 
     /// Number of context messages to show before and after matches
     #[arg(short = 'C', long, default_value = "1", value_name = "N")]
-    #[arg(long_help = "Show N messages before and after each match for context.\n\
-        Use 0 to disable context. Default is 1.")]
+    #[arg(
+        long_help = "Show N messages before and after each match for context.\n\
+        Use 0 to disable context. Default is 1."
+    )]
     pub context: usize,
 
     /// Output format: text (default), json
@@ -198,7 +200,10 @@ fn truncate_content(content: &str, max_len: usize) -> String {
     if content.len() <= max_len {
         content
     } else {
-        format!("{}...", &content.chars().take(max_len - 3).collect::<String>())
+        format!(
+            "{}...",
+            &content.chars().take(max_len - 3).collect::<String>()
+        )
     }
 }
 
@@ -369,11 +374,7 @@ fn display_results_with_context(
                 );
                 for ctx_msg in &match_ctx.before {
                     let content = truncate_content(&ctx_msg.content, 100);
-                    println!(
-                        "  [{}] {}",
-                        format_role(&ctx_msg.role),
-                        content.dimmed()
-                    );
+                    println!("  [{}] {}", format_role(&ctx_msg.role), content.dimmed());
                 }
                 println!();
             }
@@ -395,11 +396,7 @@ fn display_results_with_context(
                 println!();
                 for ctx_msg in &match_ctx.after {
                     let content = truncate_content(&ctx_msg.content, 100);
-                    println!(
-                        "  [{}] {}",
-                        format_role(&ctx_msg.role),
-                        content.dimmed()
-                    );
+                    println!("  [{}] {}", format_role(&ctx_msg.role), content.dimmed());
                 }
                 println!(
                     "  {} {} message{} after {}",
