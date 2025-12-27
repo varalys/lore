@@ -32,6 +32,22 @@ fn parse_datetime(s: &str) -> rusqlite::Result<DateTime<Utc>> {
         })
 }
 
+/// Escapes a query string for FTS5 by wrapping each word in double quotes.
+///
+/// FTS5 has special syntax characters (e.g., /, *, AND, OR, NOT) that need
+/// escaping to be treated as literal search terms.
+fn escape_fts5_query(query: &str) -> String {
+    // Split on whitespace and wrap each word in quotes, escaping internal quotes
+    query
+        .split_whitespace()
+        .map(|word| {
+            let escaped = word.replace('"', "\"\"");
+            format!("\"{escaped}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Returns the default database path at `~/.lore/lore.db`.
 ///
 /// Creates the `.lore` directory if it does not exist.
@@ -161,6 +177,20 @@ impl Database {
             "#,
         )?;
 
+        // Create FTS5 virtual table for session metadata search.
+        // Allows searching by project name, branch, tool, and working directory.
+        self.conn.execute_batch(
+            r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+                session_id,
+                tool,
+                working_directory,
+                git_branch,
+                tokenize='porter unicode61'
+            );
+            "#,
+        )?;
+
         Ok(())
     }
 
@@ -169,9 +199,10 @@ impl Database {
     /// Inserts a new session or updates an existing one.
     ///
     /// If a session with the same ID already exists, updates the `ended_at`
-    /// and `message_count` fields.
+    /// and `message_count` fields. Also updates the sessions_fts index for
+    /// full-text search on session metadata.
     pub fn insert_session(&self, session: &Session) -> Result<()> {
-        self.conn.execute(
+        let rows_changed = self.conn.execute(
             r#"
             INSERT INTO sessions (id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -192,6 +223,29 @@ impl Database {
                 session.message_count,
             ],
         )?;
+
+        // Insert into sessions_fts for metadata search (only on new inserts)
+        if rows_changed > 0 {
+            // Check if already in FTS (for ON CONFLICT case)
+            let fts_count: i32 = self.conn.query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                params![session.id.to_string()],
+                |row| row.get(0),
+            )?;
+
+            if fts_count == 0 {
+                self.conn.execute(
+                    "INSERT INTO sessions_fts (session_id, tool, working_directory, git_branch) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        session.id.to_string(),
+                        session.tool,
+                        session.working_directory,
+                        session.git_branch.as_deref().unwrap_or(""),
+                    ],
+                )?;
+            }
+        }
+
         Ok(())
     }
 
@@ -506,6 +560,9 @@ impl Database {
     /// - `working_dir`: Filter by working directory prefix
     /// - `since`: Filter by minimum timestamp
     /// - `role`: Filter by message role
+    ///
+    /// Note: This is the legacy search API. For new code, use `search_with_options`.
+    #[allow(dead_code)]
     pub fn search_messages(
         &self,
         query: &str,
@@ -514,16 +571,57 @@ impl Database {
         since: Option<chrono::DateTime<chrono::Utc>>,
         role: Option<&str>,
     ) -> Result<Vec<SearchResult>> {
+        use super::models::SearchOptions;
+
+        // Convert to SearchOptions and use the new method
+        let options = SearchOptions {
+            query: query.to_string(),
+            limit,
+            repo: working_dir.map(|s| s.to_string()),
+            since,
+            role: role.map(|s| s.to_string()),
+            ..Default::default()
+        };
+
+        self.search_with_options(&options)
+    }
+
+    /// Searches messages and session metadata using full-text search with filters.
+    ///
+    /// Uses SQLite FTS5 to search for messages matching the query.
+    /// Also searches session metadata (tool, project, branch) via sessions_fts.
+    /// Returns results ordered by FTS5 relevance ranking.
+    ///
+    /// Supports extensive filtering via SearchOptions:
+    /// - `tool`: Filter by AI tool name
+    /// - `since`/`until`: Filter by date range
+    /// - `project`: Filter by project name (partial match)
+    /// - `branch`: Filter by git branch (partial match)
+    /// - `role`: Filter by message role
+    /// - `repo`: Filter by working directory prefix
+    pub fn search_with_options(
+        &self,
+        options: &super::models::SearchOptions,
+    ) -> Result<Vec<SearchResult>> {
+        // Escape the query for FTS5 to handle special characters
+        let escaped_query = escape_fts5_query(&options.query);
+
         // Build the query dynamically based on filters
+        // Use UNION to search both message content and session metadata
         let mut sql = String::from(
             r#"
             SELECT
                 m.session_id,
-                m.id,
+                m.id as message_id,
                 m.role,
                 snippet(messages_fts, 1, '**', '**', '...', 32) as snippet,
                 m.timestamp,
-                s.working_directory
+                s.working_directory,
+                s.tool,
+                s.git_branch,
+                s.message_count,
+                s.started_at,
+                m.idx as message_index
             FROM messages_fts fts
             JOIN messages m ON fts.message_id = m.id
             JOIN sessions s ON m.session_id = s.id
@@ -531,44 +629,150 @@ impl Database {
             "#,
         );
 
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(escaped_query.clone())];
         let mut param_idx = 2;
-        if working_dir.is_some() {
+
+        // Add filters
+        if options.repo.is_some() {
             sql.push_str(&format!(" AND s.working_directory LIKE ?{param_idx}"));
             param_idx += 1;
         }
-        if since.is_some() {
-            sql.push_str(&format!(" AND m.timestamp >= ?{param_idx}"));
+        if options.tool.is_some() {
+            sql.push_str(&format!(" AND LOWER(s.tool) = LOWER(?{param_idx})"));
             param_idx += 1;
         }
-        if role.is_some() {
+        if options.since.is_some() {
+            sql.push_str(&format!(" AND s.started_at >= ?{param_idx}"));
+            param_idx += 1;
+        }
+        if options.until.is_some() {
+            sql.push_str(&format!(" AND s.started_at <= ?{param_idx}"));
+            param_idx += 1;
+        }
+        if options.project.is_some() {
+            sql.push_str(&format!(" AND s.working_directory LIKE ?{param_idx}"));
+            param_idx += 1;
+        }
+        if options.branch.is_some() {
+            sql.push_str(&format!(" AND s.git_branch LIKE ?{param_idx}"));
+            param_idx += 1;
+        }
+        if options.role.is_some() {
             sql.push_str(&format!(" AND m.role = ?{param_idx}"));
+            param_idx += 1;
         }
 
-        sql.push_str(" ORDER BY rank LIMIT ?");
-        // The limit parameter will be appended at the end
-
-        // Prepare and execute with the right number of parameters
-        let mut stmt = self.conn.prepare(&sql)?;
-
-        // Build parameter list dynamically
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_string())];
-
-        if let Some(wd) = working_dir {
+        // Build first SELECT parameter list (after the FTS query param which is already in params_vec)
+        if let Some(ref wd) = options.repo {
             params_vec.push(Box::new(format!("{wd}%")));
         }
-        if let Some(ts) = since {
+        if let Some(ref tool) = options.tool {
+            params_vec.push(Box::new(tool.clone()));
+        }
+        if let Some(ts) = options.since {
             params_vec.push(Box::new(ts.to_rfc3339()));
         }
-        if let Some(r) = role {
-            params_vec.push(Box::new(r.to_string()));
+        if let Some(ts) = options.until {
+            params_vec.push(Box::new(ts.to_rfc3339()));
         }
-        params_vec.push(Box::new(limit as i64));
+        if let Some(ref project) = options.project {
+            params_vec.push(Box::new(format!("%{project}%")));
+        }
+        if let Some(ref branch) = options.branch {
+            params_vec.push(Box::new(format!("%{branch}%")));
+        }
+        if let Some(ref role) = options.role {
+            params_vec.push(Box::new(role.clone()));
+        }
 
+        // Add UNION for session metadata search (only if not filtering by role)
+        // This finds sessions where the metadata matches, returning the first message as representative
+        // Uses LIKE patterns instead of FTS5 for metadata since paths contain special characters
+        let include_metadata_search = options.role.is_none();
+        let metadata_query_pattern = format!("%{}%", options.query);
+
+        if include_metadata_search {
+            // For the metadata search, we need 3 separate params for the OR conditions
+            let meta_param1 = param_idx;
+            let meta_param2 = param_idx + 1;
+            let meta_param3 = param_idx + 2;
+            param_idx += 3;
+
+            sql.push_str(&format!(
+                r#"
+            UNION
+            SELECT
+                s.id as session_id,
+                (SELECT id FROM messages WHERE session_id = s.id ORDER BY idx LIMIT 1) as message_id,
+                'user' as role,
+                substr(s.tool || ' session in ' || s.working_directory || COALESCE(' on branch ' || s.git_branch, ''), 1, 100) as snippet,
+                s.started_at as timestamp,
+                s.working_directory,
+                s.tool,
+                s.git_branch,
+                s.message_count,
+                s.started_at,
+                0 as message_index
+            FROM sessions s
+            WHERE (
+                s.tool LIKE ?{meta_param1}
+                OR s.working_directory LIKE ?{meta_param2}
+                OR s.git_branch LIKE ?{meta_param3}
+            )
+            "#
+            ));
+
+            // Add metadata patterns to params
+            params_vec.push(Box::new(metadata_query_pattern.clone()));
+            params_vec.push(Box::new(metadata_query_pattern.clone()));
+            params_vec.push(Box::new(metadata_query_pattern));
+
+            // Re-apply session-level filters to the UNION query
+            if options.repo.is_some() {
+                sql.push_str(&format!(" AND s.working_directory LIKE ?{param_idx}"));
+                params_vec.push(Box::new(format!("{}%", options.repo.as_ref().unwrap())));
+                param_idx += 1;
+            }
+            if options.tool.is_some() {
+                sql.push_str(&format!(" AND LOWER(s.tool) = LOWER(?{param_idx})"));
+                params_vec.push(Box::new(options.tool.as_ref().unwrap().clone()));
+                param_idx += 1;
+            }
+            if options.since.is_some() {
+                sql.push_str(&format!(" AND s.started_at >= ?{param_idx}"));
+                params_vec.push(Box::new(options.since.unwrap().to_rfc3339()));
+                param_idx += 1;
+            }
+            if options.until.is_some() {
+                sql.push_str(&format!(" AND s.started_at <= ?{param_idx}"));
+                params_vec.push(Box::new(options.until.unwrap().to_rfc3339()));
+                param_idx += 1;
+            }
+            if options.project.is_some() {
+                sql.push_str(&format!(" AND s.working_directory LIKE ?{param_idx}"));
+                params_vec.push(Box::new(format!("%{}%", options.project.as_ref().unwrap())));
+                param_idx += 1;
+            }
+            if options.branch.is_some() {
+                sql.push_str(&format!(" AND s.git_branch LIKE ?{param_idx}"));
+                params_vec.push(Box::new(format!("%{}%", options.branch.as_ref().unwrap())));
+                param_idx += 1;
+            }
+        }
+
+        sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT ?{param_idx}"));
+        params_vec.push(Box::new(options.limit as i64));
+
+        // Prepare and execute
+        let mut stmt = self.conn.prepare(&sql)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
 
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             let role_str: String = row.get(2)?;
+            let git_branch: Option<String> = row.get(7)?;
+            let started_at_str: Option<String> = row.get(9)?;
+
             Ok(SearchResult {
                 session_id: parse_uuid(&row.get::<_, String>(0)?)?,
                 message_id: parse_uuid(&row.get::<_, String>(1)?)?,
@@ -581,6 +785,11 @@ impl Database {
                 snippet: row.get(3)?,
                 timestamp: parse_datetime(&row.get::<_, String>(4)?)?,
                 working_directory: row.get(5)?,
+                tool: row.get(6)?,
+                git_branch,
+                session_message_count: row.get(8)?,
+                session_started_at: started_at_str.map(|s| parse_datetime(&s)).transpose()?,
+                message_index: row.get(10)?,
             })
         })?;
 
@@ -588,7 +797,102 @@ impl Database {
             .context("Failed to search messages")
     }
 
-    /// Rebuilds the full-text search index from existing messages.
+    /// Gets messages around a specific message for context.
+    ///
+    /// Returns N messages before and N messages after the specified message,
+    /// useful for displaying search results with surrounding context.
+    pub fn get_context_messages(
+        &self,
+        session_id: &Uuid,
+        message_index: i32,
+        context_count: usize,
+    ) -> Result<(Vec<Message>, Vec<Message>)> {
+        // Get messages before
+        let mut before_stmt = self.conn.prepare(
+            "SELECT id, session_id, parent_id, idx, timestamp, role, content, model, git_branch, cwd
+             FROM messages
+             WHERE session_id = ?1 AND idx < ?2
+             ORDER BY idx DESC
+             LIMIT ?3",
+        )?;
+
+        let before_rows = before_stmt.query_map(
+            params![session_id.to_string(), message_index, context_count as i64],
+            Self::row_to_message,
+        )?;
+
+        let mut before: Vec<Message> = before_rows
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to get before messages")?;
+        before.reverse(); // Put in chronological order
+
+        // Get messages after
+        let mut after_stmt = self.conn.prepare(
+            "SELECT id, session_id, parent_id, idx, timestamp, role, content, model, git_branch, cwd
+             FROM messages
+             WHERE session_id = ?1 AND idx > ?2
+             ORDER BY idx ASC
+             LIMIT ?3",
+        )?;
+
+        let after_rows = after_stmt.query_map(
+            params![session_id.to_string(), message_index, context_count as i64],
+            Self::row_to_message,
+        )?;
+
+        let after: Vec<Message> = after_rows
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to get after messages")?;
+
+        Ok((before, after))
+    }
+
+    /// Gets a single message by its index within a session.
+    #[allow(dead_code)]
+    pub fn get_message_by_index(&self, session_id: &Uuid, index: i32) -> Result<Option<Message>> {
+        self.conn
+            .query_row(
+                "SELECT id, session_id, parent_id, idx, timestamp, role, content, model, git_branch, cwd
+                 FROM messages
+                 WHERE session_id = ?1 AND idx = ?2",
+                params![session_id.to_string(), index],
+                Self::row_to_message,
+            )
+            .optional()
+            .context("Failed to get message by index")
+    }
+
+    fn row_to_message(row: &rusqlite::Row) -> rusqlite::Result<Message> {
+        let role_str: String = row.get(5)?;
+        let content_str: String = row.get(6)?;
+
+        let parent_id_str: Option<String> = row.get(2)?;
+        let parent_id = match parent_id_str {
+            Some(s) => Some(parse_uuid(&s)?),
+            None => None,
+        };
+
+        Ok(Message {
+            id: parse_uuid(&row.get::<_, String>(0)?)?,
+            session_id: parse_uuid(&row.get::<_, String>(1)?)?,
+            parent_id,
+            index: row.get(3)?,
+            timestamp: parse_datetime(&row.get::<_, String>(4)?)?,
+            role: match role_str.as_str() {
+                "user" => MessageRole::User,
+                "assistant" => MessageRole::Assistant,
+                "system" => MessageRole::System,
+                _ => MessageRole::User,
+            },
+            content: serde_json::from_str(&content_str)
+                .unwrap_or(MessageContent::Text(content_str)),
+            model: row.get(7)?,
+            git_branch: row.get(8)?,
+            cwd: row.get(9)?,
+        })
+    }
+
+    /// Rebuilds the full-text search index from existing messages and sessions.
     ///
     /// This should be called when:
     /// - Upgrading from a database without FTS support
@@ -598,11 +902,12 @@ impl Database {
     pub fn rebuild_search_index(&self) -> Result<usize> {
         // Clear existing FTS data
         self.conn.execute("DELETE FROM messages_fts", [])?;
+        self.conn.execute("DELETE FROM sessions_fts", [])?;
 
         // Reindex all messages
-        let mut stmt = self.conn.prepare("SELECT id, content FROM messages")?;
+        let mut msg_stmt = self.conn.prepare("SELECT id, content FROM messages")?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = msg_stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let content_json: String = row.get(1)?;
             Ok((id, content_json))
@@ -625,25 +930,54 @@ impl Database {
             }
         }
 
+        // Reindex all sessions for metadata search
+        let mut session_stmt = self
+            .conn
+            .prepare("SELECT id, tool, working_directory, git_branch FROM sessions")?;
+
+        let session_rows = session_stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let tool: String = row.get(1)?;
+            let working_directory: String = row.get(2)?;
+            let git_branch: Option<String> = row.get(3)?;
+            Ok((id, tool, working_directory, git_branch))
+        })?;
+
+        for row in session_rows {
+            let (id, tool, working_directory, git_branch) = row?;
+            self.conn.execute(
+                "INSERT INTO sessions_fts (session_id, tool, working_directory, git_branch) VALUES (?1, ?2, ?3, ?4)",
+                params![id, tool, working_directory, git_branch.unwrap_or_default()],
+            )?;
+        }
+
         Ok(count)
     }
 
     /// Checks if the search index needs rebuilding.
     ///
-    /// Returns true if there are messages in the database but the FTS
-    /// index is empty, indicating messages were imported before FTS
-    /// was added.
+    /// Returns true if there are messages or sessions in the database but the FTS
+    /// indexes are empty, indicating data was imported before FTS was added.
     pub fn search_index_needs_rebuild(&self) -> Result<bool> {
         let message_count: i32 =
             self.conn
                 .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?;
 
-        let fts_count: i32 =
+        let msg_fts_count: i32 =
             self.conn
                 .query_row("SELECT COUNT(*) FROM messages_fts", [], |row| row.get(0))?;
 
-        // If we have messages but the FTS index is empty, it needs rebuilding
-        Ok(message_count > 0 && fts_count == 0)
+        let session_count: i32 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
+
+        let session_fts_count: i32 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM sessions_fts", [], |row| row.get(0))?;
+
+        // Rebuild needed if we have messages/sessions but either FTS index is empty
+        Ok((message_count > 0 && msg_fts_count == 0)
+            || (session_count > 0 && session_fts_count == 0))
     }
 
     // ==================== Stats ====================
@@ -778,7 +1112,9 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::models::{LinkCreator, LinkType, MessageContent, MessageRole};
+    use crate::storage::models::{
+        LinkCreator, LinkType, MessageContent, MessageRole, SearchOptions,
+    };
     use chrono::{Duration, Utc};
     use tempfile::tempdir;
 
@@ -2018,5 +2354,380 @@ mod tests {
             !db.link_exists(&session2.id, "abc123").expect("check"),
             "Should not find link for session2"
         );
+    }
+
+    // ==================== Enhanced Search Tests ====================
+
+    #[test]
+    fn test_search_with_tool_filter() {
+        let (db, _dir) = create_test_db();
+
+        let session1 = create_test_session("claude-code", "/project1", Utc::now(), None);
+        let session2 = create_test_session("aider", "/project2", Utc::now(), None);
+
+        db.insert_session(&session1).expect("insert session1");
+        db.insert_session(&session2).expect("insert session2");
+
+        let msg1 = create_test_message(session1.id, 0, MessageRole::User, "Hello from Claude");
+        let msg2 = create_test_message(session2.id, 0, MessageRole::User, "Hello from Aider");
+
+        db.insert_message(&msg1).expect("insert msg1");
+        db.insert_message(&msg2).expect("insert msg2");
+
+        // Search with tool filter
+        let options = SearchOptions {
+            query: "Hello".to_string(),
+            limit: 10,
+            tool: Some("claude-code".to_string()),
+            ..Default::default()
+        };
+        let results = db.search_with_options(&options).expect("search");
+
+        assert_eq!(results.len(), 1, "Should find 1 result with tool filter");
+        assert_eq!(results[0].tool, "claude-code", "Should be from claude-code");
+    }
+
+    #[test]
+    fn test_search_with_date_range() {
+        let (db, _dir) = create_test_db();
+
+        let old_time = Utc::now() - chrono::Duration::days(30);
+        let new_time = Utc::now() - chrono::Duration::days(1);
+
+        let session1 = create_test_session("claude-code", "/project1", old_time, None);
+        let session2 = create_test_session("claude-code", "/project2", new_time, None);
+
+        db.insert_session(&session1).expect("insert session1");
+        db.insert_session(&session2).expect("insert session2");
+
+        let msg1 = create_test_message(session1.id, 0, MessageRole::User, "Old session message");
+        let msg2 = create_test_message(session2.id, 0, MessageRole::User, "New session message");
+
+        db.insert_message(&msg1).expect("insert msg1");
+        db.insert_message(&msg2).expect("insert msg2");
+
+        // Search with since filter (last 7 days)
+        let since = Utc::now() - chrono::Duration::days(7);
+        let options = SearchOptions {
+            query: "session".to_string(),
+            limit: 10,
+            since: Some(since),
+            ..Default::default()
+        };
+        let results = db.search_with_options(&options).expect("search");
+
+        assert_eq!(results.len(), 1, "Should find 1 result within date range");
+        assert!(
+            results[0].working_directory.contains("project2"),
+            "Should be from newer project"
+        );
+    }
+
+    #[test]
+    fn test_search_with_project_filter() {
+        let (db, _dir) = create_test_db();
+
+        let session1 =
+            create_test_session("claude-code", "/home/user/frontend-app", Utc::now(), None);
+        let session2 =
+            create_test_session("claude-code", "/home/user/backend-api", Utc::now(), None);
+
+        db.insert_session(&session1).expect("insert session1");
+        db.insert_session(&session2).expect("insert session2");
+
+        let msg1 = create_test_message(session1.id, 0, MessageRole::User, "Testing frontend");
+        let msg2 = create_test_message(session2.id, 0, MessageRole::User, "Testing backend");
+
+        db.insert_message(&msg1).expect("insert msg1");
+        db.insert_message(&msg2).expect("insert msg2");
+
+        // Search with project filter
+        let options = SearchOptions {
+            query: "Testing".to_string(),
+            limit: 10,
+            project: Some("frontend".to_string()),
+            ..Default::default()
+        };
+        let results = db.search_with_options(&options).expect("search");
+
+        assert_eq!(results.len(), 1, "Should find 1 result with project filter");
+        assert!(
+            results[0].working_directory.contains("frontend"),
+            "Should be from frontend project"
+        );
+    }
+
+    #[test]
+    fn test_search_with_branch_filter() {
+        let (db, _dir) = create_test_db();
+
+        let session1 = Session {
+            id: Uuid::new_v4(),
+            tool: "claude-code".to_string(),
+            tool_version: None,
+            started_at: Utc::now(),
+            ended_at: None,
+            model: None,
+            working_directory: "/project".to_string(),
+            git_branch: Some("feat/auth".to_string()),
+            source_path: None,
+            message_count: 0,
+        };
+        let session2 = Session {
+            id: Uuid::new_v4(),
+            tool: "claude-code".to_string(),
+            tool_version: None,
+            started_at: Utc::now(),
+            ended_at: None,
+            model: None,
+            working_directory: "/project".to_string(),
+            git_branch: Some("main".to_string()),
+            source_path: None,
+            message_count: 0,
+        };
+
+        db.insert_session(&session1).expect("insert session1");
+        db.insert_session(&session2).expect("insert session2");
+
+        let msg1 = create_test_message(session1.id, 0, MessageRole::User, "Auth feature work");
+        let msg2 = create_test_message(session2.id, 0, MessageRole::User, "Main branch work");
+
+        db.insert_message(&msg1).expect("insert msg1");
+        db.insert_message(&msg2).expect("insert msg2");
+
+        // Search with branch filter
+        let options = SearchOptions {
+            query: "work".to_string(),
+            limit: 10,
+            branch: Some("auth".to_string()),
+            ..Default::default()
+        };
+        let results = db.search_with_options(&options).expect("search");
+
+        assert_eq!(results.len(), 1, "Should find 1 result with branch filter");
+        assert_eq!(
+            results[0].git_branch.as_deref(),
+            Some("feat/auth"),
+            "Should be from feat/auth branch"
+        );
+    }
+
+    #[test]
+    fn test_search_metadata_matches_project() {
+        let (db, _dir) = create_test_db();
+
+        let session =
+            create_test_session("claude-code", "/home/user/redactyl-app", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // Add a message that does NOT contain "redactyl"
+        let msg = create_test_message(session.id, 0, MessageRole::User, "Working on the project");
+        db.insert_message(&msg).expect("insert msg");
+
+        // Search for "redactyl" - should match session metadata
+        let options = SearchOptions {
+            query: "redactyl".to_string(),
+            limit: 10,
+            ..Default::default()
+        };
+        let results = db.search_with_options(&options).expect("search");
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Should find session via metadata match on project name"
+        );
+    }
+
+    #[test]
+    fn test_search_returns_extended_session_info() {
+        let (db, _dir) = create_test_db();
+
+        let started_at = Utc::now();
+        let session = Session {
+            id: Uuid::new_v4(),
+            tool: "claude-code".to_string(),
+            tool_version: Some("1.0.0".to_string()),
+            started_at,
+            ended_at: None,
+            model: None,
+            working_directory: "/home/user/myapp".to_string(),
+            git_branch: Some("develop".to_string()),
+            source_path: None,
+            message_count: 5,
+        };
+        db.insert_session(&session).expect("insert session");
+
+        let msg = create_test_message(session.id, 0, MessageRole::User, "Test message for search");
+        db.insert_message(&msg).expect("insert msg");
+
+        let options = SearchOptions {
+            query: "Test".to_string(),
+            limit: 10,
+            ..Default::default()
+        };
+        let results = db.search_with_options(&options).expect("search");
+
+        assert_eq!(results.len(), 1, "Should find 1 result");
+        let result = &results[0];
+
+        assert_eq!(result.tool, "claude-code", "Tool should be populated");
+        assert_eq!(
+            result.git_branch.as_deref(),
+            Some("develop"),
+            "Branch should be populated"
+        );
+        assert!(
+            result.session_message_count > 0,
+            "Message count should be populated"
+        );
+        assert!(
+            result.session_started_at.is_some(),
+            "Session start time should be populated"
+        );
+    }
+
+    #[test]
+    fn test_get_context_messages() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // Create 5 messages in sequence
+        for i in 0..5 {
+            let role = if i % 2 == 0 {
+                MessageRole::User
+            } else {
+                MessageRole::Assistant
+            };
+            let msg = create_test_message(session.id, i, role, &format!("Message number {i}"));
+            db.insert_message(&msg).expect("insert message");
+        }
+
+        // Get context around message index 2 (the middle one)
+        let (before, after) = db
+            .get_context_messages(&session.id, 2, 1)
+            .expect("get context");
+
+        assert_eq!(before.len(), 1, "Should have 1 message before");
+        assert_eq!(after.len(), 1, "Should have 1 message after");
+        assert_eq!(before[0].index, 1, "Before message should be index 1");
+        assert_eq!(after[0].index, 3, "After message should be index 3");
+    }
+
+    #[test]
+    fn test_get_context_messages_at_start() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        for i in 0..3 {
+            let msg =
+                create_test_message(session.id, i, MessageRole::User, &format!("Message {i}"));
+            db.insert_message(&msg).expect("insert message");
+        }
+
+        // Get context around first message (index 0)
+        let (before, after) = db
+            .get_context_messages(&session.id, 0, 2)
+            .expect("get context");
+
+        assert!(
+            before.is_empty(),
+            "Should have no messages before first message"
+        );
+        assert_eq!(after.len(), 2, "Should have 2 messages after");
+    }
+
+    #[test]
+    fn test_get_context_messages_at_end() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        for i in 0..3 {
+            let msg =
+                create_test_message(session.id, i, MessageRole::User, &format!("Message {i}"));
+            db.insert_message(&msg).expect("insert message");
+        }
+
+        // Get context around last message (index 2)
+        let (before, after) = db
+            .get_context_messages(&session.id, 2, 2)
+            .expect("get context");
+
+        assert_eq!(before.len(), 2, "Should have 2 messages before");
+        assert!(
+            after.is_empty(),
+            "Should have no messages after last message"
+        );
+    }
+
+    #[test]
+    fn test_search_combined_filters() {
+        let (db, _dir) = create_test_db();
+
+        let session1 = Session {
+            id: Uuid::new_v4(),
+            tool: "claude-code".to_string(),
+            tool_version: None,
+            started_at: Utc::now(),
+            ended_at: None,
+            model: None,
+            working_directory: "/home/user/myapp".to_string(),
+            git_branch: Some("feat/api".to_string()),
+            source_path: None,
+            message_count: 1,
+        };
+        let session2 = Session {
+            id: Uuid::new_v4(),
+            tool: "aider".to_string(),
+            tool_version: None,
+            started_at: Utc::now(),
+            ended_at: None,
+            model: None,
+            working_directory: "/home/user/myapp".to_string(),
+            git_branch: Some("feat/api".to_string()),
+            source_path: None,
+            message_count: 1,
+        };
+
+        db.insert_session(&session1).expect("insert session1");
+        db.insert_session(&session2).expect("insert session2");
+
+        let msg1 =
+            create_test_message(session1.id, 0, MessageRole::User, "API implementation work");
+        let msg2 =
+            create_test_message(session2.id, 0, MessageRole::User, "API implementation work");
+
+        db.insert_message(&msg1).expect("insert msg1");
+        db.insert_message(&msg2).expect("insert msg2");
+
+        // Search with multiple filters
+        let options = SearchOptions {
+            query: "API".to_string(),
+            limit: 10,
+            tool: Some("claude-code".to_string()),
+            branch: Some("api".to_string()),
+            project: Some("myapp".to_string()),
+            ..Default::default()
+        };
+        let results = db.search_with_options(&options).expect("search");
+
+        // Results may include both message content match and metadata match from same session
+        assert!(
+            !results.is_empty(),
+            "Should find at least 1 result matching all filters"
+        );
+        // All results should be from claude-code (the filtered tool)
+        for result in &results {
+            assert_eq!(
+                result.tool, "claude-code",
+                "All results should be from claude-code"
+            );
+        }
     }
 }

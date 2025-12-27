@@ -1,5 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::io::{self, IsTerminal, Write};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod capture;
@@ -10,6 +14,17 @@ mod git;
 mod storage;
 
 use cli::commands;
+use config::Config;
+
+// ANSI escape codes for terminal colors
+const YELLOW: &str = "\x1b[33m";
+const GREEN: &str = "\x1b[32m";
+const RED: &str = "\x1b[31m";
+const BOLD: &str = "\x1b[1m";
+const RESET: &str = "\x1b[0m";
+
+/// Timeout duration for the init prompt in seconds.
+const PROMPT_TIMEOUT_SECS: u64 = 30;
 
 /// The main CLI command line interface.
 #[derive(Parser)]
@@ -38,11 +53,23 @@ struct Cli {
     /// Enable verbose output for debugging
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Skip the first-run setup prompt (useful for scripting)
+    #[arg(long, global = true)]
+    no_init: bool,
 }
 
 /// Available CLI subcommands.
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize Lore with guided setup
+    #[command(
+        long_about = "Runs a guided setup wizard that detects installed AI coding tools\n\
+        and creates an initial configuration file. Use this when first\n\
+        installing Lore or to reconfigure your setup."
+    )]
+    Init(commands::init::Args),
+
     /// Show Lore status, database stats, and recent sessions
     #[command(
         long_about = "Displays an overview of the Lore database including session counts,\n\
@@ -133,6 +160,117 @@ enum Commands {
     Daemon(commands::daemon::Args),
 }
 
+/// Checks if Lore is configured (config file exists).
+fn is_configured() -> bool {
+    Config::config_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
+/// Checks if the given command should skip the first-run prompt.
+///
+/// Commands that should skip:
+/// - `init` (the setup command itself)
+/// - `config` (should work without init for debugging)
+fn should_skip_first_run_prompt(command: &Commands) -> bool {
+    matches!(command, Commands::Init(_) | Commands::Config(_))
+}
+
+/// Checks if stdin is connected to a terminal (interactive mode).
+fn is_interactive() -> bool {
+    io::stdin().is_terminal()
+}
+
+/// Checks if stdout is connected to a terminal (for color output).
+fn stdout_is_tty() -> bool {
+    io::stdout().is_terminal()
+}
+
+/// Result of the init prompt, including timeout case.
+#[derive(Debug, PartialEq)]
+enum PromptResult {
+    /// User chose to run init
+    Yes,
+    /// User declined init
+    No,
+    /// Prompt timed out with no response
+    Timeout,
+}
+
+/// Prompts the user to run the init wizard with colored output and timeout.
+///
+/// Returns the user's choice or timeout after 30 seconds.
+/// Uses ANSI colors if stdout is a TTY.
+fn prompt_for_init() -> Result<PromptResult> {
+    let use_color = stdout_is_tty();
+
+    // Build the prompt with optional colors
+    if use_color {
+        print!(
+            "{BOLD}{YELLOW}Lore isn't configured yet. Run setup?{RESET} [{GREEN}Y{RESET}/{RED}n{RESET}] "
+        );
+    } else {
+        print!("Lore isn't configured yet. Run setup? [Y/n] ");
+    }
+    io::stdout().flush()?;
+
+    // Use a channel to receive input with timeout
+    let (tx, rx) = mpsc::channel();
+
+    // Spawn a thread to read input
+    thread::spawn(move || {
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_ok() {
+            let _ = tx.send(input);
+        }
+    });
+
+    // Wait for input with timeout
+    match rx.recv_timeout(Duration::from_secs(PROMPT_TIMEOUT_SECS)) {
+        Ok(input) => {
+            let input = input.trim().to_lowercase();
+            // Empty input or "y" or "yes" means yes (default)
+            if input.is_empty() || input == "y" || input == "yes" {
+                Ok(PromptResult::Yes)
+            } else {
+                Ok(PromptResult::No)
+            }
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            println!();
+            Ok(PromptResult::Timeout)
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            // Sender dropped without sending, treat as no
+            println!();
+            Ok(PromptResult::No)
+        }
+    }
+}
+
+/// Creates a minimal config so the first-run prompt is not shown again.
+fn create_minimal_config() -> Result<()> {
+    let config = Config::default();
+    config.save()
+}
+
+/// Returns a user-friendly name for the command being executed.
+fn command_name(command: &Commands) -> &'static str {
+    match command {
+        Commands::Init(_) => "init",
+        Commands::Status(_) => "status",
+        Commands::Sessions(_) => "sessions",
+        Commands::Show(_) => "show",
+        Commands::Link(_) => "link",
+        Commands::Unlink(_) => "unlink",
+        Commands::Search(_) => "search",
+        Commands::Config(_) => "config",
+        Commands::Import(_) => "import",
+        Commands::Hooks(_) => "hooks",
+        Commands::Daemon(_) => "daemon",
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -150,7 +288,41 @@ fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer().without_time())
         .init();
 
+    // First-run detection: prompt to run init if not configured
+    // Skip if --no-init flag is set (useful for scripting)
+    if !cli.no_init
+        && !is_configured()
+        && !should_skip_first_run_prompt(&cli.command)
+        && is_interactive()
+    {
+        match prompt_for_init()? {
+            PromptResult::Yes => {
+                // Run the init wizard with force=true since user explicitly chose setup
+                commands::init::run(commands::init::Args { force: true })?;
+                println!();
+                println!(
+                    "Setup complete! Running 'lore {}'...",
+                    command_name(&cli.command)
+                );
+                println!();
+            }
+            PromptResult::No => {
+                // User declined; create minimal config so we don't ask again
+                println!("Okay, run 'lore init' anytime to configure.");
+                println!();
+                create_minimal_config()?;
+            }
+            PromptResult::Timeout => {
+                // Timed out; create minimal config so we don't hang again
+                println!("No response, continuing without setup...");
+                println!();
+                create_minimal_config()?;
+            }
+        }
+    }
+
     match cli.command {
+        Commands::Init(args) => commands::init::run(args),
         Commands::Status(args) => commands::status::run(args),
         Commands::Sessions(args) => commands::sessions::run(args),
         Commands::Show(args) => commands::show::run(args),
@@ -161,5 +333,134 @@ fn main() -> Result<()> {
         Commands::Import(args) => commands::import::run(args),
         Commands::Hooks(args) => commands::hooks::run(args),
         Commands::Daemon(args) => commands::daemon::run(args),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::OutputFormat;
+
+    #[test]
+    fn test_should_skip_first_run_prompt_init() {
+        let command = Commands::Init(commands::init::Args { force: false });
+        assert!(should_skip_first_run_prompt(&command));
+    }
+
+    #[test]
+    fn test_should_skip_first_run_prompt_init_force() {
+        let command = Commands::Init(commands::init::Args { force: true });
+        assert!(should_skip_first_run_prompt(&command));
+    }
+
+    #[test]
+    fn test_should_skip_first_run_prompt_config() {
+        let command = Commands::Config(commands::config::Args {
+            command: None,
+            format: OutputFormat::Text,
+        });
+        assert!(should_skip_first_run_prompt(&command));
+    }
+
+    #[test]
+    fn test_should_not_skip_first_run_prompt_status() {
+        let command = Commands::Status(commands::status::Args {
+            format: OutputFormat::Text,
+        });
+        assert!(!should_skip_first_run_prompt(&command));
+    }
+
+    #[test]
+    fn test_should_not_skip_first_run_prompt_sessions() {
+        let command = Commands::Sessions(commands::sessions::Args {
+            repo: None,
+            limit: 20,
+            format: OutputFormat::Text,
+        });
+        assert!(!should_skip_first_run_prompt(&command));
+    }
+
+    #[test]
+    fn test_should_not_skip_first_run_prompt_import() {
+        let command = Commands::Import(commands::import::Args {
+            force: false,
+            dry_run: false,
+        });
+        assert!(!should_skip_first_run_prompt(&command));
+    }
+
+    #[test]
+    fn test_cli_no_init_flag_parses() {
+        use clap::Parser;
+        // Test that --no-init flag is recognized and parsed correctly
+        let cli = Cli::try_parse_from(["lore", "--no-init", "status"]);
+        assert!(cli.is_ok());
+        let cli = cli.unwrap();
+        assert!(cli.no_init);
+    }
+
+    #[test]
+    fn test_cli_no_init_flag_default_false() {
+        use clap::Parser;
+        // Test that --no-init defaults to false when not provided
+        let cli = Cli::try_parse_from(["lore", "status"]);
+        assert!(cli.is_ok());
+        let cli = cli.unwrap();
+        assert!(!cli.no_init);
+    }
+
+    #[test]
+    fn test_cli_no_init_flag_with_verbose() {
+        use clap::Parser;
+        // Test that --no-init and --verbose can be combined
+        let cli = Cli::try_parse_from(["lore", "--no-init", "--verbose", "sessions"]);
+        assert!(cli.is_ok());
+        let cli = cli.unwrap();
+        assert!(cli.no_init);
+        assert!(cli.verbose);
+    }
+
+    #[test]
+    fn test_command_name_status() {
+        let command = Commands::Status(commands::status::Args {
+            format: OutputFormat::Text,
+        });
+        assert_eq!(command_name(&command), "status");
+    }
+
+    #[test]
+    fn test_command_name_sessions() {
+        let command = Commands::Sessions(commands::sessions::Args {
+            repo: None,
+            limit: 20,
+            format: OutputFormat::Text,
+        });
+        assert_eq!(command_name(&command), "sessions");
+    }
+
+    #[test]
+    fn test_command_name_import() {
+        let command = Commands::Import(commands::import::Args {
+            force: false,
+            dry_run: false,
+        });
+        assert_eq!(command_name(&command), "import");
+    }
+
+    #[test]
+    fn test_command_name_init() {
+        let command = Commands::Init(commands::init::Args { force: false });
+        assert_eq!(command_name(&command), "init");
+    }
+
+    #[test]
+    fn test_prompt_result_equality() {
+        // Test that PromptResult enum variants are distinguishable
+        assert_eq!(PromptResult::Yes, PromptResult::Yes);
+        assert_eq!(PromptResult::No, PromptResult::No);
+        assert_eq!(PromptResult::Timeout, PromptResult::Timeout);
+        assert_ne!(PromptResult::Yes, PromptResult::No);
+        assert_ne!(PromptResult::Yes, PromptResult::Timeout);
+        assert_ne!(PromptResult::No, PromptResult::Timeout);
     }
 }

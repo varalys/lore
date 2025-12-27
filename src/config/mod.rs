@@ -83,7 +83,6 @@ impl Config {
     /// Saves configuration to a specific path.
     ///
     /// Creates parent directories if they do not exist.
-    #[allow(dead_code)]
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -108,7 +107,6 @@ impl Config {
     /// - `commit_footer` - "true" or "false"
     ///
     /// Returns `None` if the key is not recognized.
-    #[allow(dead_code)]
     pub fn get(&self, key: &str) -> Option<String> {
         match key {
             "watchers" => Some(self.watchers.join(",")),
@@ -128,7 +126,6 @@ impl Config {
     /// - `commit_footer` - "true" or "false"
     ///
     /// Returns an error if the key is not recognized or the value is invalid.
-    #[allow(dead_code)]
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
         match key {
             "watchers" => {
@@ -174,7 +171,6 @@ impl Config {
     }
 
     /// Returns the list of valid configuration keys.
-    #[allow(dead_code)]
     pub fn valid_keys() -> &'static [&'static str] {
         &[
             "watchers",
@@ -188,7 +184,6 @@ impl Config {
 /// Parses a boolean value from a string.
 ///
 /// Accepts "true", "false", "1", "0", "yes", "no" (case-insensitive).
-#[allow(dead_code)]
 fn parse_bool(value: &str) -> Result<bool> {
     match value.to_lowercase().as_str() {
         "true" | "1" | "yes" => Ok(true),

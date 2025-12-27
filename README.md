@@ -6,7 +6,7 @@
 
 Lore captures AI coding sessions and links them to git commits.
 
-When you use AI coding tools like Claude Code or Aider, the conversation history contains valuable context: the prompts you wrote, the approaches you tried, the decisions you made. Git captures the final code, but not this reasoning. Lore preserves both.
+When you use AI coding tools like Claude Code or Aider, the conversation history contains valuable context. This includes everything from the prompts you wrote, the approaches you tried, and the decisions you made. Git captures the final code, but does not contain reasoning history for your commits. Lore preserves both.
 
 ## Use Cases
 
@@ -14,6 +14,7 @@ When you use AI coding tools like Claude Code or Aider, the conversation history
 - **Debugging**: Understand why code was written a certain way by reading the original discussion
 - **Knowledge transfer**: When someone leaves a project, their AI conversations stay with the code
 - **Learning**: Study how problems were solved by browsing linked sessions
+- **Search**: Find that conversation where you solved a similar problem - search by keyword, project, tool, or date
 
 ## How It Works
 
@@ -79,10 +80,10 @@ cargo install --path .
 ## Quick Start
 
 ```bash
-# Import existing sessions from AI coding tools
-lore import
+# First time? Run init for guided setup
+lore init
 
-# List sessions
+# Or just start using lore - it will prompt for setup automatically
 lore sessions
 
 # View a session
@@ -114,23 +115,53 @@ Sessions linked to commit a1b2c3d:
 $ lore show 7f3a2b1
 ```
 
+## Search
+
+Find any conversation across all your AI coding sessions:
+
+```bash
+# Basic search
+lore search "authentication"
+
+# Filter by tool
+lore search "bug fix" --tool claude-code
+
+# Filter by date range
+lore search "refactor" --since 2025-12-01 --until 2025-12-15
+
+# Filter by project or branch
+lore search "api" --project myapp
+lore search "feature" --branch main
+
+# Combine filters
+lore search "database" --tool aider --project backend --since 2025-12-01
+
+# Show more context around matches
+lore search "error handling" --context 3
+```
+
+Search matches message content, project names, branches, and tool names. Results show surrounding context so you can understand the conversation flow.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
+| `lore init` | Guided first-run setup (auto-detects AI tools) |
 | `lore status` | Show daemon status, watchers, and recent sessions |
 | `lore sessions` | List sessions (supports `--repo`, `--limit`, `--format`) |
 | `lore show <id>` | View session details |
 | `lore show --commit <ref>` | View sessions linked to a commit |
-| `lore import` | Import sessions from AI tools |
+| `lore import` | Import sessions from all enabled watchers |
 | `lore link <id>` | Link session to HEAD |
 | `lore unlink <id>` | Remove a session-commit link |
-| `lore search <query>` | Full-text search across all sessions |
+| `lore search <query>` | Full-text search with filters and context |
 | `lore hooks install` | Install git hooks for automatic linking |
 | `lore daemon start` | Start background watcher for real-time capture |
 | `lore daemon install` | Install daemon as a system service |
 | `lore daemon uninstall` | Remove daemon service |
-| `lore config` | View configuration paths |
+| `lore config` | View configuration |
+| `lore config get <key>` | Get a config value |
+| `lore config set <key> <val>` | Set a config value |
 
 ## Supported Tools
 
@@ -144,6 +175,7 @@ $ lore show 7f3a2b1
 | Continue.dev | Supported | `~/.continue/sessions/` |
 | Cline | Supported | VS Code extension storage |
 | Roo Code | Supported | VS Code extension storage |
+| Kilo Code | Supported | VS Code extension storage |
 | OpenCode | Supported | `~/.local/share/opencode/storage/` |
 
 **Building an AI coding tool?** We welcome contributions to support additional tools. Open an issue with your tool's session storage location and format, or submit a PR adding a watcher. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
@@ -235,6 +267,29 @@ lore sessions --format json
 lore show abc123 --format json
 lore show abc123 --format markdown
 lore status --format json
+```
+
+## Configuration
+
+On first run, Lore prompts for setup automatically. You can also run `lore init` manually.
+
+The init wizard:
+1. Detects installed AI coding tools
+2. Shows which tools have existing sessions
+3. Lets you choose which watchers to enable
+4. Offers to import existing sessions
+
+Configure which tools to track:
+
+```bash
+lore config set watchers claude-code,aider,gemini
+lore config get watchers
+```
+
+For scripting, use `--no-init` to skip the first-run prompt:
+
+```bash
+lore --no-init sessions --format json
 ```
 
 ## Data Location
