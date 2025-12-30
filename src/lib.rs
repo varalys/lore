@@ -14,7 +14,7 @@
 //! - [`git`] - Git repository integration and auto-linking
 //! - [`storage`] - SQLite database operations and data models
 
-/// Session capture from AI coding tools like Claude Code, Cursor, and Copilot.
+/// Session capture from AI coding tools like Claude Code and Copilot.
 pub mod capture;
 
 /// Configuration management for Lore settings.

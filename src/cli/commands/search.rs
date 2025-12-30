@@ -58,8 +58,7 @@ pub struct Args {
     #[arg(long_help = "Only search sessions from a specific AI tool:\n\
         - claude-code: Claude Code CLI sessions\n\
         - aider: Aider sessions\n\
-        - gemini: Gemini sessions\n\
-        - cursor: Cursor editor sessions")]
+        - gemini: Gemini sessions")]
     pub tool: Option<String>,
 
     /// Filter by date - sessions after this date (e.g., 7d, 2w, 1m, or 2024-01-01)

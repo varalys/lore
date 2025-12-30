@@ -6,7 +6,6 @@
 //!
 //! Currently supports:
 //! - Claude Code JSONL files in `~/.claude/projects/`
-//! - Cursor SQLite databases in workspace storage
 
 use anyhow::{Context, Result};
 use notify::RecursiveMode;

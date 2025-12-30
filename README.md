@@ -34,6 +34,7 @@ Lore includes parsers for each supported tool:
 | Continue.dev | JSON |
 | Cline | JSON |
 | Roo Code | JSON |
+| Kilo Code | JSON |
 | OpenCode | JSON |
 
 Import existing sessions with `lore import`, or run `lore daemon start` to watch for new sessions in real-time.
@@ -156,7 +157,11 @@ Search matches message content, project names, branches, and tool names. Results
 | `lore unlink <id>` | Remove a session-commit link |
 | `lore search <query>` | Full-text search with filters and context |
 | `lore hooks install` | Install git hooks for automatic linking |
+| `lore hooks status` | Check installed git hooks |
+| `lore hooks uninstall` | Remove installed git hooks |
 | `lore daemon start` | Start background watcher for real-time capture |
+| `lore daemon stop` | Stop background watcher |
+| `lore daemon logs` | View daemon logs |
 | `lore daemon install` | Install daemon as a system service |
 | `lore daemon uninstall` | Remove daemon service |
 | `lore config` | View configuration |

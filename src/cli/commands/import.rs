@@ -10,7 +10,6 @@
 //! - Cline (VS Code extension storage)
 //! - Codex CLI (JSONL files)
 //! - Continue.dev (JSON session files)
-//! - Cursor IDE (SQLite databases, experimental)
 //! - Gemini CLI (JSON files)
 
 use anyhow::Result;

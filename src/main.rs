@@ -139,7 +139,6 @@ enum Commands {
         - Cline (VS Code extension storage)\n  \
         - Codex CLI (JSONL files in ~/.codex/sessions/)\n  \
         - Continue.dev (JSON files in ~/.continue/sessions/)\n  \
-        - Cursor IDE (SQLite databases, experimental)\n  \
         - Gemini CLI (JSON files in ~/.gemini/tmp/)"
     )]
     Import(commands::import::Args),
