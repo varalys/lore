@@ -10,7 +10,6 @@
 //!
 //! # Future Tools
 //!
-//! - Cursor - Will parse from Cursor's session storage
 //! - GitHub Copilot - Will parse from Copilot's logs
 
 /// Tool-specific session parsers.

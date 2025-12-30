@@ -2,6 +2,7 @@
 name = "lore-cli"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.92.0"
 description = "Capture AI coding sessions and link them to git commits"
 authors = ["Chris Garcia <chris@varalys.com>"]
 license = "Apache-2.0"

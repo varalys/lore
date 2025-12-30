@@ -7,12 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - 2025-12-23
+## [0.1.0] - 2025-12-30
 
 ### Added
 
 - Initial release
-- Session capture from Claude Code, Codex CLI, Gemini CLI, Amp, Aider, Continue.dev, Cline, Roo Code, and OpenCode
+- Session capture from Claude Code, Codex CLI, Gemini CLI, Amp, Aider, Continue.dev, Cline, Roo Code, Kilo Code, and OpenCode
 - SQLite storage with full-text search (FTS5)
 - Manual and automatic session-to-commit linking
 - Background daemon with file watching
