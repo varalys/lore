@@ -3,6 +3,8 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![CI](https://github.com/varalys/lore/actions/workflows/ci.yml/badge.svg)](https://github.com/varalys/lore/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/varalys/lore)](https://github.com/varalys/lore/releases)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20WSL2-blue)
+![Windows](https://img.shields.io/badge/windows-planned-lightgrey)
 
 Lore captures AI coding sessions and links them to git commits.
 
@@ -169,6 +171,12 @@ Search matches message content, project names, branches, and tool names. Results
 | `lore config set <key> <val>` | Set a config value |
 
 ## Supported Tools
+
+Lore targets Linux, macOS, and WSL2. Windows native support is planned for a
+future release. For WSL2, CLI-based tools work as long as the sessions live in
+the Linux filesystem. VS Code extension sessions are only discovered when the
+extensions run in WSL (Remote - WSL); if you run VS Code natively on Windows,
+those sessions live under `%APPDATA%` and are not detected today.
 
 | Tool | Status | Storage Location |
 |------|--------|------------------|
