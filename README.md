@@ -62,6 +62,12 @@ Links are bidirectional: given a session, find its commits; given a commit, find
 
 ## Installation
 
+### Homebrew (macOS)
+
+```bash
+brew install varalys/tap/lore
+```
+
 ### From crates.io
 
 ```bash
@@ -252,14 +258,10 @@ systemctl --user status lore.service
 
 #### macOS with Homebrew
 
-Once a Homebrew formula is available:
-
 ```bash
 brew services start lore
 brew services stop lore
 ```
-
-Until then, use `lore daemon install` or manage launchd manually.
 
 ## Git Hooks
 
