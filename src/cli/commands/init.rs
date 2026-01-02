@@ -533,15 +533,15 @@ fn offer_service_install() -> Result<()> {
 
 /// Offers to start lore as a macOS service using Homebrew.
 fn offer_macos_service() -> Result<()> {
+    print_service_benefits();
+
     if !prompt_yes_no("Start lore as a background service?", true)? {
         print_service_declined_message(OperatingSystem::MacOS);
         return Ok(());
     }
 
     // Check if brew is available
-    let brew_check = std::process::Command::new("brew")
-        .arg("--version")
-        .output();
+    let brew_check = std::process::Command::new("brew").arg("--version").output();
 
     match brew_check {
         Ok(output) if output.status.success() => {
@@ -554,10 +554,7 @@ fn offer_macos_service() -> Result<()> {
             match result {
                 Ok(output) if output.status.success() => {
                     println!("{}", "Lore background service started!".green());
-                    println!(
-                        "{}",
-                        "Sessions will now be captured in real-time.".dimmed()
-                    );
+                    println!("{}", "Sessions will now be captured in real-time.".dimmed());
                 }
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -592,11 +589,7 @@ fn offer_macos_service() -> Result<()> {
             }
         }
         _ => {
-            println!(
-                "{}: {}",
-                "Note".yellow(),
-                "Homebrew not found".dimmed()
-            );
+            println!("{}: {}", "Note".yellow(), "Homebrew not found".dimmed());
             println!(
                 "{}",
                 "To use brew services, install lore via: brew install lore".dimmed()
@@ -613,6 +606,8 @@ fn offer_macos_service() -> Result<()> {
 
 /// Offers to start lore as a Linux systemd user service.
 fn offer_linux_service() -> Result<()> {
+    print_service_benefits();
+
     if !prompt_yes_no("Start lore as a background service?", true)? {
         print_service_declined_message(OperatingSystem::Linux);
         return Ok(());
@@ -660,10 +655,7 @@ fn offer_linux_service() -> Result<()> {
             match result {
                 Ok(output) if output.status.success() => {
                     println!("{}", "Lore background service started!".green());
-                    println!(
-                        "{}",
-                        "Sessions will now be captured in real-time.".dimmed()
-                    );
+                    println!("{}", "Sessions will now be captured in real-time.".dimmed());
                 }
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -694,11 +686,7 @@ fn offer_linux_service() -> Result<()> {
             }
         }
         _ => {
-            println!(
-                "{}: {}",
-                "Note".yellow(),
-                "systemd not found".dimmed()
-            );
+            println!("{}: {}", "Note".yellow(), "systemd not found".dimmed());
             println!(
                 "{}",
                 "You can run 'lore daemon start' manually to start the daemon.".dimmed()
@@ -717,8 +705,7 @@ fn create_systemd_service_file() -> Result<()> {
         .context("Could not find config directory")?
         .join("systemd/user");
 
-    std::fs::create_dir_all(&service_dir)
-        .context("Failed to create systemd user directory")?;
+    std::fs::create_dir_all(&service_dir).context("Failed to create systemd user directory")?;
 
     let service_file = service_dir.join("lore.service");
 
@@ -739,18 +726,30 @@ WantedBy=default.target
     std::fs::write(&service_file, service_content)
         .with_context(|| format!("Failed to write service file: {}", service_file.display()))?;
 
-    println!("Created service file: {}", service_file.display().to_string().dimmed());
+    println!(
+        "Created service file: {}",
+        service_file.display().to_string().dimmed()
+    );
 
     Ok(())
 }
 
+/// Prints the benefits of running lore as a background service.
+///
+/// This is shown before the prompt to help users understand what the
+/// background service provides.
+fn print_service_benefits() {
+    println!("{}", "Background Service".bold());
+    println!();
+    println!("Lore can run as a background service to:");
+    println!("  - Capture sessions in real-time as you work");
+    println!("  - Auto-link sessions to commits when you commit");
+    println!("  - Track branch changes automatically");
+    println!();
+}
+
 /// Prints a message when the user declines service installation.
 fn print_service_declined_message(os: OperatingSystem) {
-    println!();
-    println!("{}", "Without the background service:".yellow());
-    println!("  - Sessions won't be captured in real-time");
-    println!("  - You'll need to run 'lore import' manually");
-    println!("  - Auto-linking to commits won't work");
     println!();
     println!("You can start the service later with:");
     match os {
@@ -840,16 +839,32 @@ mod tests {
         let os = detect_os();
         // Verify we get the expected OS type for the current platform
         #[cfg(target_os = "macos")]
-        assert_eq!(os, OperatingSystem::MacOS, "Expected MacOS on macOS platform");
+        assert_eq!(
+            os,
+            OperatingSystem::MacOS,
+            "Expected MacOS on macOS platform"
+        );
 
         #[cfg(target_os = "linux")]
-        assert_eq!(os, OperatingSystem::Linux, "Expected Linux on Linux platform");
+        assert_eq!(
+            os,
+            OperatingSystem::Linux,
+            "Expected Linux on Linux platform"
+        );
 
         #[cfg(target_os = "windows")]
-        assert_eq!(os, OperatingSystem::Windows, "Expected Windows on Windows platform");
+        assert_eq!(
+            os,
+            OperatingSystem::Windows,
+            "Expected Windows on Windows platform"
+        );
 
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        assert_eq!(os, OperatingSystem::Unknown, "Expected Unknown on unsupported platform");
+        assert_eq!(
+            os,
+            OperatingSystem::Unknown,
+            "Expected Unknown on unsupported platform"
+        );
     }
 
     #[test]

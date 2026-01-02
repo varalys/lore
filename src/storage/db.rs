@@ -1642,7 +1642,10 @@ mod tests {
         let rows = db
             .update_session_branch(nonexistent_id, "some-branch")
             .expect("Failed to update branch");
-        assert_eq!(rows, 0, "Should not update any rows for nonexistent session");
+        assert_eq!(
+            rows, 0,
+            "Should not update any rows for nonexistent session"
+        );
     }
 
     #[test]
