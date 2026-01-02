@@ -142,18 +142,46 @@ fn run_prune(args: PruneArgs) -> Result<()> {
 
     // Show what will be deleted
     let cutoff_display = cutoff.format("%Y-%m-%d");
+
+    if args.dry_run {
+        // Get the actual sessions for detailed listing
+        let sessions = db.get_sessions_older_than(cutoff)?;
+        println!(
+            "Sessions that would be deleted ({} total):",
+            count.to_string().yellow()
+        );
+        println!();
+        for session in &sessions {
+            let id_prefix = &session.id.to_string()[..7];
+            let date = session.started_at.format("%Y-%m-%d");
+            // Shorten long paths for display
+            let dir = if session.working_directory.len() > 40 {
+                format!(
+                    "...{}",
+                    &session.working_directory[session.working_directory.len() - 37..]
+                )
+            } else {
+                session.working_directory.clone()
+            };
+            println!(
+                "  {}  {:14}  {}  {}",
+                id_prefix.cyan(),
+                session.tool.dimmed(),
+                date.to_string().dimmed(),
+                dir
+            );
+        }
+        println!();
+        println!("{}", "(Dry run - no changes made)".dimmed());
+        return Ok(());
+    }
+
     println!(
         "Found {} {} started before {}",
         count.to_string().yellow(),
         if count == 1 { "session" } else { "sessions" },
         cutoff_display.to_string().cyan()
     );
-
-    if args.dry_run {
-        println!();
-        println!("{}", "(Dry run - no changes made)".dimmed());
-        return Ok(());
-    }
 
     // Confirm unless --force
     if !args.force {

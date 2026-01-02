@@ -163,6 +163,7 @@ Search matches message content, project names, branches, and tool names. Results
 | `lore import` | Import sessions from all enabled watchers |
 | `lore link <id>` | Link session to HEAD |
 | `lore unlink <id>` | Remove a session-commit link |
+| `lore delete <id>` | Permanently delete a session |
 | `lore search <query>` | Full-text search with filters and context |
 | `lore hooks install` | Install git hooks for automatic linking |
 | `lore hooks status` | Check installed git hooks |
@@ -172,9 +173,13 @@ Search matches message content, project names, branches, and tool names. Results
 | `lore daemon logs` | View daemon logs |
 | `lore daemon install` | Install daemon as a system service |
 | `lore daemon uninstall` | Remove daemon service |
+| `lore db stats` | Show database statistics |
+| `lore db vacuum` | Reclaim unused disk space |
+| `lore db prune` | Delete old sessions |
 | `lore config` | View configuration |
 | `lore config get <key>` | Get a config value |
 | `lore config set <key> <val>` | Set a config value |
+| `lore completions <shell>` | Generate shell completions |
 
 ## Supported Tools
 
@@ -306,6 +311,75 @@ For scripting, use `--no-init` to skip the first-run prompt:
 ```bash
 lore --no-init sessions --format json
 ```
+
+## Database Management
+
+Lore provides commands for managing the database:
+
+```bash
+# View database statistics
+lore db stats
+
+# Example output:
+# Database Statistics
+#
+#   Sessions:  142
+#   Messages:  8934
+#   Links:     67
+#   File size: 12.45 MB
+#
+# Date Range
+#   Oldest:   2024-06-15 09:23
+#   Newest:   2025-01-02 14:56
+#
+# Sessions by Tool
+#    claude-code:  98
+#          aider:  31
+#         gemini:  13
+
+# Reclaim unused disk space
+lore db vacuum
+
+# Delete old sessions (preview first with --dry-run)
+lore db prune --older-than 90d --dry-run
+lore db prune --older-than 6m --force
+```
+
+Duration formats for `--older-than`:
+- `Nd` - days (e.g., `90d`)
+- `Nw` - weeks (e.g., `12w`)
+- `Nm` - months (e.g., `6m`)
+- `Ny` - years (e.g., `1y`)
+
+## Session Deletion
+
+Delete a single session and all its data:
+
+```bash
+lore delete abc123
+```
+
+This permanently removes the session, its messages, and any commit links.
+
+## Shell Completions
+
+Generate shell completion scripts for tab-completion support:
+
+```bash
+# Bash
+lore completions bash > ~/.local/share/bash-completion/completions/lore
+
+# Zsh
+lore completions zsh > ~/.zfunc/_lore
+
+# Fish
+lore completions fish > ~/.config/fish/completions/lore.fish
+
+# PowerShell
+lore completions powershell >> $PROFILE
+```
+
+After installing completions, restart your shell or source the completion file.
 
 ## Data Location
 

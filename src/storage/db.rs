@@ -1260,6 +1260,30 @@ impl Database {
         Ok(count)
     }
 
+    /// Returns sessions older than the specified date (for dry-run preview).
+    ///
+    /// # Arguments
+    ///
+    /// * `before` - Return sessions that started before this date
+    ///
+    /// # Returns
+    ///
+    /// A vector of sessions that would be deleted, ordered by start date.
+    pub fn get_sessions_older_than(&self, before: DateTime<Utc>) -> Result<Vec<Session>> {
+        let before_str = before.to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count
+             FROM sessions
+             WHERE started_at < ?1
+             ORDER BY started_at ASC",
+        )?;
+
+        let rows = stmt.query_map(params![before_str], Self::row_to_session)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to get sessions older than cutoff")
+    }
+
     /// Returns database statistics including counts and date ranges.
     ///
     /// # Returns
@@ -3087,6 +3111,58 @@ mod tests {
 
         // Verify messages were also deleted
         assert_eq!(db.message_count().expect("count"), 1);
+    }
+
+    #[test]
+    fn test_get_sessions_older_than() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create sessions at different times
+        let old_session = create_test_session(
+            "claude-code",
+            "/project/old",
+            now - Duration::days(100),
+            None,
+        );
+        let medium_session =
+            create_test_session("aider", "/project/medium", now - Duration::days(50), None);
+        let recent_session =
+            create_test_session("gemini", "/project/recent", now - Duration::days(10), None);
+
+        db.insert_session(&old_session).expect("insert old");
+        db.insert_session(&medium_session).expect("insert medium");
+        db.insert_session(&recent_session).expect("insert recent");
+
+        // Get sessions older than 30 days
+        let cutoff = now - Duration::days(30);
+        let sessions = db.get_sessions_older_than(cutoff).expect("get sessions");
+        assert_eq!(
+            sessions.len(),
+            2,
+            "Should find 2 sessions older than 30 days"
+        );
+
+        // Verify sessions are ordered by start date (oldest first)
+        assert_eq!(sessions[0].id, old_session.id);
+        assert_eq!(sessions[1].id, medium_session.id);
+
+        // Verify session data is returned correctly
+        assert_eq!(sessions[0].tool, "claude-code");
+        assert_eq!(sessions[0].working_directory, "/project/old");
+        assert_eq!(sessions[1].tool, "aider");
+        assert_eq!(sessions[1].working_directory, "/project/medium");
+
+        // Get sessions older than 200 days
+        let old_cutoff = now - Duration::days(200);
+        let old_sessions = db
+            .get_sessions_older_than(old_cutoff)
+            .expect("get old sessions");
+        assert_eq!(
+            old_sessions.len(),
+            0,
+            "Should find 0 sessions older than 200 days"
+        );
     }
 
     #[test]

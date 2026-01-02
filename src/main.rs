@@ -6,6 +6,22 @@ use std::thread;
 use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+// Reset SIGPIPE to default behavior on Unix systems.
+// This prevents panics when piping output to commands like `head` that close
+// the pipe early. Without this, writing to a closed pipe causes EPIPE errors
+// which manifest as panics in libraries that don't handle them gracefully.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn reset_sigpipe() {
+    // No-op on non-Unix systems
+}
+
 mod capture;
 mod cli;
 mod config;
@@ -301,6 +317,9 @@ fn command_name(command: &Commands) -> &'static str {
 }
 
 fn main() -> Result<()> {
+    // Handle SIGPIPE to prevent panics when piping to commands like `head`
+    reset_sigpipe();
+
     let cli = Cli::parse();
 
     // Initialize logging
