@@ -385,8 +385,7 @@ fn main() -> Result<()> {
         Commands::Db(args) => commands::db::run(args),
         Commands::Completions(args) => {
             let mut cmd = Cli::command();
-            commands::completions::generate_completions(&mut cmd, args.shell);
-            Ok(())
+            commands::completions::run(args, &mut cmd)
         }
     }
 }

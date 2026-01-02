@@ -8,9 +8,10 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::capture::watchers::{default_registry, WatcherRegistry};
-use crate::cli::commands::import;
+use crate::cli::commands::{completions, import};
 use crate::config::Config;
 use crate::storage::db::default_db_path;
+use clap::CommandFactory;
 
 /// Arguments for the init command.
 #[derive(clap::Args)]
@@ -155,8 +156,6 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     println!();
-    println!("{}", "Setup complete!".green().bold());
-    println!();
     println!("Enabled watchers: {}", selected_watchers.join(", ").cyan());
 
     // Check if there are any sessions to import
@@ -189,6 +188,12 @@ pub fn run(args: Args) -> Result<()> {
         }
     }
 
+    // Offer to install shell completions
+    println!();
+    offer_completions_install()?;
+
+    println!();
+    println!("{}", "Setup complete!".green().bold());
     println!();
     println!("Next steps:");
     if !has_sessions {
@@ -330,6 +335,114 @@ fn prompt_yes_no(prompt: &str, default: bool) -> Result<bool> {
         "n" | "no" => Ok(false),
         _ => Ok(default),
     }
+}
+
+/// Offers to install shell completions for tab-completion.
+///
+/// Auto-detects the shell and installs completions if the user agrees.
+/// If the shell cannot be detected, provides a message to run manually.
+fn offer_completions_install() -> Result<()> {
+    // Try to detect the shell
+    let shell = match completions::detect_shell() {
+        Some(s) => s,
+        None => {
+            println!(
+                "{}",
+                "Could not detect shell. Run 'lore completions install --shell <shell>' manually."
+                    .dimmed()
+            );
+            return Ok(());
+        }
+    };
+
+    let shell_name = match shell {
+        clap_complete::Shell::Bash => "bash",
+        clap_complete::Shell::Zsh => "zsh",
+        clap_complete::Shell::Fish => "fish",
+        clap_complete::Shell::PowerShell => "PowerShell",
+        clap_complete::Shell::Elvish => "elvish",
+        _ => "shell",
+    };
+
+    let prompt = format!(
+        "Install shell completions for tab-completion? ({})",
+        shell_name
+    );
+
+    if !prompt_yes_no(&prompt, true)? {
+        return Ok(());
+    }
+
+    // Get the CLI command for generating completions
+    // We need to import the Cli struct - it is re-exported from main
+    #[derive(clap::Parser)]
+    #[command(name = "lore")]
+    struct LoreCli {
+        #[command(subcommand)]
+        command: LoreCommand,
+    }
+
+    #[derive(clap::Subcommand)]
+    enum LoreCommand {
+        Init,
+        Status,
+        Sessions,
+        Show,
+        Link,
+        Unlink,
+        Delete,
+        Search,
+        Config,
+        Import,
+        Hooks,
+        Daemon,
+        Db,
+        Completions,
+    }
+
+    let mut cmd = LoreCli::command();
+
+    match completions::install_completions(&mut cmd, shell) {
+        Ok(path) => {
+            println!("Detected shell: {}", shell_name.cyan());
+            println!(
+                "Completions installed to: {}",
+                path.display().to_string().cyan()
+            );
+
+            // Show activation instructions
+            let instructions = match shell {
+                clap_complete::Shell::Bash => {
+                    format!("Restart your shell or run: source {}", path.display())
+                }
+                clap_complete::Shell::Zsh => {
+                    "Restart your shell or run: autoload -Uz compinit && compinit".to_string()
+                }
+                clap_complete::Shell::Fish => {
+                    format!("Restart your shell or run: source {}", path.display())
+                }
+                clap_complete::Shell::PowerShell => {
+                    format!("Restart PowerShell or run: . {}", path.display())
+                }
+                clap_complete::Shell::Elvish => "Restart elvish or run: use lore".to_string(),
+                _ => "Restart your shell to activate completions.".to_string(),
+            };
+            println!("{}", instructions.dimmed());
+        }
+        Err(e) => {
+            println!(
+                "{}: {}",
+                "Warning".yellow(),
+                format!("Could not install completions: {}", e).dimmed()
+            );
+            println!(
+                "{}",
+                "Run 'lore completions install' manually later.".dimmed()
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Returns the path where Cursor stores its data.
