@@ -151,23 +151,38 @@ fn run_prune(args: PruneArgs) -> Result<()> {
             count.to_string().yellow()
         );
         println!();
+
+        // Column widths for consistent alignment (matching sessions command)
+        const ID_WIDTH: usize = 8;
+        const STARTED_WIDTH: usize = 16;
+        const MESSAGES_WIDTH: usize = 8;
+        const BRANCH_WIDTH: usize = 12;
+
+        println!(
+            "{}",
+            format!(
+                "{:<ID_WIDTH$}  {:<STARTED_WIDTH$}  {:>MESSAGES_WIDTH$}  {:<BRANCH_WIDTH$}  {}",
+                "ID", "STARTED", "MESSAGES", "BRANCH", "DIRECTORY"
+            )
+            .bold()
+        );
+
         for session in &sessions {
-            let id_prefix = &session.id.to_string()[..7];
-            let date = session.started_at.format("%Y-%m-%d");
-            // Shorten long paths for display
-            let dir = if session.working_directory.len() > 40 {
-                format!(
-                    "...{}",
-                    &session.working_directory[session.working_directory.len() - 37..]
-                )
-            } else {
-                session.working_directory.clone()
-            };
+            let id_short = &session.id.to_string()[..8];
+            let started = session.started_at.format("%Y-%m-%d %H:%M").to_string();
+            let branch = session.git_branch.as_deref().unwrap_or("-");
+            let dir = session
+                .working_directory
+                .split('/')
+                .next_back()
+                .unwrap_or(&session.working_directory);
+
             println!(
-                "  {}  {:14}  {}  {}",
-                id_prefix.cyan(),
-                session.tool.dimmed(),
-                date.to_string().dimmed(),
+                "{:<ID_WIDTH$}  {:<STARTED_WIDTH$}  {:>MESSAGES_WIDTH$}  {:<BRANCH_WIDTH$}  {}",
+                id_short.cyan(),
+                started.dimmed(),
+                session.message_count,
+                branch.yellow(),
                 dir
             );
         }
