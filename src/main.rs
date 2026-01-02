@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::io::{self, IsTerminal, Write};
 use std::sync::mpsc;
 use std::thread;
@@ -46,7 +46,7 @@ const PROMPT_TIMEOUT_SECS: u64 = 30;
     lore search \"auth\"       Search sessions for text\n    \
     lore daemon start        Start background watcher\n\n\
     For more information about a command, run 'lore <command> --help'.")]
-struct Cli {
+pub struct Cli {
     #[command(subcommand)]
     command: Commands,
 
@@ -114,6 +114,14 @@ enum Commands {
     )]
     Unlink(commands::unlink::Args),
 
+    /// Permanently delete a session and its data
+    #[command(
+        long_about = "Permanently removes a session and all its associated data\n\
+        (messages and links) from the database. This operation cannot\n\
+        be undone."
+    )]
+    Delete(commands::delete::Args),
+
     /// Search session content using full-text search
     #[command(
         long_about = "Searches message content using SQLite FTS5 full-text search.\n\
@@ -157,6 +165,21 @@ enum Commands {
         sessions and automatically imports them into the database."
     )]
     Daemon(commands::daemon::Args),
+
+    /// Manage the database (vacuum, prune, stats)
+    #[command(
+        long_about = "Database management commands for maintenance and statistics.\n\
+        Includes vacuum (reclaim space), prune (delete old sessions),\n\
+        and stats (show database statistics)."
+    )]
+    Db(commands::db::Args),
+
+    /// Generate shell completions
+    #[command(
+        long_about = "Generates shell completion scripts for various shells.\n\
+        Output to stdout for redirection to the appropriate file."
+    )]
+    Completions(commands::completions::Args),
 }
 
 /// Checks if Lore is configured (config file exists).
@@ -171,8 +194,12 @@ fn is_configured() -> bool {
 /// Commands that should skip:
 /// - `init` (the setup command itself)
 /// - `config` (should work without init for debugging)
+/// - `completions` (should work without init for shell setup)
 fn should_skip_first_run_prompt(command: &Commands) -> bool {
-    matches!(command, Commands::Init(_) | Commands::Config(_))
+    matches!(
+        command,
+        Commands::Init(_) | Commands::Config(_) | Commands::Completions(_)
+    )
 }
 
 /// Checks if stdin is connected to a terminal (interactive mode).
@@ -262,11 +289,14 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Show(_) => "show",
         Commands::Link(_) => "link",
         Commands::Unlink(_) => "unlink",
+        Commands::Delete(_) => "delete",
         Commands::Search(_) => "search",
         Commands::Config(_) => "config",
         Commands::Import(_) => "import",
         Commands::Hooks(_) => "hooks",
         Commands::Daemon(_) => "daemon",
+        Commands::Db(_) => "db",
+        Commands::Completions(_) => "completions",
     }
 }
 
@@ -327,11 +357,18 @@ fn main() -> Result<()> {
         Commands::Show(args) => commands::show::run(args),
         Commands::Link(args) => commands::link::run(args),
         Commands::Unlink(args) => commands::unlink::run(args),
+        Commands::Delete(args) => commands::delete::run(args),
         Commands::Search(args) => commands::search::run(args),
         Commands::Config(args) => commands::config::run(args),
         Commands::Import(args) => commands::import::run(args),
         Commands::Hooks(args) => commands::hooks::run(args),
         Commands::Daemon(args) => commands::daemon::run(args),
+        Commands::Db(args) => commands::db::run(args),
+        Commands::Completions(args) => {
+            let mut cmd = Cli::command();
+            commands::completions::generate_completions(&mut cmd, args.shell);
+            Ok(())
+        }
     }
 }
 
@@ -461,5 +498,70 @@ mod tests {
         assert_ne!(PromptResult::Yes, PromptResult::No);
         assert_ne!(PromptResult::Yes, PromptResult::Timeout);
         assert_ne!(PromptResult::No, PromptResult::Timeout);
+    }
+
+    #[test]
+    fn test_completions_bash() {
+        use clap_complete::{generate, Shell};
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        generate(Shell::Bash, &mut cmd, "lore", &mut buf);
+        let output = String::from_utf8(buf).expect("valid utf8");
+        assert!(
+            output.contains("_lore"),
+            "Should contain bash completion function"
+        );
+    }
+
+    #[test]
+    fn test_completions_zsh() {
+        use clap_complete::{generate, Shell};
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        generate(Shell::Zsh, &mut cmd, "lore", &mut buf);
+        let output = String::from_utf8(buf).expect("valid utf8");
+        assert!(
+            output.contains("#compdef lore"),
+            "Should contain zsh compdef"
+        );
+    }
+
+    #[test]
+    fn test_completions_fish() {
+        use clap_complete::{generate, Shell};
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        generate(Shell::Fish, &mut cmd, "lore", &mut buf);
+        let output = String::from_utf8(buf).expect("valid utf8");
+        assert!(
+            output.contains("complete -c lore"),
+            "Should contain fish completion"
+        );
+    }
+
+    #[test]
+    fn test_completions_powershell() {
+        use clap_complete::{generate, Shell};
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        generate(Shell::PowerShell, &mut cmd, "lore", &mut buf);
+        let output = String::from_utf8(buf).expect("valid utf8");
+        assert!(
+            output.contains("Register-ArgumentCompleter"),
+            "Should contain powershell completer"
+        );
+    }
+
+    #[test]
+    fn test_completions_elvish() {
+        use clap_complete::{generate, Shell};
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        generate(Shell::Elvish, &mut cmd, "lore", &mut buf);
+        let output = String::from_utf8(buf).expect("valid utf8");
+        assert!(
+            output.contains("set edit:completion"),
+            "Should contain elvish completion"
+        );
     }
 }

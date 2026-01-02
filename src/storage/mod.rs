@@ -16,6 +16,7 @@ pub mod db;
 pub mod models;
 
 pub use db::Database;
+// DatabaseStats is also available at crate::storage::db::DatabaseStats if needed
 pub use models::{
     extract_session_files, ContentBlock, LinkCreator, LinkType, MessageContent, MessageRole,
     SessionLink,

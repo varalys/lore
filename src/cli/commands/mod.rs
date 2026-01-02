@@ -3,20 +3,29 @@
 //! Each submodule implements a single CLI command with its argument
 //! parsing and execution logic.
 
+/// Shell completion script generation.
+pub mod completions;
+
 /// Configuration viewing and management.
 pub mod config;
 
-/// Guided first-run setup.
-pub mod init;
-
 /// Background daemon management (start, stop, status, logs).
 pub mod daemon;
+
+/// Database management (vacuum, prune, stats).
+pub mod db;
+
+/// Permanently delete a session and its data.
+pub mod delete;
 
 /// Git hooks management (install, uninstall, status).
 pub mod hooks;
 
 /// Import sessions from AI coding tools.
 pub mod import;
+
+/// Guided first-run setup.
+pub mod init;
 
 /// Link sessions to git commits.
 pub mod link;
@@ -33,5 +42,5 @@ pub mod show;
 /// Show current Lore status and recent sessions.
 pub mod status;
 
-/// Remove session-to-commit links (not yet implemented).
+/// Remove session-to-commit links.
 pub mod unlink;
