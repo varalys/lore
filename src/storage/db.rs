@@ -450,9 +450,9 @@ impl Database {
     /// Returns an empty vector if the session has no messages or all messages
     /// have None branches.
     pub fn get_session_branch_history(&self, session_id: Uuid) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT git_branch FROM messages WHERE session_id = ?1 ORDER BY idx",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT git_branch FROM messages WHERE session_id = ?1 ORDER BY idx")?;
 
         let rows = stmt.query_map(params![session_id.to_string()], |row| {
             let branch: Option<String> = row.get(0)?;
@@ -3355,7 +3355,8 @@ mod tests {
     fn test_get_session_branch_history_no_messages() {
         let (db, _dir) = create_test_db();
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         let branches = db
             .get_session_branch_history(session.id)
@@ -3368,7 +3369,8 @@ mod tests {
     fn test_get_session_branch_history_single_branch() {
         let (db, _dir) = create_test_db();
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         // Insert messages all on the same branch
         for i in 0..3 {
@@ -3388,13 +3390,13 @@ mod tests {
     fn test_get_session_branch_history_multiple_branches() {
         let (db, _dir) = create_test_db();
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         // Insert messages with branch transitions: main -> feat/auth -> main
         let branch_sequence = ["main", "main", "feat/auth", "feat/auth", "main"];
         for (i, branch) in branch_sequence.iter().enumerate() {
-            let mut msg =
-                create_test_message(session.id, i as i32, MessageRole::User, "test");
+            let mut msg = create_test_message(session.id, i as i32, MessageRole::User, "test");
             msg.git_branch = Some(branch.to_string());
             db.insert_message(&msg).expect("Failed to insert message");
         }
@@ -3414,7 +3416,8 @@ mod tests {
     fn test_get_session_branch_history_with_none_branches() {
         let (db, _dir) = create_test_db();
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         // Insert messages with a mix of Some and None branches
         let mut msg1 = create_test_message(session.id, 0, MessageRole::User, "test");
@@ -3444,7 +3447,8 @@ mod tests {
     fn test_get_session_branch_history_all_none_branches() {
         let (db, _dir) = create_test_db();
         let session = create_test_session("claude-code", "/project", Utc::now(), None);
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         // Insert messages with no branch info
         for i in 0..3 {
