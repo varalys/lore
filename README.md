@@ -383,10 +383,11 @@ You can also output completions to stdout for manual installation:
 lore completions bash > ~/.local/share/bash-completion/completions/lore
 lore completions zsh > ~/.zfunc/_lore
 lore completions fish > ~/.config/fish/completions/lore.fish
-lore completions powershell >> $PROFILE
 ```
 
 After installing, restart your shell or source the completion file.
+
+PowerShell and Elvish completions are also available (`lore completions powershell`, `lore completions elvish`) and will be documented when Windows support is added.
 
 ## Data Location
 
