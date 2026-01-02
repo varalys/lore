@@ -248,6 +248,13 @@ fn run_status() -> Result<()> {
 
     if !state.is_running() {
         println!("{}", "Daemon is not running".yellow());
+
+        // Show service installation status even when daemon is not running
+        #[cfg(target_os = "macos")]
+        {
+            print_service_installation_status()?;
+        }
+
         return Ok(());
     }
 
@@ -296,6 +303,12 @@ fn run_status() -> Result<()> {
                     );
                 }
             }
+
+            // Show service installation status
+            #[cfg(target_os = "macos")]
+            {
+                print_service_installation_status()?;
+            }
         }
         Ok(_) => {
             // Unexpected response, just show basic info
@@ -303,6 +316,11 @@ fn run_status() -> Result<()> {
             println!();
             println!("  {} {}", "Status:".dimmed(), "running".green());
             println!("  {} {}", "PID:".dimmed(), pid);
+
+            #[cfg(target_os = "macos")]
+            {
+                print_service_installation_status()?;
+            }
         }
         Err(e) => {
             // Can't connect to socket, but PID file exists
@@ -316,6 +334,54 @@ fn run_status() -> Result<()> {
                 "(socket unavailable)".dimmed()
             );
             println!("  {} {}", "PID:".dimmed(), pid);
+
+            #[cfg(target_os = "macos")]
+            {
+                print_service_installation_status()?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Prints the service installation status on macOS.
+///
+/// Reports whether the daemon is installed as a native service (via `lore daemon install`)
+/// or as a Homebrew-managed service (via `brew services start lore`).
+#[cfg(target_os = "macos")]
+fn print_service_installation_status() -> Result<()> {
+    let native_plist = get_launchd_plist_path()?;
+    let brew_plist = get_homebrew_plist_path()?;
+
+    let native_exists = native_plist.exists();
+    let brew_exists = brew_plist.exists();
+
+    if native_exists || brew_exists {
+        println!();
+        println!("{}", "Service Installation".green().bold());
+        println!();
+
+        if native_exists {
+            println!("  {} {}", "Native service:".dimmed(), "installed".green());
+            println!("  {} {}", "Plist:".dimmed(), native_plist.display());
+        }
+
+        if brew_exists {
+            println!("  {} {}", "Homebrew service:".dimmed(), "installed".green());
+            println!("  {} {}", "Plist:".dimmed(), brew_plist.display());
+        }
+
+        if native_exists && brew_exists {
+            println!();
+            println!(
+                "{}",
+                "Warning: Both native and Homebrew services are installed.".yellow()
+            );
+            println!(
+                "{}",
+                "Consider uninstalling one to avoid conflicts.".dimmed()
+            );
         }
     }
 
@@ -403,6 +469,8 @@ fn run_logs(lines: usize, follow: bool) -> Result<()> {
 // Service installation constants
 #[cfg(any(target_os = "macos", test))]
 const LAUNCHD_LABEL: &str = "com.lore.daemon";
+#[cfg(any(target_os = "macos", test))]
+const HOMEBREW_PLIST_NAME: &str = "homebrew.mxcl.lore.plist";
 #[cfg(any(target_os = "linux", test))]
 const SYSTEMD_SERVICE_NAME: &str = "lore";
 
@@ -480,6 +548,16 @@ fn get_launchd_plist_path() -> Result<std::path::PathBuf> {
     Ok(home
         .join("Library/LaunchAgents")
         .join(format!("{LAUNCHD_LABEL}.plist")))
+}
+
+/// Gets the path to the Homebrew-managed launchd plist file.
+///
+/// Homebrew installs its own plist with a different naming convention
+/// when users run `brew services start lore`.
+#[cfg(any(target_os = "macos", test))]
+fn get_homebrew_plist_path() -> Result<std::path::PathBuf> {
+    let home = dirs::home_dir().context("Could not find home directory")?;
+    Ok(home.join("Library/LaunchAgents").join(HOMEBREW_PLIST_NAME))
 }
 
 /// Gets the path to the systemd user unit file.
@@ -682,40 +760,93 @@ fn run_uninstall() -> Result<()> {
 }
 
 /// Uninstalls the macOS launchd service.
+///
+/// Handles both native installations (created by `lore daemon install`) and
+/// Homebrew-managed installations (created by `brew services start lore`).
 #[cfg(target_os = "macos")]
 fn uninstall_launchd_service() -> Result<()> {
-    let plist_path = get_launchd_plist_path()?;
+    let native_plist = get_launchd_plist_path()?;
+    let brew_plist = get_homebrew_plist_path()?;
 
-    if !plist_path.exists() {
+    let native_exists = native_plist.exists();
+    let brew_exists = brew_plist.exists();
+
+    if !native_exists && !brew_exists {
         println!("{}", "Service is not installed".yellow());
         return Ok(());
     }
 
-    println!("{}", "Uninstalling Lore daemon service...".green());
+    // Handle Homebrew-managed service
+    if brew_exists {
+        println!("{}", "Stopping Homebrew-managed service...".green());
 
-    // Unload the service first (this also stops it)
-    let output = Command::new("launchctl")
-        .args(["unload", "-w"])
-        .arg(&plist_path)
-        .output()
-        .context("Failed to run launchctl unload")?;
+        let output = Command::new("brew")
+            .args(["services", "stop", "lore"])
+            .output();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Only warn, don't fail - the service might not be loaded
-        if !stderr.contains("Could not find specified service") {
-            println!(
-                "{} launchctl unload: {}",
-                "Warning:".yellow(),
-                stderr.trim()
-            );
+        match output {
+            Ok(result) => {
+                if !result.status.success() {
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    // Only warn, do not fail - service might already be stopped
+                    if !stderr.is_empty() {
+                        println!(
+                            "{} brew services stop: {}",
+                            "Warning:".yellow(),
+                            stderr.trim()
+                        );
+                    }
+                } else {
+                    println!(
+                        "{} Homebrew service stopped and removed",
+                        "Success:".green()
+                    );
+                }
+            }
+            Err(e) => {
+                // brew command not found or other error
+                println!(
+                    "{} Could not run 'brew services stop': {}",
+                    "Warning:".yellow(),
+                    e
+                );
+                println!(
+                    "{}",
+                    "You may need to manually run: brew services stop lore".dimmed()
+                );
+            }
         }
     }
 
-    // Remove the plist file
-    std::fs::remove_file(&plist_path).context("Failed to remove plist file")?;
+    // Handle native service
+    if native_exists {
+        println!("{}", "Uninstalling native Lore daemon service...".green());
 
-    println!("{}", "Service uninstalled successfully!".green());
+        // Unload the service first (this also stops it)
+        let output = Command::new("launchctl")
+            .args(["unload", "-w"])
+            .arg(&native_plist)
+            .output()
+            .context("Failed to run launchctl unload")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Only warn, do not fail - the service might not be loaded
+            if !stderr.contains("Could not find specified service") {
+                println!(
+                    "{} launchctl unload: {}",
+                    "Warning:".yellow(),
+                    stderr.trim()
+                );
+            }
+        }
+
+        // Remove the plist file
+        std::fs::remove_file(&native_plist).context("Failed to remove plist file")?;
+
+        println!("{} Native service removed", "Success:".green());
+    }
+
     println!();
     println!(
         "{}",
@@ -984,6 +1115,22 @@ mod tests {
         assert!(
             unit.contains("/path/with spaces/lore"),
             "Unit file should preserve spaces in paths"
+        );
+    }
+
+    #[test]
+    fn test_homebrew_plist_path() {
+        let path = get_homebrew_plist_path();
+        assert!(path.is_ok(), "Should get homebrew plist path");
+
+        let path = path.unwrap();
+        assert!(
+            path.to_string_lossy().contains("Library/LaunchAgents"),
+            "Path should be in LaunchAgents directory"
+        );
+        assert!(
+            path.to_string_lossy().contains(HOMEBREW_PLIST_NAME),
+            "Path should end with homebrew.mxcl.lore.plist"
         );
     }
 }
