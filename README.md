@@ -95,6 +95,11 @@ lore init
 # Or just start using lore - it will prompt for setup automatically
 lore sessions
 
+# Example output - shows branch transitions during each session
+# ID        STARTED           MESSAGES  BRANCH                    DIRECTORY
+# c9731a91  2025-12-25 17:52       566  main -> feat/auth -> main myapp
+# 24af9690  2025-12-22 19:13      1910  feat/phase-0-foundati...  lore
+
 # View a session
 lore show abc123
 
@@ -157,7 +162,7 @@ Search matches message content, project names, branches, and tool names. Results
 |---------|-------------|
 | `lore init` | Guided first-run setup (auto-detects AI tools) |
 | `lore status` | Show daemon status, watchers, and recent sessions |
-| `lore sessions` | List sessions (supports `--repo`, `--limit`, `--format`) |
+| `lore sessions` | List sessions with branch history (supports `--repo`, `--limit`, `--format`) |
 | `lore show <id>` | View session details |
 | `lore show --commit <ref>` | View sessions linked to a commit |
 | `lore import` | Import sessions from all enabled watchers |
