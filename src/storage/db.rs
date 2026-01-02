@@ -307,6 +307,30 @@ impl Database {
         Ok(count > 0)
     }
 
+    /// Updates the git branch for a session.
+    ///
+    /// Used by the daemon when a message is processed with a different branch
+    /// than the session's current branch, indicating a branch switch mid-session.
+    /// Also updates the sessions_fts index to keep search in sync.
+    ///
+    /// Returns the number of rows affected (0 or 1).
+    pub fn update_session_branch(&self, session_id: Uuid, new_branch: &str) -> Result<usize> {
+        let rows_changed = self.conn.execute(
+            "UPDATE sessions SET git_branch = ?1 WHERE id = ?2",
+            params![new_branch, session_id.to_string()],
+        )?;
+
+        // Also update the FTS index if the session was updated
+        if rows_changed > 0 {
+            self.conn.execute(
+                "UPDATE sessions_fts SET git_branch = ?1 WHERE session_id = ?2",
+                params![new_branch, session_id.to_string()],
+            )?;
+        }
+
+        Ok(rows_changed)
+    }
+
     fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         let ended_at_str: Option<String> = row.get(4)?;
         let ended_at = match ended_at_str {
@@ -1574,6 +1598,84 @@ mod tests {
                 .expect("Failed to check existence"),
             "Different source path should not exist"
         );
+    }
+
+    #[test]
+    fn test_update_session_branch() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create session with initial branch
+        let mut session = create_test_session("claude-code", "/project", now, None);
+        session.git_branch = Some("main".to_string());
+
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Verify initial branch
+        let fetched = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(fetched.git_branch, Some("main".to_string()));
+
+        // Update branch
+        let rows = db
+            .update_session_branch(session.id, "feature-branch")
+            .expect("Failed to update branch");
+        assert_eq!(rows, 1, "Should update exactly one row");
+
+        // Verify updated branch
+        let fetched = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(fetched.git_branch, Some("feature-branch".to_string()));
+    }
+
+    #[test]
+    fn test_update_session_branch_nonexistent() {
+        let (db, _dir) = create_test_db();
+        let nonexistent_id = Uuid::new_v4();
+
+        // Updating a nonexistent session should return 0 rows
+        let rows = db
+            .update_session_branch(nonexistent_id, "some-branch")
+            .expect("Failed to update branch");
+        assert_eq!(rows, 0, "Should not update any rows for nonexistent session");
+    }
+
+    #[test]
+    fn test_update_session_branch_from_none() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create session without initial branch
+        let mut session = create_test_session("claude-code", "/project", now, None);
+        session.git_branch = None; // Explicitly set to None for this test
+
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Verify no initial branch
+        let fetched = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(fetched.git_branch, None);
+
+        // Update branch from None to a value
+        let rows = db
+            .update_session_branch(session.id, "new-branch")
+            .expect("Failed to update branch");
+        assert_eq!(rows, 1, "Should update exactly one row");
+
+        // Verify updated branch
+        let fetched = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(fetched.git_branch, Some("new-branch".to_string()));
     }
 
     #[test]

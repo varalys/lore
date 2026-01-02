@@ -192,6 +192,10 @@ pub fn run(args: Args) -> Result<()> {
     println!();
     offer_completions_install()?;
 
+    // Offer to start background service
+    println!();
+    offer_service_install()?;
+
     println!();
     println!("{}", "Setup complete!".green().bold());
     println!();
@@ -445,6 +449,323 @@ fn offer_completions_install() -> Result<()> {
     Ok(())
 }
 
+/// Operating system types for service management.
+///
+/// Some variants may appear unused on certain platforms but are required
+/// for cross-platform compilation support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum OperatingSystem {
+    /// macOS - uses brew services
+    MacOS,
+    /// Linux - uses systemd user services
+    Linux,
+    /// Windows - service management not yet supported
+    Windows,
+    /// Unknown operating system
+    Unknown,
+}
+
+impl std::fmt::Display for OperatingSystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OperatingSystem::MacOS => write!(f, "macOS"),
+            OperatingSystem::Linux => write!(f, "Linux"),
+            OperatingSystem::Windows => write!(f, "Windows"),
+            OperatingSystem::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+/// Detects the current operating system.
+///
+/// Returns an enum variant indicating the detected OS type.
+pub fn detect_os() -> OperatingSystem {
+    #[cfg(target_os = "macos")]
+    {
+        OperatingSystem::MacOS
+    }
+    #[cfg(target_os = "linux")]
+    {
+        OperatingSystem::Linux
+    }
+    #[cfg(target_os = "windows")]
+    {
+        OperatingSystem::Windows
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        OperatingSystem::Unknown
+    }
+}
+
+/// Offers to start the lore background service.
+///
+/// Detects the OS and provides appropriate service installation:
+/// - macOS: Uses `brew services start lore`
+/// - Linux: Creates systemd user service and enables it
+fn offer_service_install() -> Result<()> {
+    let os = detect_os();
+
+    match os {
+        OperatingSystem::MacOS => offer_macos_service()?,
+        OperatingSystem::Linux => offer_linux_service()?,
+        OperatingSystem::Windows => {
+            println!(
+                "{}",
+                "Windows service management is not yet supported.".dimmed()
+            );
+            println!(
+                "{}",
+                "You can run 'lore daemon start' manually to start the daemon.".dimmed()
+            );
+        }
+        OperatingSystem::Unknown => {
+            println!(
+                "{}",
+                "Could not detect OS. You can run 'lore daemon start' manually.".dimmed()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Offers to start lore as a macOS service using Homebrew.
+fn offer_macos_service() -> Result<()> {
+    if !prompt_yes_no("Start lore as a background service?", true)? {
+        print_service_declined_message(OperatingSystem::MacOS);
+        return Ok(());
+    }
+
+    // Check if brew is available
+    let brew_check = std::process::Command::new("brew")
+        .arg("--version")
+        .output();
+
+    match brew_check {
+        Ok(output) if output.status.success() => {
+            println!("Starting lore service via Homebrew...");
+
+            let result = std::process::Command::new("brew")
+                .args(["services", "start", "lore"])
+                .output();
+
+            match result {
+                Ok(output) if output.status.success() => {
+                    println!("{}", "Lore background service started!".green());
+                    println!(
+                        "{}",
+                        "Sessions will now be captured in real-time.".dimmed()
+                    );
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!(
+                        "{}: {}",
+                        "Warning".yellow(),
+                        "Failed to start service via brew".dimmed()
+                    );
+                    if !stderr.is_empty() {
+                        println!("  {}", stderr.trim().dimmed());
+                    }
+                    println!(
+                        "{}",
+                        "You may need to install lore via 'brew install lore' first.".dimmed()
+                    );
+                    println!(
+                        "{}",
+                        "Or run 'lore daemon start' manually to start the daemon.".dimmed()
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "{}: {}",
+                        "Warning".yellow(),
+                        format!("Failed to run brew: {}", e).dimmed()
+                    );
+                    println!(
+                        "{}",
+                        "You can run 'lore daemon start' manually instead.".dimmed()
+                    );
+                }
+            }
+        }
+        _ => {
+            println!(
+                "{}: {}",
+                "Note".yellow(),
+                "Homebrew not found".dimmed()
+            );
+            println!(
+                "{}",
+                "To use brew services, install lore via: brew install lore".dimmed()
+            );
+            println!(
+                "{}",
+                "Or run 'lore daemon start' manually to start the daemon.".dimmed()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Offers to start lore as a Linux systemd user service.
+fn offer_linux_service() -> Result<()> {
+    if !prompt_yes_no("Start lore as a background service?", true)? {
+        print_service_declined_message(OperatingSystem::Linux);
+        return Ok(());
+    }
+
+    // Check if systemctl is available
+    let systemctl_check = std::process::Command::new("systemctl")
+        .arg("--version")
+        .output();
+
+    match systemctl_check {
+        Ok(output) if output.status.success() => {
+            // Create systemd user service directory and file
+            if let Err(e) = create_systemd_service_file() {
+                println!(
+                    "{}: {}",
+                    "Warning".yellow(),
+                    format!("Failed to create service file: {}", e).dimmed()
+                );
+                println!(
+                    "{}",
+                    "You can run 'lore daemon start' manually instead.".dimmed()
+                );
+                return Ok(());
+            }
+
+            // Reload systemd user daemon
+            let reload = std::process::Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .output();
+
+            if let Err(e) = reload {
+                println!(
+                    "{}: {}",
+                    "Warning".yellow(),
+                    format!("Failed to reload systemd: {}", e).dimmed()
+                );
+            }
+
+            // Enable and start the service
+            let result = std::process::Command::new("systemctl")
+                .args(["--user", "enable", "--now", "lore"])
+                .output();
+
+            match result {
+                Ok(output) if output.status.success() => {
+                    println!("{}", "Lore background service started!".green());
+                    println!(
+                        "{}",
+                        "Sessions will now be captured in real-time.".dimmed()
+                    );
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!(
+                        "{}: {}",
+                        "Warning".yellow(),
+                        "Failed to enable service".dimmed()
+                    );
+                    if !stderr.is_empty() {
+                        println!("  {}", stderr.trim().dimmed());
+                    }
+                    println!(
+                        "{}",
+                        "You can run 'lore daemon start' manually instead.".dimmed()
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "{}: {}",
+                        "Warning".yellow(),
+                        format!("Failed to run systemctl: {}", e).dimmed()
+                    );
+                    println!(
+                        "{}",
+                        "You can run 'lore daemon start' manually instead.".dimmed()
+                    );
+                }
+            }
+        }
+        _ => {
+            println!(
+                "{}: {}",
+                "Note".yellow(),
+                "systemd not found".dimmed()
+            );
+            println!(
+                "{}",
+                "You can run 'lore daemon start' manually to start the daemon.".dimmed()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Creates the systemd user service file for lore.
+///
+/// Creates the file at ~/.config/systemd/user/lore.service
+fn create_systemd_service_file() -> Result<()> {
+    let service_dir = dirs::config_dir()
+        .context("Could not find config directory")?
+        .join("systemd/user");
+
+    std::fs::create_dir_all(&service_dir)
+        .context("Failed to create systemd user directory")?;
+
+    let service_file = service_dir.join("lore.service");
+
+    let service_content = r#"[Unit]
+Description=Lore - Reasoning history for code
+Documentation=https://github.com/varalys/lore
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/lore daemon run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"#;
+
+    std::fs::write(&service_file, service_content)
+        .with_context(|| format!("Failed to write service file: {}", service_file.display()))?;
+
+    println!("Created service file: {}", service_file.display().to_string().dimmed());
+
+    Ok(())
+}
+
+/// Prints a message when the user declines service installation.
+fn print_service_declined_message(os: OperatingSystem) {
+    println!();
+    println!("{}", "Without the background service:".yellow());
+    println!("  - Sessions won't be captured in real-time");
+    println!("  - You'll need to run 'lore import' manually");
+    println!("  - Auto-linking to commits won't work");
+    println!();
+    println!("You can start the service later with:");
+    match os {
+        OperatingSystem::MacOS => {
+            println!("  {}", "brew services start lore".cyan());
+        }
+        OperatingSystem::Linux => {
+            println!("  {}", "systemctl --user enable --now lore".cyan());
+        }
+        _ => {
+            println!("  {}", "lore daemon start".cyan());
+        }
+    }
+}
+
 /// Returns the path where Cursor stores its data.
 ///
 /// - macOS: ~/Library/Application Support/Cursor/
@@ -512,5 +833,45 @@ mod tests {
         let path = cursor_data_path();
         // Should return a path that contains "Cursor" somewhere
         assert!(path.to_string_lossy().contains("Cursor"));
+    }
+
+    #[test]
+    fn test_detect_os_returns_expected_type() {
+        let os = detect_os();
+        // Verify we get the expected OS type for the current platform
+        #[cfg(target_os = "macos")]
+        assert_eq!(os, OperatingSystem::MacOS, "Expected MacOS on macOS platform");
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(os, OperatingSystem::Linux, "Expected Linux on Linux platform");
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(os, OperatingSystem::Windows, "Expected Windows on Windows platform");
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        assert_eq!(os, OperatingSystem::Unknown, "Expected Unknown on unsupported platform");
+    }
+
+    #[test]
+    fn test_operating_system_display() {
+        assert_eq!(format!("{}", OperatingSystem::MacOS), "macOS");
+        assert_eq!(format!("{}", OperatingSystem::Linux), "Linux");
+        assert_eq!(format!("{}", OperatingSystem::Windows), "Windows");
+        assert_eq!(format!("{}", OperatingSystem::Unknown), "Unknown");
+    }
+
+    #[test]
+    fn test_operating_system_equality() {
+        assert_eq!(OperatingSystem::MacOS, OperatingSystem::MacOS);
+        assert_eq!(OperatingSystem::Linux, OperatingSystem::Linux);
+        assert_ne!(OperatingSystem::MacOS, OperatingSystem::Linux);
+        assert_ne!(OperatingSystem::Windows, OperatingSystem::Unknown);
+    }
+
+    #[test]
+    fn test_operating_system_clone() {
+        let os = OperatingSystem::MacOS;
+        let cloned = os;
+        assert_eq!(os, cloned);
     }
 }

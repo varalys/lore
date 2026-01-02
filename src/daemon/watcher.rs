@@ -364,9 +364,34 @@ impl SessionWatcher {
             // Store session
             db.insert_session(&session)?;
 
-            // Store messages
+            // Store messages and track the most recent branch
+            let mut latest_branch: Option<String> = None;
             for msg in &messages {
                 db.insert_message(msg)?;
+                // Track the branch from the most recent message that has one
+                if msg.git_branch.is_some() {
+                    latest_branch = msg.git_branch.clone();
+                }
+            }
+
+            // Update session branch if the latest message has a different branch
+            // This handles the case where the user switches branches mid-session
+            if let Some(ref new_branch) = latest_branch {
+                if session.git_branch.as_ref() != Some(new_branch) {
+                    if let Err(e) = db.update_session_branch(session.id, new_branch) {
+                        tracing::warn!(
+                            "Failed to update session branch for {}: {}",
+                            &session.id.to_string()[..8],
+                            e
+                        );
+                    } else {
+                        tracing::debug!(
+                            "Updated session {} branch to {}",
+                            &session.id.to_string()[..8],
+                            new_branch
+                        );
+                    }
+                }
             }
 
             tracing::info!(
