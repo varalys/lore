@@ -73,7 +73,7 @@ pub fn run(args: Args) -> Result<()> {
             const ID_WIDTH: usize = 8;
             const STARTED_WIDTH: usize = 16;
             const MESSAGES_WIDTH: usize = 8;
-            const BRANCH_WIDTH: usize = 12;
+            const BRANCH_WIDTH: usize = 24;
 
             println!(
                 "{}",
@@ -84,10 +84,11 @@ pub fn run(args: Args) -> Result<()> {
                 .bold()
             );
 
-            for session in sessions {
+            for session in &sessions {
                 let id_short = &session.id.to_string()[..8];
                 let started = session.started_at.format("%Y-%m-%d %H:%M").to_string();
-                let branch = session.git_branch.as_deref().unwrap_or("-");
+                let branch_history = db.get_session_branch_history(session.id)?;
+                let branch_display = format_branch_history(&branch_history);
                 let dir = session
                     .working_directory
                     .split('/')
@@ -99,7 +100,7 @@ pub fn run(args: Args) -> Result<()> {
                     id_short.cyan(),
                     started.dimmed(),
                     session.message_count,
-                    branch.yellow(),
+                    branch_display.yellow(),
                     dir
                 );
             }
@@ -107,4 +108,78 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Formats a branch history for display.
+///
+/// Joins branches with arrows. If there are more than 3 branches,
+/// truncates to show: first -> second -> ... -> last
+///
+/// Returns "-" if the history is empty.
+fn format_branch_history(branches: &[String]) -> String {
+    match branches.len() {
+        0 => "-".to_string(),
+        1 => branches[0].clone(),
+        2 | 3 => branches.join(" -> "),
+        _ => {
+            // More than 3 branches: show first -> second -> ... -> last
+            format!(
+                "{} -> {} -> ... -> {}",
+                branches[0],
+                branches[1],
+                branches.last().unwrap()
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_branch_history_empty() {
+        let branches: Vec<String> = vec![];
+        assert_eq!(format_branch_history(&branches), "-");
+    }
+
+    #[test]
+    fn test_format_branch_history_single() {
+        let branches = vec!["main".to_string()];
+        assert_eq!(format_branch_history(&branches), "main");
+    }
+
+    #[test]
+    fn test_format_branch_history_two() {
+        let branches = vec!["main".to_string(), "feat/auth".to_string()];
+        assert_eq!(format_branch_history(&branches), "main -> feat/auth");
+    }
+
+    #[test]
+    fn test_format_branch_history_three() {
+        let branches = vec![
+            "main".to_string(),
+            "feat/auth".to_string(),
+            "main".to_string(),
+        ];
+        assert_eq!(
+            format_branch_history(&branches),
+            "main -> feat/auth -> main"
+        );
+    }
+
+    #[test]
+    fn test_format_branch_history_truncated() {
+        let branches = vec![
+            "main".to_string(),
+            "feat/a".to_string(),
+            "feat/b".to_string(),
+            "feat/c".to_string(),
+            "main".to_string(),
+        ];
+        assert_eq!(
+            format_branch_history(&branches),
+            "main -> feat/a -> ... -> main"
+        );
+    }
 }

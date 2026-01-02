@@ -441,6 +441,38 @@ impl Database {
             .context("Failed to get messages")
     }
 
+    /// Returns the ordered list of distinct branches for a session.
+    ///
+    /// Branches are returned in the order they first appeared in messages,
+    /// with consecutive duplicates removed. This shows the branch transitions
+    /// during a session (e.g., "main -> feat/auth -> main").
+    ///
+    /// Returns an empty vector if the session has no messages or all messages
+    /// have None branches.
+    pub fn get_session_branch_history(&self, session_id: Uuid) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT git_branch FROM messages WHERE session_id = ?1 ORDER BY idx",
+        )?;
+
+        let rows = stmt.query_map(params![session_id.to_string()], |row| {
+            let branch: Option<String> = row.get(0)?;
+            Ok(branch)
+        })?;
+
+        // Collect branches, keeping only the first occurrence of consecutive duplicates
+        let mut branches: Vec<String> = Vec::new();
+        for row in rows {
+            if let Some(branch) = row? {
+                // Only add if different from the last branch (removes consecutive duplicates)
+                if branches.last() != Some(&branch) {
+                    branches.push(branch);
+                }
+            }
+        }
+
+        Ok(branches)
+    }
+
     // ==================== Session Links ====================
 
     /// Inserts a link between a session and a git commit.
@@ -3315,5 +3347,119 @@ mod tests {
         assert_eq!(stats.sessions_by_tool[0].1, 2);
         assert_eq!(stats.sessions_by_tool[1].0, "aider");
         assert_eq!(stats.sessions_by_tool[1].1, 1);
+    }
+
+    // ==================== Branch History Tests ====================
+
+    #[test]
+    fn test_get_session_branch_history_no_messages() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        let branches = db
+            .get_session_branch_history(session.id)
+            .expect("Failed to get branch history");
+
+        assert!(branches.is_empty(), "Empty session should have no branches");
+    }
+
+    #[test]
+    fn test_get_session_branch_history_single_branch() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        // Insert messages all on the same branch
+        for i in 0..3 {
+            let mut msg = create_test_message(session.id, i, MessageRole::User, "test");
+            msg.git_branch = Some("main".to_string());
+            db.insert_message(&msg).expect("Failed to insert message");
+        }
+
+        let branches = db
+            .get_session_branch_history(session.id)
+            .expect("Failed to get branch history");
+
+        assert_eq!(branches, vec!["main"], "Should have single branch");
+    }
+
+    #[test]
+    fn test_get_session_branch_history_multiple_branches() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        // Insert messages with branch transitions: main -> feat/auth -> main
+        let branch_sequence = ["main", "main", "feat/auth", "feat/auth", "main"];
+        for (i, branch) in branch_sequence.iter().enumerate() {
+            let mut msg =
+                create_test_message(session.id, i as i32, MessageRole::User, "test");
+            msg.git_branch = Some(branch.to_string());
+            db.insert_message(&msg).expect("Failed to insert message");
+        }
+
+        let branches = db
+            .get_session_branch_history(session.id)
+            .expect("Failed to get branch history");
+
+        assert_eq!(
+            branches,
+            vec!["main", "feat/auth", "main"],
+            "Should show branch transitions without consecutive duplicates"
+        );
+    }
+
+    #[test]
+    fn test_get_session_branch_history_with_none_branches() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        // Insert messages with a mix of Some and None branches
+        let mut msg1 = create_test_message(session.id, 0, MessageRole::User, "test");
+        msg1.git_branch = Some("main".to_string());
+        db.insert_message(&msg1).expect("Failed to insert message");
+
+        let mut msg2 = create_test_message(session.id, 1, MessageRole::Assistant, "test");
+        msg2.git_branch = None; // No branch info
+        db.insert_message(&msg2).expect("Failed to insert message");
+
+        let mut msg3 = create_test_message(session.id, 2, MessageRole::User, "test");
+        msg3.git_branch = Some("feat/new".to_string());
+        db.insert_message(&msg3).expect("Failed to insert message");
+
+        let branches = db
+            .get_session_branch_history(session.id)
+            .expect("Failed to get branch history");
+
+        assert_eq!(
+            branches,
+            vec!["main", "feat/new"],
+            "Should skip None branches and show transitions"
+        );
+    }
+
+    #[test]
+    fn test_get_session_branch_history_all_none_branches() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("Failed to insert session");
+
+        // Insert messages with no branch info
+        for i in 0..3 {
+            let mut msg = create_test_message(session.id, i, MessageRole::User, "test");
+            msg.git_branch = None;
+            db.insert_message(&msg).expect("Failed to insert message");
+        }
+
+        let branches = db
+            .get_session_branch_history(session.id)
+            .expect("Failed to get branch history");
+
+        assert!(
+            branches.is_empty(),
+            "Session with all None branches should return empty"
+        );
     }
 }
