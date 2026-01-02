@@ -298,6 +298,8 @@ The init wizard:
 2. Shows which tools have existing sessions
 3. Lets you choose which watchers to enable
 4. Offers to import existing sessions
+5. Offers to install shell completions
+6. Offers to start the background service (for real-time capture)
 
 Configure which tools to track:
 
@@ -363,23 +365,28 @@ This permanently removes the session, its messages, and any commit links.
 
 ## Shell Completions
 
-Generate shell completion scripts for tab-completion support:
+The easiest way to install completions is to let Lore auto-detect your shell:
 
 ```bash
-# Bash
+lore completions install
+```
+
+Or specify a shell explicitly:
+
+```bash
+lore completions install --shell fish
+```
+
+You can also output completions to stdout for manual installation:
+
+```bash
 lore completions bash > ~/.local/share/bash-completion/completions/lore
-
-# Zsh
 lore completions zsh > ~/.zfunc/_lore
-
-# Fish
 lore completions fish > ~/.config/fish/completions/lore.fish
-
-# PowerShell
 lore completions powershell >> $PROFILE
 ```
 
-After installing completions, restart your shell or source the completion file.
+After installing, restart your shell or source the completion file.
 
 ## Data Location
 
