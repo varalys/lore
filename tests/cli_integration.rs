@@ -898,3 +898,157 @@ mod error_handling_tests {
         );
     }
 }
+
+// =============================================================================
+// Delete Command Tests
+// =============================================================================
+
+mod delete_tests {
+    use super::*;
+
+    #[test]
+    fn test_delete_session_removes_session() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert");
+
+        let msg = create_test_message(session.id, 0, MessageRole::User, "Test message");
+        db.insert_message(&msg).expect("insert msg");
+
+        let link = create_test_link(session.id, Some("abc123"), LinkType::Commit);
+        db.insert_link(&link).expect("insert link");
+
+        // Delete the session
+        let (msgs, links) = db.delete_session(&session.id).expect("delete");
+
+        assert_eq!(msgs, 1, "Should delete 1 message");
+        assert_eq!(links, 1, "Should delete 1 link");
+        assert!(
+            db.get_session(&session.id).expect("get").is_none(),
+            "Session should be gone"
+        );
+    }
+
+    #[test]
+    fn test_delete_nonexistent_session() {
+        let (db, _dir) = create_test_db();
+
+        let fake_id = Uuid::new_v4();
+        let (msgs, links) = db.delete_session(&fake_id).expect("delete");
+
+        assert_eq!(msgs, 0, "No messages to delete");
+        assert_eq!(links, 0, "No links to delete");
+    }
+}
+
+// =============================================================================
+// Database Management Tests (db subcommand)
+// =============================================================================
+
+mod db_management_tests {
+    use super::*;
+
+    #[test]
+    fn test_vacuum_succeeds() {
+        let (db, _dir) = create_test_db();
+
+        // Add and then delete some data to create reclaimable space
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert");
+        db.delete_session(&session.id).expect("delete");
+
+        // Vacuum should succeed
+        db.vacuum().expect("vacuum should succeed");
+    }
+
+    #[test]
+    fn test_prune_deletes_old_sessions() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create old and new sessions
+        let old_session =
+            create_test_session("claude-code", "/old", now - Duration::days(100), None);
+        let new_session = create_test_session("claude-code", "/new", now - Duration::days(5), None);
+
+        db.insert_session(&old_session).expect("insert old");
+        db.insert_session(&new_session).expect("insert new");
+
+        // Count before prune
+        let before_count = db
+            .count_sessions_older_than(now - Duration::days(30))
+            .expect("count");
+        assert_eq!(before_count, 1, "Should have 1 old session");
+
+        // Prune sessions older than 30 days
+        let deleted = db
+            .delete_sessions_older_than(now - Duration::days(30))
+            .expect("prune");
+        assert_eq!(deleted, 1, "Should delete 1 session");
+
+        // Verify new session remains
+        assert!(
+            db.get_session(&new_session.id).expect("get").is_some(),
+            "New session should remain"
+        );
+        assert!(
+            db.get_session(&old_session.id).expect("get").is_none(),
+            "Old session should be deleted"
+        );
+    }
+
+    #[test]
+    fn test_stats_returns_correct_counts() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Add varied data
+        let session1 = create_test_session("claude-code", "/p1", now - Duration::hours(2), None);
+        let session2 = create_test_session("aider", "/p2", now - Duration::hours(1), None);
+        let session3 = create_test_session("claude-code", "/p3", now, None);
+
+        db.insert_session(&session1).expect("insert");
+        db.insert_session(&session2).expect("insert");
+        db.insert_session(&session3).expect("insert");
+
+        let msg = create_test_message(session1.id, 0, MessageRole::User, "Hello");
+        db.insert_message(&msg).expect("insert msg");
+
+        let link = create_test_link(session2.id, Some("abc123"), LinkType::Commit);
+        db.insert_link(&link).expect("insert link");
+
+        // Get stats
+        let stats = db.stats().expect("stats");
+
+        assert_eq!(stats.session_count, 3, "Should have 3 sessions");
+        assert_eq!(stats.message_count, 1, "Should have 1 message");
+        assert_eq!(stats.link_count, 1, "Should have 1 link");
+
+        // Check tool breakdown
+        let claude_sessions = stats
+            .sessions_by_tool
+            .iter()
+            .find(|(tool, _)| tool == "claude-code")
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        assert_eq!(claude_sessions, 2, "Should have 2 claude-code sessions");
+
+        let aider_sessions = stats
+            .sessions_by_tool
+            .iter()
+            .find(|(tool, _)| tool == "aider")
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        assert_eq!(aider_sessions, 1, "Should have 1 aider session");
+    }
+
+    #[test]
+    fn test_file_size_returns_value() {
+        let (db, _dir) = create_test_db();
+
+        let size = db.file_size().expect("file_size");
+        assert!(size.is_some(), "Should return file size");
+        assert!(size.unwrap() > 0, "File size should be positive");
+    }
+}

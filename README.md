@@ -95,6 +95,11 @@ lore init
 # Or just start using lore - it will prompt for setup automatically
 lore sessions
 
+# Example output - shows branch transitions during each session
+# ID        STARTED           MESSAGES  BRANCH                    DIRECTORY
+# c9731a91  2025-12-25 17:52       566  main -> feat/auth -> main myapp
+# 24af9690  2025-12-22 19:13      1910  feat/phase-0-foundati...  lore
+
 # View a session
 lore show abc123
 
@@ -157,12 +162,13 @@ Search matches message content, project names, branches, and tool names. Results
 |---------|-------------|
 | `lore init` | Guided first-run setup (auto-detects AI tools) |
 | `lore status` | Show daemon status, watchers, and recent sessions |
-| `lore sessions` | List sessions (supports `--repo`, `--limit`, `--format`) |
+| `lore sessions` | List sessions with branch history (supports `--repo`, `--limit`, `--format`) |
 | `lore show <id>` | View session details |
 | `lore show --commit <ref>` | View sessions linked to a commit |
 | `lore import` | Import sessions from all enabled watchers |
 | `lore link <id>` | Link session to HEAD |
 | `lore unlink <id>` | Remove a session-commit link |
+| `lore delete <id>` | Permanently delete a session |
 | `lore search <query>` | Full-text search with filters and context |
 | `lore hooks install` | Install git hooks for automatic linking |
 | `lore hooks status` | Check installed git hooks |
@@ -172,9 +178,13 @@ Search matches message content, project names, branches, and tool names. Results
 | `lore daemon logs` | View daemon logs |
 | `lore daemon install` | Install daemon as a system service |
 | `lore daemon uninstall` | Remove daemon service |
+| `lore db stats` | Show database statistics |
+| `lore db vacuum` | Reclaim unused disk space |
+| `lore db prune` | Delete old sessions |
 | `lore config` | View configuration |
 | `lore config get <key>` | Get a config value |
 | `lore config set <key> <val>` | Set a config value |
+| `lore completions <shell>` | Generate shell completions |
 
 ## Supported Tools
 
@@ -293,6 +303,8 @@ The init wizard:
 2. Shows which tools have existing sessions
 3. Lets you choose which watchers to enable
 4. Offers to import existing sessions
+5. Offers to install shell completions
+6. Offers to start the background service (for real-time capture)
 
 Configure which tools to track:
 
@@ -306,6 +318,81 @@ For scripting, use `--no-init` to skip the first-run prompt:
 ```bash
 lore --no-init sessions --format json
 ```
+
+## Database Management
+
+Lore provides commands for managing the database:
+
+```bash
+# View database statistics
+lore db stats
+
+# Example output:
+# Database Statistics
+#
+#   Sessions:  142
+#   Messages:  8934
+#   Links:     67
+#   File size: 12.45 MB
+#
+# Date Range
+#   Oldest:   2024-06-15 09:23
+#   Newest:   2025-01-02 14:56
+#
+# Sessions by Tool
+#    claude-code:  98
+#          aider:  31
+#         gemini:  13
+
+# Reclaim unused disk space
+lore db vacuum
+
+# Delete old sessions (preview first with --dry-run)
+lore db prune --older-than 90d --dry-run
+lore db prune --older-than 6m --force
+```
+
+Duration formats for `--older-than`:
+- `Nd` - days (e.g., `90d`)
+- `Nw` - weeks (e.g., `12w`)
+- `Nm` - months (e.g., `6m`)
+- `Ny` - years (e.g., `1y`)
+
+## Session Deletion
+
+Delete a single session and all its data:
+
+```bash
+lore delete abc123
+```
+
+This permanently removes the session, its messages, and any commit links.
+
+## Shell Completions
+
+The easiest way to install completions is to let Lore auto-detect your shell:
+
+```bash
+lore completions install
+```
+
+Or specify a shell explicitly:
+
+```bash
+lore completions install --shell fish
+```
+
+You can also output completions to stdout for manual installation:
+
+```bash
+lore completions bash > ~/.local/share/bash-completion/completions/lore
+lore completions zsh > ~/.zfunc/_lore
+lore completions fish > ~/.config/fish/completions/lore.fish
+```
+
+After installing, restart your shell or source the completion file.
+
+PowerShell and Elvish completions are also available (`lore completions powershell`, `lore completions elvish`) and will be documented when Windows support is added.
 
 ## Data Location
 

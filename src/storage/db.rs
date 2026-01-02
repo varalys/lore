@@ -307,6 +307,30 @@ impl Database {
         Ok(count > 0)
     }
 
+    /// Updates the git branch for a session.
+    ///
+    /// Used by the daemon when a message is processed with a different branch
+    /// than the session's current branch, indicating a branch switch mid-session.
+    /// Also updates the sessions_fts index to keep search in sync.
+    ///
+    /// Returns the number of rows affected (0 or 1).
+    pub fn update_session_branch(&self, session_id: Uuid, new_branch: &str) -> Result<usize> {
+        let rows_changed = self.conn.execute(
+            "UPDATE sessions SET git_branch = ?1 WHERE id = ?2",
+            params![new_branch, session_id.to_string()],
+        )?;
+
+        // Also update the FTS index if the session was updated
+        if rows_changed > 0 {
+            self.conn.execute(
+                "UPDATE sessions_fts SET git_branch = ?1 WHERE session_id = ?2",
+                params![new_branch, session_id.to_string()],
+            )?;
+        }
+
+        Ok(rows_changed)
+    }
+
     fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         let ended_at_str: Option<String> = row.get(4)?;
         let ended_at = match ended_at_str {
@@ -415,6 +439,38 @@ impl Database {
 
         rows.collect::<Result<Vec<_>, _>>()
             .context("Failed to get messages")
+    }
+
+    /// Returns the ordered list of distinct branches for a session.
+    ///
+    /// Branches are returned in the order they first appeared in messages,
+    /// with consecutive duplicates removed. This shows the branch transitions
+    /// during a session (e.g., "main -> feat/auth -> main").
+    ///
+    /// Returns an empty vector if the session has no messages or all messages
+    /// have None branches.
+    pub fn get_session_branch_history(&self, session_id: Uuid) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT git_branch FROM messages WHERE session_id = ?1 ORDER BY idx")?;
+
+        let rows = stmt.query_map(params![session_id.to_string()], |row| {
+            let branch: Option<String> = row.get(0)?;
+            Ok(branch)
+        })?;
+
+        // Collect branches, keeping only the first occurrence of consecutive duplicates
+        let mut branches: Vec<String> = Vec::new();
+        for row in rows {
+            if let Some(branch) = row? {
+                // Only add if different from the last branch (removes consecutive duplicates)
+                if branches.last() != Some(&branch) {
+                    branches.push(branch);
+                }
+            }
+        }
+
+        Ok(branches)
     }
 
     // ==================== Session Links ====================
@@ -1107,6 +1163,250 @@ impl Database {
         )?;
         Ok(count > 0)
     }
+
+    // ==================== Session Deletion ====================
+
+    /// Deletes a session and all its associated data.
+    ///
+    /// Removes the session, all its messages, all FTS index entries, and all
+    /// session links. Returns the counts of deleted items.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (messages_deleted, links_deleted) counts.
+    pub fn delete_session(&self, session_id: &Uuid) -> Result<(usize, usize)> {
+        let session_id_str = session_id.to_string();
+
+        // Delete from messages_fts first (need message IDs)
+        self.conn.execute(
+            "DELETE FROM messages_fts WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?1)",
+            params![session_id_str],
+        )?;
+
+        // Delete messages
+        let messages_deleted = self.conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id_str],
+        )?;
+
+        // Delete links
+        let links_deleted = self.conn.execute(
+            "DELETE FROM session_links WHERE session_id = ?1",
+            params![session_id_str],
+        )?;
+
+        // Delete from sessions_fts
+        self.conn.execute(
+            "DELETE FROM sessions_fts WHERE session_id = ?1",
+            params![session_id_str],
+        )?;
+
+        // Delete the session itself
+        self.conn.execute(
+            "DELETE FROM sessions WHERE id = ?1",
+            params![session_id_str],
+        )?;
+
+        Ok((messages_deleted, links_deleted))
+    }
+
+    // ==================== Database Maintenance ====================
+
+    /// Runs SQLite VACUUM to reclaim unused space and defragment the database.
+    ///
+    /// This operation can take some time on large databases and temporarily
+    /// doubles the disk space used while rebuilding.
+    pub fn vacuum(&self) -> Result<()> {
+        self.conn.execute("VACUUM", [])?;
+        Ok(())
+    }
+
+    /// Returns the file size of the database in bytes.
+    ///
+    /// Returns `None` for in-memory databases.
+    pub fn file_size(&self) -> Result<Option<u64>> {
+        if let Some(path) = self.db_path() {
+            let metadata = std::fs::metadata(&path)?;
+            Ok(Some(metadata.len()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Deletes sessions older than the specified date.
+    ///
+    /// Also deletes all associated messages, links, and FTS entries.
+    ///
+    /// # Arguments
+    ///
+    /// * `before` - Delete sessions that started before this date
+    ///
+    /// # Returns
+    ///
+    /// The number of sessions deleted.
+    pub fn delete_sessions_older_than(&self, before: DateTime<Utc>) -> Result<usize> {
+        let before_str = before.to_rfc3339();
+
+        // Get session IDs to delete
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM sessions WHERE started_at < ?1")?;
+        let session_ids: Vec<String> = stmt
+            .query_map(params![before_str], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let count = session_ids.len();
+
+        // Delete associated data for each session
+        for session_id_str in &session_ids {
+            // Delete from messages_fts
+            self.conn.execute(
+                "DELETE FROM messages_fts WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?1)",
+                params![session_id_str],
+            )?;
+
+            // Delete messages
+            self.conn.execute(
+                "DELETE FROM messages WHERE session_id = ?1",
+                params![session_id_str],
+            )?;
+
+            // Delete links
+            self.conn.execute(
+                "DELETE FROM session_links WHERE session_id = ?1",
+                params![session_id_str],
+            )?;
+
+            // Delete from sessions_fts
+            self.conn.execute(
+                "DELETE FROM sessions_fts WHERE session_id = ?1",
+                params![session_id_str],
+            )?;
+        }
+
+        // Delete the sessions
+        self.conn.execute(
+            "DELETE FROM sessions WHERE started_at < ?1",
+            params![before_str],
+        )?;
+
+        Ok(count)
+    }
+
+    /// Counts sessions older than the specified date (for dry-run preview).
+    ///
+    /// # Arguments
+    ///
+    /// * `before` - Count sessions that started before this date
+    ///
+    /// # Returns
+    ///
+    /// The number of sessions that would be deleted.
+    pub fn count_sessions_older_than(&self, before: DateTime<Utc>) -> Result<i32> {
+        let before_str = before.to_rfc3339();
+        let count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE started_at < ?1",
+            params![before_str],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Returns sessions older than the specified date (for dry-run preview).
+    ///
+    /// # Arguments
+    ///
+    /// * `before` - Return sessions that started before this date
+    ///
+    /// # Returns
+    ///
+    /// A vector of sessions that would be deleted, ordered by start date.
+    pub fn get_sessions_older_than(&self, before: DateTime<Utc>) -> Result<Vec<Session>> {
+        let before_str = before.to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count
+             FROM sessions
+             WHERE started_at < ?1
+             ORDER BY started_at ASC",
+        )?;
+
+        let rows = stmt.query_map(params![before_str], Self::row_to_session)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to get sessions older than cutoff")
+    }
+
+    /// Returns database statistics including counts and date ranges.
+    ///
+    /// # Returns
+    ///
+    /// A `DatabaseStats` struct with session, message, and link counts,
+    /// plus the date range of sessions and a breakdown by tool.
+    pub fn stats(&self) -> Result<DatabaseStats> {
+        let session_count = self.session_count()?;
+        let message_count = self.message_count()?;
+        let link_count = self.link_count()?;
+
+        // Get date range
+        let oldest: Option<String> = self
+            .conn
+            .query_row("SELECT MIN(started_at) FROM sessions", [], |row| row.get(0))
+            .optional()?
+            .flatten();
+
+        let newest: Option<String> = self
+            .conn
+            .query_row("SELECT MAX(started_at) FROM sessions", [], |row| row.get(0))
+            .optional()?
+            .flatten();
+
+        let oldest_session = oldest
+            .map(|s| parse_datetime(&s))
+            .transpose()
+            .unwrap_or(None);
+        let newest_session = newest
+            .map(|s| parse_datetime(&s))
+            .transpose()
+            .unwrap_or(None);
+
+        // Get sessions by tool
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tool, COUNT(*) FROM sessions GROUP BY tool ORDER BY COUNT(*) DESC")?;
+        let sessions_by_tool: Vec<(String, i32)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(DatabaseStats {
+            session_count,
+            message_count,
+            link_count,
+            oldest_session,
+            newest_session,
+            sessions_by_tool,
+        })
+    }
+}
+
+/// Statistics about the Lore database.
+#[derive(Debug, Clone)]
+pub struct DatabaseStats {
+    /// Total number of sessions.
+    pub session_count: i32,
+    /// Total number of messages.
+    pub message_count: i32,
+    /// Total number of session links.
+    pub link_count: i32,
+    /// Timestamp of the oldest session.
+    pub oldest_session: Option<DateTime<Utc>>,
+    /// Timestamp of the newest session.
+    pub newest_session: Option<DateTime<Utc>>,
+    /// Session counts grouped by tool name.
+    pub sessions_by_tool: Vec<(String, i32)>,
 }
 
 #[cfg(test)]
@@ -1330,6 +1630,87 @@ mod tests {
                 .expect("Failed to check existence"),
             "Different source path should not exist"
         );
+    }
+
+    #[test]
+    fn test_update_session_branch() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create session with initial branch
+        let mut session = create_test_session("claude-code", "/project", now, None);
+        session.git_branch = Some("main".to_string());
+
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Verify initial branch
+        let fetched = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(fetched.git_branch, Some("main".to_string()));
+
+        // Update branch
+        let rows = db
+            .update_session_branch(session.id, "feature-branch")
+            .expect("Failed to update branch");
+        assert_eq!(rows, 1, "Should update exactly one row");
+
+        // Verify updated branch
+        let fetched = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(fetched.git_branch, Some("feature-branch".to_string()));
+    }
+
+    #[test]
+    fn test_update_session_branch_nonexistent() {
+        let (db, _dir) = create_test_db();
+        let nonexistent_id = Uuid::new_v4();
+
+        // Updating a nonexistent session should return 0 rows
+        let rows = db
+            .update_session_branch(nonexistent_id, "some-branch")
+            .expect("Failed to update branch");
+        assert_eq!(
+            rows, 0,
+            "Should not update any rows for nonexistent session"
+        );
+    }
+
+    #[test]
+    fn test_update_session_branch_from_none() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create session without initial branch
+        let mut session = create_test_session("claude-code", "/project", now, None);
+        session.git_branch = None; // Explicitly set to None for this test
+
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Verify no initial branch
+        let fetched = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(fetched.git_branch, None);
+
+        // Update branch from None to a value
+        let rows = db
+            .update_session_branch(session.id, "new-branch")
+            .expect("Failed to update branch");
+        assert_eq!(rows, 1, "Should update exactly one row");
+
+        // Verify updated branch
+        let fetched = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(fetched.git_branch, Some("new-branch".to_string()));
     }
 
     #[test]
@@ -2729,5 +3110,360 @@ mod tests {
                 "All results should be from claude-code"
             );
         }
+    }
+
+    // ==================== Session Deletion Tests ====================
+
+    #[test]
+    fn test_delete_session_removes_all_data() {
+        let (db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // Add messages
+        let msg1 = create_test_message(session.id, 0, MessageRole::User, "Hello");
+        let msg2 = create_test_message(session.id, 1, MessageRole::Assistant, "Hi there");
+        db.insert_message(&msg1).expect("insert msg1");
+        db.insert_message(&msg2).expect("insert msg2");
+
+        // Add a link
+        let link = create_test_link(session.id, Some("abc123"), LinkType::Commit);
+        db.insert_link(&link).expect("insert link");
+
+        // Verify data exists
+        assert_eq!(db.session_count().expect("count"), 1);
+        assert_eq!(db.message_count().expect("count"), 2);
+        assert_eq!(db.link_count().expect("count"), 1);
+
+        // Delete the session
+        let (msgs_deleted, links_deleted) = db.delete_session(&session.id).expect("delete");
+        assert_eq!(msgs_deleted, 2, "Should delete 2 messages");
+        assert_eq!(links_deleted, 1, "Should delete 1 link");
+
+        // Verify all data is gone
+        assert_eq!(db.session_count().expect("count"), 0);
+        assert_eq!(db.message_count().expect("count"), 0);
+        assert_eq!(db.link_count().expect("count"), 0);
+        assert!(db.get_session(&session.id).expect("get").is_none());
+    }
+
+    #[test]
+    fn test_delete_session_preserves_other_sessions() {
+        let (db, _dir) = create_test_db();
+
+        let session1 = create_test_session("claude-code", "/project1", Utc::now(), None);
+        let session2 = create_test_session("aider", "/project2", Utc::now(), None);
+
+        db.insert_session(&session1).expect("insert session1");
+        db.insert_session(&session2).expect("insert session2");
+
+        let msg1 = create_test_message(session1.id, 0, MessageRole::User, "Hello 1");
+        let msg2 = create_test_message(session2.id, 0, MessageRole::User, "Hello 2");
+        db.insert_message(&msg1).expect("insert msg1");
+        db.insert_message(&msg2).expect("insert msg2");
+
+        // Delete only session1
+        db.delete_session(&session1.id).expect("delete");
+
+        // Verify session2 still exists
+        assert_eq!(db.session_count().expect("count"), 1);
+        assert_eq!(db.message_count().expect("count"), 1);
+        assert!(db.get_session(&session2.id).expect("get").is_some());
+    }
+
+    // ==================== Database Maintenance Tests ====================
+
+    #[test]
+    fn test_file_size() {
+        let (db, _dir) = create_test_db();
+
+        let size = db.file_size().expect("get size");
+        assert!(size.is_some(), "Should have file size for file-based db");
+        assert!(size.unwrap() > 0, "Database file should have size > 0");
+    }
+
+    #[test]
+    fn test_vacuum() {
+        let (db, _dir) = create_test_db();
+
+        // Just verify vacuum runs without error
+        db.vacuum().expect("vacuum should succeed");
+    }
+
+    #[test]
+    fn test_count_sessions_older_than() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create sessions at different times
+        let old_session =
+            create_test_session("claude-code", "/project1", now - Duration::days(100), None);
+        let recent_session =
+            create_test_session("claude-code", "/project2", now - Duration::days(10), None);
+
+        db.insert_session(&old_session).expect("insert old");
+        db.insert_session(&recent_session).expect("insert recent");
+
+        // Count sessions older than 30 days
+        let cutoff = now - Duration::days(30);
+        let count = db.count_sessions_older_than(cutoff).expect("count");
+        assert_eq!(count, 1, "Should find 1 session older than 30 days");
+
+        // Count sessions older than 200 days
+        let old_cutoff = now - Duration::days(200);
+        let old_count = db.count_sessions_older_than(old_cutoff).expect("count");
+        assert_eq!(old_count, 0, "Should find 0 sessions older than 200 days");
+    }
+
+    #[test]
+    fn test_delete_sessions_older_than() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create sessions at different times
+        let old_session =
+            create_test_session("claude-code", "/project1", now - Duration::days(100), None);
+        let recent_session =
+            create_test_session("claude-code", "/project2", now - Duration::days(10), None);
+
+        db.insert_session(&old_session).expect("insert old");
+        db.insert_session(&recent_session).expect("insert recent");
+
+        // Add messages to both
+        let msg1 = create_test_message(old_session.id, 0, MessageRole::User, "Old message");
+        let msg2 = create_test_message(recent_session.id, 0, MessageRole::User, "Recent message");
+        db.insert_message(&msg1).expect("insert msg1");
+        db.insert_message(&msg2).expect("insert msg2");
+
+        // Delete sessions older than 30 days
+        let cutoff = now - Duration::days(30);
+        let deleted = db.delete_sessions_older_than(cutoff).expect("delete");
+        assert_eq!(deleted, 1, "Should delete 1 session");
+
+        // Verify only recent session remains
+        assert_eq!(db.session_count().expect("count"), 1);
+        assert!(db.get_session(&recent_session.id).expect("get").is_some());
+        assert!(db.get_session(&old_session.id).expect("get").is_none());
+
+        // Verify messages were also deleted
+        assert_eq!(db.message_count().expect("count"), 1);
+    }
+
+    #[test]
+    fn test_get_sessions_older_than() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create sessions at different times
+        let old_session = create_test_session(
+            "claude-code",
+            "/project/old",
+            now - Duration::days(100),
+            None,
+        );
+        let medium_session =
+            create_test_session("aider", "/project/medium", now - Duration::days(50), None);
+        let recent_session =
+            create_test_session("gemini", "/project/recent", now - Duration::days(10), None);
+
+        db.insert_session(&old_session).expect("insert old");
+        db.insert_session(&medium_session).expect("insert medium");
+        db.insert_session(&recent_session).expect("insert recent");
+
+        // Get sessions older than 30 days
+        let cutoff = now - Duration::days(30);
+        let sessions = db.get_sessions_older_than(cutoff).expect("get sessions");
+        assert_eq!(
+            sessions.len(),
+            2,
+            "Should find 2 sessions older than 30 days"
+        );
+
+        // Verify sessions are ordered by start date (oldest first)
+        assert_eq!(sessions[0].id, old_session.id);
+        assert_eq!(sessions[1].id, medium_session.id);
+
+        // Verify session data is returned correctly
+        assert_eq!(sessions[0].tool, "claude-code");
+        assert_eq!(sessions[0].working_directory, "/project/old");
+        assert_eq!(sessions[1].tool, "aider");
+        assert_eq!(sessions[1].working_directory, "/project/medium");
+
+        // Get sessions older than 200 days
+        let old_cutoff = now - Duration::days(200);
+        let old_sessions = db
+            .get_sessions_older_than(old_cutoff)
+            .expect("get old sessions");
+        assert_eq!(
+            old_sessions.len(),
+            0,
+            "Should find 0 sessions older than 200 days"
+        );
+    }
+
+    #[test]
+    fn test_stats() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Empty database stats
+        let empty_stats = db.stats().expect("stats");
+        assert_eq!(empty_stats.session_count, 0);
+        assert_eq!(empty_stats.message_count, 0);
+        assert_eq!(empty_stats.link_count, 0);
+        assert!(empty_stats.oldest_session.is_none());
+        assert!(empty_stats.newest_session.is_none());
+        assert!(empty_stats.sessions_by_tool.is_empty());
+
+        // Add some data
+        let session1 =
+            create_test_session("claude-code", "/project1", now - Duration::hours(2), None);
+        let session2 = create_test_session("aider", "/project2", now - Duration::hours(1), None);
+        let session3 = create_test_session("claude-code", "/project3", now, None);
+
+        db.insert_session(&session1).expect("insert 1");
+        db.insert_session(&session2).expect("insert 2");
+        db.insert_session(&session3).expect("insert 3");
+
+        let msg = create_test_message(session1.id, 0, MessageRole::User, "Hello");
+        db.insert_message(&msg).expect("insert msg");
+
+        let link = create_test_link(session1.id, Some("abc123"), LinkType::Commit);
+        db.insert_link(&link).expect("insert link");
+
+        // Check stats
+        let stats = db.stats().expect("stats");
+        assert_eq!(stats.session_count, 3);
+        assert_eq!(stats.message_count, 1);
+        assert_eq!(stats.link_count, 1);
+        assert!(stats.oldest_session.is_some());
+        assert!(stats.newest_session.is_some());
+
+        // Check sessions by tool
+        assert_eq!(stats.sessions_by_tool.len(), 2);
+        // claude-code should come first (most sessions)
+        assert_eq!(stats.sessions_by_tool[0].0, "claude-code");
+        assert_eq!(stats.sessions_by_tool[0].1, 2);
+        assert_eq!(stats.sessions_by_tool[1].0, "aider");
+        assert_eq!(stats.sessions_by_tool[1].1, 1);
+    }
+
+    // ==================== Branch History Tests ====================
+
+    #[test]
+    fn test_get_session_branch_history_no_messages() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        let branches = db
+            .get_session_branch_history(session.id)
+            .expect("Failed to get branch history");
+
+        assert!(branches.is_empty(), "Empty session should have no branches");
+    }
+
+    #[test]
+    fn test_get_session_branch_history_single_branch() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Insert messages all on the same branch
+        for i in 0..3 {
+            let mut msg = create_test_message(session.id, i, MessageRole::User, "test");
+            msg.git_branch = Some("main".to_string());
+            db.insert_message(&msg).expect("Failed to insert message");
+        }
+
+        let branches = db
+            .get_session_branch_history(session.id)
+            .expect("Failed to get branch history");
+
+        assert_eq!(branches, vec!["main"], "Should have single branch");
+    }
+
+    #[test]
+    fn test_get_session_branch_history_multiple_branches() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Insert messages with branch transitions: main -> feat/auth -> main
+        let branch_sequence = ["main", "main", "feat/auth", "feat/auth", "main"];
+        for (i, branch) in branch_sequence.iter().enumerate() {
+            let mut msg = create_test_message(session.id, i as i32, MessageRole::User, "test");
+            msg.git_branch = Some(branch.to_string());
+            db.insert_message(&msg).expect("Failed to insert message");
+        }
+
+        let branches = db
+            .get_session_branch_history(session.id)
+            .expect("Failed to get branch history");
+
+        assert_eq!(
+            branches,
+            vec!["main", "feat/auth", "main"],
+            "Should show branch transitions without consecutive duplicates"
+        );
+    }
+
+    #[test]
+    fn test_get_session_branch_history_with_none_branches() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Insert messages with a mix of Some and None branches
+        let mut msg1 = create_test_message(session.id, 0, MessageRole::User, "test");
+        msg1.git_branch = Some("main".to_string());
+        db.insert_message(&msg1).expect("Failed to insert message");
+
+        let mut msg2 = create_test_message(session.id, 1, MessageRole::Assistant, "test");
+        msg2.git_branch = None; // No branch info
+        db.insert_message(&msg2).expect("Failed to insert message");
+
+        let mut msg3 = create_test_message(session.id, 2, MessageRole::User, "test");
+        msg3.git_branch = Some("feat/new".to_string());
+        db.insert_message(&msg3).expect("Failed to insert message");
+
+        let branches = db
+            .get_session_branch_history(session.id)
+            .expect("Failed to get branch history");
+
+        assert_eq!(
+            branches,
+            vec!["main", "feat/new"],
+            "Should skip None branches and show transitions"
+        );
+    }
+
+    #[test]
+    fn test_get_session_branch_history_all_none_branches() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Insert messages with no branch info
+        for i in 0..3 {
+            let mut msg = create_test_message(session.id, i, MessageRole::User, "test");
+            msg.git_branch = None;
+            db.insert_message(&msg).expect("Failed to insert message");
+        }
+
+        let branches = db
+            .get_session_branch_history(session.id)
+            .expect("Failed to get branch history");
+
+        assert!(
+            branches.is_empty(),
+            "Session with all None branches should return empty"
+        );
     }
 }
