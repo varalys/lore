@@ -17,6 +17,7 @@ use crate::storage::Database;
     lore sessions --limit 50       Show up to 50 sessions\n    \
     lore sessions --repo .         Filter to current directory\n    \
     lore sessions --repo /path     Filter to specific path\n    \
+    lore sessions --tag bug-fix    Filter to sessions with 'bug-fix' tag\n    \
     lore sessions --format json    Output as JSON")]
 pub struct Args {
     /// Filter to sessions in this directory (prefix match)
@@ -26,6 +27,10 @@ pub struct Args {
         this path prefix. Use '.' for the current directory."
     )]
     pub repo: Option<String>,
+
+    /// Filter to sessions with this tag
+    #[arg(short, long, value_name = "LABEL")]
+    pub tag: Option<String>,
 
     /// Maximum number of sessions to display
     #[arg(short, long, default_value = "20", value_name = "N")]
@@ -39,7 +44,7 @@ pub struct Args {
 /// Executes the sessions command.
 ///
 /// Lists sessions from the database, optionally filtered by
-/// working directory prefix.
+/// working directory prefix or tag.
 pub fn run(args: Args) -> Result<()> {
     let db = Database::open_default()?;
 
@@ -54,7 +59,17 @@ pub fn run(args: Args) -> Result<()> {
         }
     });
 
-    let sessions = db.list_sessions(args.limit, working_dir.as_deref())?;
+    // Get sessions - either filtered by tag or by normal query
+    let sessions = if let Some(ref tag_label) = args.tag {
+        let mut tagged_sessions = db.list_sessions_with_tag(tag_label, args.limit)?;
+        // If repo filter is also specified, filter further
+        if let Some(ref wd) = working_dir {
+            tagged_sessions.retain(|s| s.working_directory.starts_with(wd));
+        }
+        tagged_sessions
+    } else {
+        db.list_sessions(args.limit, working_dir.as_deref())?
+    };
 
     if sessions.is_empty() {
         println!("{}", "No sessions found.".dimmed());

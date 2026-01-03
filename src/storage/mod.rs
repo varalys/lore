@@ -18,8 +18,8 @@ pub mod models;
 pub use db::Database;
 // DatabaseStats is also available at crate::storage::db::DatabaseStats if needed
 pub use models::{
-    extract_session_files, ContentBlock, LinkCreator, LinkType, MessageContent, MessageRole,
-    SessionLink,
+    extract_session_files, Annotation, ContentBlock, LinkCreator, LinkType, MessageContent,
+    MessageRole, SessionLink, Summary, Tag,
 };
 
 // Re-exported for use by integration tests. These types are used through the
@@ -27,3 +27,14 @@ pub use models::{
 // used in the binary crate itself.
 #[allow(unused_imports)]
 pub use models::{Message, Session};
+
+/// Returns the machine identifier (hostname) for the current machine.
+///
+/// Used to populate the `machine_id` field on sessions, allowing cloud sync
+/// to identify which machine created a session. Returns `None` if the hostname
+/// cannot be determined.
+pub fn get_machine_id() -> Option<String> {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+}

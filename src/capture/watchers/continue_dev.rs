@@ -211,6 +211,7 @@ fn parse_continue_session(path: &Path) -> Result<Option<(Session, Vec<Message>)>
         git_branch: None,
         source_path: Some(path.to_string_lossy().to_string()),
         message_count: message_count as i32,
+        machine_id: crate::storage::get_machine_id(),
     };
 
     // Convert messages

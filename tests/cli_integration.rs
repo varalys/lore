@@ -42,6 +42,7 @@ fn create_test_session(
         git_branch: Some("main".to_string()),
         source_path: source_path.map(|s| s.to_string()),
         message_count: 0,
+        machine_id: Some("test-machine".to_string()),
     }
 }
 

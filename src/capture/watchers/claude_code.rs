@@ -328,6 +328,7 @@ impl ParsedSession {
             git_branch: self.git_branch.clone(),
             source_path: Some(self.source_path.clone()),
             message_count: self.messages.len() as i32,
+            machine_id: crate::storage::get_machine_id(),
         };
 
         // Build UUID map for parent lookups

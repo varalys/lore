@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::cli::OutputFormat;
 use crate::git;
-use crate::storage::{ContentBlock, Database, Message, MessageContent, MessageRole, Session};
+use crate::storage::{ContentBlock, Database, Message, MessageContent, MessageRole, Session, Tag};
 
 /// Safely truncates a string to at most `max_bytes` bytes at a character boundary.
 ///
@@ -88,6 +88,8 @@ struct SessionOutput {
     session: Session,
     messages: Vec<Message>,
     links: Vec<LinkInfo>,
+    tags: Vec<String>,
+    summary: Option<String>,
 }
 
 /// Simplified link info for JSON output.
@@ -147,6 +149,8 @@ fn show_session(
 
     let messages = db.get_messages(&session.id)?;
     let links = db.get_links_by_session(&session.id)?;
+    let tags = db.get_tags(&session.id)?;
+    let summary = db.get_summary(&session.id)?;
 
     match format {
         OutputFormat::Json => {
@@ -160,15 +164,17 @@ fn show_session(
                         confidence: l.confidence,
                     })
                     .collect(),
+                tags: tags.iter().map(|t| t.label.clone()).collect(),
+                summary: summary.map(|s| s.content),
             };
             let json = serde_json::to_string_pretty(&output)?;
             println!("{json}");
         }
         OutputFormat::Markdown => {
-            print_session_markdown(session, &messages, &links, full, show_thinking);
+            print_session_markdown(session, &messages, &links, &tags, &summary, full, show_thinking);
         }
         OutputFormat::Text => {
-            print_session_text(session, &messages, &links, full, show_thinking);
+            print_session_text(session, &messages, &links, &tags, &summary, full, show_thinking);
         }
     }
 
@@ -180,6 +186,8 @@ fn print_session_text(
     session: &Session,
     messages: &[Message],
     links: &[crate::storage::SessionLink],
+    tags: &[Tag],
+    summary: &Option<crate::storage::Summary>,
     full: bool,
     show_thinking: bool,
 ) {
@@ -211,6 +219,19 @@ fn print_session_text(
     println!("  {}  {}", "Directory:".dimmed(), session.working_directory);
     if let Some(ref branch) = session.git_branch {
         println!("  {}  {}", "Branch:".dimmed(), branch);
+    }
+
+    // Display tags
+    if !tags.is_empty() {
+        let tag_labels: Vec<String> = tags.iter().map(|t| t.label.yellow().to_string()).collect();
+        println!("  {}  {}", "Tags:".dimmed(), tag_labels.join(", "));
+    }
+
+    // Display summary
+    if let Some(ref s) = summary {
+        println!();
+        println!("{}", "Summary:".bold());
+        println!("  {}", s.content);
     }
 
     // Check for links
@@ -306,6 +327,8 @@ fn print_session_markdown(
     session: &Session,
     messages: &[Message],
     links: &[crate::storage::SessionLink],
+    tags: &[Tag],
+    summary: &Option<crate::storage::Summary>,
     full: bool,
     show_thinking: bool,
 ) {
@@ -340,7 +363,19 @@ fn print_session_markdown(
     if let Some(ref branch) = session.git_branch {
         println!("| Branch | `{branch}` |");
     }
+    if !tags.is_empty() {
+        let tag_labels: Vec<&str> = tags.iter().map(|t| t.label.as_str()).collect();
+        println!("| Tags | {} |", tag_labels.join(", "));
+    }
     println!();
+
+    // Summary
+    if let Some(ref s) = summary {
+        println!("## Summary");
+        println!();
+        println!("{}", s.content);
+        println!();
+    }
 
     // Links
     if !links.is_empty() {
