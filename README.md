@@ -245,14 +245,27 @@ lore daemon stop     # Stop watching
 
 ### Run as a Service
 
-Install the daemon as a system service to start automatically on login:
+Install the daemon as a system service to start automatically on login.
+
+#### macOS with Homebrew (Recommended)
+
+If you installed via Homebrew, use brew services:
 
 ```bash
-lore daemon install    # Install and enable service
-lore daemon uninstall  # Remove service
+brew services start lore
+brew services stop lore
 ```
 
-This uses launchd on macOS and systemd on Linux. The service restarts automatically on failure.
+#### Linux with systemd
+
+Use the built-in service installer:
+
+```bash
+lore daemon install    # Install and enable systemd service
+lore daemon uninstall  # Remove systemd service
+```
+
+The service restarts automatically on failure.
 
 #### Manual systemd Setup (Linux)
 
@@ -285,13 +298,6 @@ Then enable and start:
 systemctl --user daemon-reload
 systemctl --user enable --now lore.service
 systemctl --user status lore.service
-```
-
-#### macOS with Homebrew
-
-```bash
-brew services start lore
-brew services stop lore
 ```
 
 ## Git Hooks
