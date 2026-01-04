@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-01-04
+
+### Added
+
+- `lore current` command to show active session in current directory
+- `lore context` command for quick orientation on recent sessions
+- `lore context --last` for detailed summary of most recent session
+- `lore annotate` command to add notes/bookmarks to sessions
+- `lore tag` command to organize sessions with labels
+- `lore sessions --tag <label>` to filter sessions by tag
+- `lore summarize` command to add/view session summaries
+- Machine identity system with UUID for future cloud sync deduplication
+- `machine_name` config option for user-friendly display names
+- Machine name prompt during `lore init`
+
+### Changed
+
+- `lore config` now displays machine identity (UUID and name)
+
+### Fixed
+
+- `lore daemon stop` now properly handles Homebrew-managed services
+- Machine ID migration converts hostname-based IDs to UUIDs
+
 ## [0.1.1] - 2026-01-02
 
 ### Added
@@ -47,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON and Markdown output formats
 - GitHub Actions CI and release workflows
 
-[Unreleased]: https://github.com/varalys/lore/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/varalys/lore/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/varalys/lore/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/varalys/lore/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/varalys/lore/releases/tag/v0.1.0
