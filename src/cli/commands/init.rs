@@ -11,6 +11,7 @@ use crate::capture::watchers::{default_registry, WatcherRegistry};
 use crate::cli::commands::{completions, import};
 use crate::config::Config;
 use crate::storage::db::default_db_path;
+use crate::storage::Machine;
 use clap::CommandFactory;
 
 /// Arguments for the init command.
@@ -131,7 +132,7 @@ pub fn run(args: Args) -> Result<()> {
     println!();
     println!("{}", "Creating configuration...".bold());
 
-    let config = Config {
+    let mut config = Config {
         watchers: selected_watchers.clone(),
         ..Config::default()
     };
@@ -142,6 +143,37 @@ pub fn run(args: Args) -> Result<()> {
             .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
     }
 
+    // Configure machine identity
+    println!();
+    println!("{}", "Machine Identity".bold());
+    let machine_id = config.get_or_create_machine_id()?;
+    println!("  ID: {}", machine_id.dimmed());
+
+    let detected_hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("  Detected hostname: {}", detected_hostname.cyan());
+    println!();
+
+    let prompt_text = format!("What would you like to call this machine? [{}]", detected_hostname);
+    print!("{}: ", prompt_text);
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    let machine_name = if input.is_empty() {
+        detected_hostname
+    } else {
+        input.to_string()
+    };
+
+    config.set_machine_name(&machine_name)?;
+    println!("Machine name set to: {}", machine_name.green());
+    println!();
+
     config
         .save_to_path(&config_path)
         .context("Failed to save configuration")?;
@@ -149,11 +181,19 @@ pub fn run(args: Args) -> Result<()> {
     println!("  Created: {}", config_path.display());
 
     // Initialize database if needed
-    if !db_path.exists() {
-        // Opening the database will create it and run migrations
-        crate::storage::Database::open_default()?;
+    let db_created = !db_path.exists();
+    let db = crate::storage::Database::open_default()?;
+    if db_created {
         println!("  Created: {}", db_path.display());
     }
+
+    // Register this machine in the machines table for cloud sync
+    let machine = Machine {
+        id: machine_id.clone(),
+        name: machine_name.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    db.upsert_machine(&machine)?;
 
     println!();
     println!("Enabled watchers: {}", selected_watchers.join(", ").cyan());

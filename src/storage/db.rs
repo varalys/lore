@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use super::models::{
-    Annotation, Message, MessageContent, MessageRole, SearchResult, Session, SessionLink, Summary,
-    Tag,
+    Annotation, Machine, Message, MessageContent, MessageRole, SearchResult, Session, SessionLink,
+    Summary, Tag,
 };
 
 /// Parses a UUID from a string, converting errors to rusqlite errors.
@@ -183,6 +183,12 @@ impl Database {
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );
 
+            CREATE TABLE IF NOT EXISTS machines (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             -- Indexes for common queries
             CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
             CREATE INDEX IF NOT EXISTS idx_sessions_working_directory ON sessions(working_directory);
@@ -230,7 +236,11 @@ impl Database {
         Ok(())
     }
 
-    /// Adds the machine_id column to the sessions table if it does not exist.
+    /// Adds the machine_id column to the sessions table if it does not exist,
+    /// and backfills NULL values with the current machine's UUID.
+    ///
+    /// Also migrates sessions that were previously backfilled with hostname
+    /// to use the UUID instead.
     ///
     /// This migration is idempotent and safe to run on both new and existing databases.
     fn migrate_add_machine_id(&self) -> Result<()> {
@@ -244,6 +254,25 @@ impl Database {
         if !columns.iter().any(|c| c == "machine_id") {
             self.conn
                 .execute("ALTER TABLE sessions ADD COLUMN machine_id TEXT", [])?;
+        }
+
+        // Backfill NULL machine_id values with current machine UUID
+        if let Some(machine_uuid) = super::get_machine_id() {
+            self.conn.execute(
+                "UPDATE sessions SET machine_id = ?1 WHERE machine_id IS NULL",
+                [&machine_uuid],
+            )?;
+
+            // Migrate sessions that were backfilled with hostname to use UUID.
+            // We detect hostname-based machine_ids by checking if they don't look
+            // like UUIDs (UUIDs contain dashes in the format 8-4-4-4-12).
+            // This is safe because it only affects sessions from this machine.
+            if let Some(hostname) = hostname::get().ok().and_then(|h| h.into_string().ok()) {
+                self.conn.execute(
+                    "UPDATE sessions SET machine_id = ?1 WHERE machine_id = ?2",
+                    [&machine_uuid, &hostname],
+                )?;
+            }
         }
 
         Ok(())
@@ -1520,6 +1549,85 @@ impl Database {
             params![session_id.to_string()],
         )?;
         Ok(rows_affected > 0)
+    }
+
+    // ==================== Machines ====================
+
+    /// Registers a machine or updates its name if it already exists.
+    ///
+    /// Used to store machine identity information for cloud sync.
+    /// If a machine with the given ID already exists, updates the name.
+    pub fn upsert_machine(&self, machine: &Machine) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO machines (id, name, created_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(id) DO UPDATE SET
+                name = ?2
+            "#,
+            params![machine.id, machine.name, machine.created_at],
+        )?;
+        Ok(())
+    }
+
+    /// Gets a machine by ID.
+    ///
+    /// Returns `None` if no machine with the given ID exists.
+    #[allow(dead_code)]
+    pub fn get_machine(&self, id: &str) -> Result<Option<Machine>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, created_at FROM machines WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(Machine {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        created_at: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .context("Failed to get machine")
+    }
+
+    /// Gets the display name for a machine ID.
+    ///
+    /// Returns the machine name if found, otherwise returns a truncated UUID
+    /// (first 8 characters) for readability.
+    #[allow(dead_code)]
+    pub fn get_machine_name(&self, id: &str) -> Result<String> {
+        if let Some(machine) = self.get_machine(id)? {
+            Ok(machine.name)
+        } else {
+            // Fallback to truncated UUID
+            if id.len() > 8 {
+                Ok(id[..8].to_string())
+            } else {
+                Ok(id.to_string())
+            }
+        }
+    }
+
+    /// Lists all registered machines.
+    ///
+    /// Returns machines ordered by creation date (oldest first).
+    #[allow(dead_code)]
+    pub fn list_machines(&self) -> Result<Vec<Machine>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, created_at FROM machines ORDER BY created_at ASC")?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(Machine {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list machines")
     }
 
     /// Gets the most recent session for a given working directory.
@@ -4270,5 +4378,152 @@ mod tests {
         // Verify summary is also deleted
         let retrieved = db.get_summary(&session.id).expect("get summary");
         assert!(retrieved.is_none());
+    }
+
+    // ==================== Machine Tests ====================
+
+    #[test]
+    fn test_upsert_machine_insert() {
+        let (db, _dir) = create_test_db();
+
+        let machine = Machine {
+            id: "test-uuid-1234".to_string(),
+            name: "my-laptop".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+
+        db.upsert_machine(&machine).expect("Failed to upsert machine");
+
+        let retrieved = db
+            .get_machine("test-uuid-1234")
+            .expect("Failed to get machine")
+            .expect("Machine should exist");
+
+        assert_eq!(retrieved.id, "test-uuid-1234");
+        assert_eq!(retrieved.name, "my-laptop");
+    }
+
+    #[test]
+    fn test_upsert_machine_update() {
+        let (db, _dir) = create_test_db();
+
+        // Insert initial machine
+        let machine1 = Machine {
+            id: "test-uuid-5678".to_string(),
+            name: "old-name".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        db.upsert_machine(&machine1).expect("Failed to upsert machine");
+
+        // Update with new name
+        let machine2 = Machine {
+            id: "test-uuid-5678".to_string(),
+            name: "new-name".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        db.upsert_machine(&machine2).expect("Failed to upsert machine");
+
+        // Verify name was updated
+        let retrieved = db
+            .get_machine("test-uuid-5678")
+            .expect("Failed to get machine")
+            .expect("Machine should exist");
+
+        assert_eq!(retrieved.name, "new-name");
+    }
+
+    #[test]
+    fn test_get_machine() {
+        let (db, _dir) = create_test_db();
+
+        // Machine does not exist initially
+        let not_found = db
+            .get_machine("nonexistent-uuid")
+            .expect("Failed to query");
+        assert!(not_found.is_none(), "Machine should not exist");
+
+        // Insert a machine
+        let machine = Machine {
+            id: "existing-uuid".to_string(),
+            name: "test-machine".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        db.upsert_machine(&machine).expect("Failed to upsert");
+
+        // Now it should be found
+        let found = db
+            .get_machine("existing-uuid")
+            .expect("Failed to query")
+            .expect("Machine should exist");
+
+        assert_eq!(found.id, "existing-uuid");
+        assert_eq!(found.name, "test-machine");
+    }
+
+    #[test]
+    fn test_get_machine_name_found() {
+        let (db, _dir) = create_test_db();
+
+        let machine = Machine {
+            id: "uuid-for-name-test".to_string(),
+            name: "my-workstation".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        db.upsert_machine(&machine).expect("Failed to upsert");
+
+        let name = db
+            .get_machine_name("uuid-for-name-test")
+            .expect("Failed to get name");
+
+        assert_eq!(name, "my-workstation");
+    }
+
+    #[test]
+    fn test_get_machine_name_not_found() {
+        let (db, _dir) = create_test_db();
+
+        // Machine does not exist, should return truncated UUID
+        let name = db
+            .get_machine_name("abc123def456789")
+            .expect("Failed to get name");
+
+        assert_eq!(name, "abc123de", "Should return first 8 characters");
+
+        // Test with short ID
+        let short_name = db.get_machine_name("short").expect("Failed to get name");
+
+        assert_eq!(short_name, "short", "Should return full ID if shorter than 8 chars");
+    }
+
+    #[test]
+    fn test_list_machines() {
+        let (db, _dir) = create_test_db();
+
+        // Initially empty
+        let machines = db.list_machines().expect("Failed to list");
+        assert!(machines.is_empty(), "Should have no machines initially");
+
+        // Add machines
+        let machine1 = Machine {
+            id: "uuid-1".to_string(),
+            name: "machine-1".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let machine2 = Machine {
+            id: "uuid-2".to_string(),
+            name: "machine-2".to_string(),
+            created_at: "2024-01-02T00:00:00Z".to_string(),
+        };
+
+        db.upsert_machine(&machine1).expect("Failed to upsert");
+        db.upsert_machine(&machine2).expect("Failed to upsert");
+
+        // List should return both machines
+        let machines = db.list_machines().expect("Failed to list");
+        assert_eq!(machines.len(), 2, "Should have 2 machines");
+
+        // Should be ordered by created_at (oldest first)
+        assert_eq!(machines[0].id, "uuid-1");
+        assert_eq!(machines[1].id, "uuid-2");
     }
 }

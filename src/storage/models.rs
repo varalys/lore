@@ -450,6 +450,23 @@ pub struct Summary {
     pub generated_at: DateTime<Utc>,
 }
 
+/// Represents a machine that has captured sessions.
+///
+/// Used for cloud sync to map machine UUIDs to friendly names. Each machine
+/// has a unique identifier (UUID) and a human-readable name that can be
+/// customized by the user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Machine {
+    /// Unique machine identifier (UUID).
+    pub id: String,
+
+    /// Human-readable machine name (e.g., hostname or custom name).
+    pub name: String,
+
+    /// When this machine was first registered (RFC3339 format).
+    pub created_at: String,
+}
+
 /// A tracked git repository.
 ///
 /// Repositories are discovered when sessions reference working directories

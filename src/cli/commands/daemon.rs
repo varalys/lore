@@ -168,6 +168,151 @@ fn run_stop() -> Result<()> {
         return Ok(());
     }
 
+    // On macOS, check if running as a managed service (launchd restarts it)
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(stopped) = try_stop_macos_service()? {
+            if stopped {
+                return Ok(());
+            }
+            // If try_stop_macos_service returns Some(false), fall through to IPC/SIGTERM
+        }
+    }
+
+    // On Linux, check if running as a systemd service
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(stopped) = try_stop_linux_service()? {
+            if stopped {
+                return Ok(());
+            }
+            // If try_stop_linux_service returns Some(false), fall through to IPC/SIGTERM
+        }
+    }
+
+    // Fall back to IPC/SIGTERM for non-service daemons
+    stop_daemon_via_ipc(&state)
+}
+
+/// Attempts to stop a macOS service-managed daemon.
+///
+/// Returns:
+/// - Ok(Some(true)) if the service was stopped successfully
+/// - Ok(Some(false)) if service exists but stop failed (should fall back to IPC)
+/// - Ok(None) if no service is installed (should use IPC/SIGTERM)
+#[cfg(target_os = "macos")]
+fn try_stop_macos_service() -> Result<Option<bool>> {
+    let brew_plist = get_homebrew_plist_path()?;
+    let native_plist = get_launchd_plist_path()?;
+
+    // Check for Homebrew-managed service first
+    if brew_plist.exists() {
+        println!("{}", "Stopping Homebrew-managed service...".green());
+
+        let output = Command::new("brew")
+            .args(["services", "stop", "lore"])
+            .output();
+
+        match output {
+            Ok(result) => {
+                if result.status.success() {
+                    println!("{} Homebrew service stopped", "Success:".green());
+                    return Ok(Some(true));
+                } else {
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    println!(
+                        "{} brew services stop failed: {}",
+                        "Warning:".yellow(),
+                        stderr.trim()
+                    );
+                    // Fall through to IPC/SIGTERM
+                    return Ok(Some(false));
+                }
+            }
+            Err(e) => {
+                println!(
+                    "{} Could not run 'brew services stop': {}",
+                    "Warning:".yellow(),
+                    e
+                );
+                // Fall through to IPC/SIGTERM
+                return Ok(Some(false));
+            }
+        }
+    }
+
+    // Check for native launchd service
+    if native_plist.exists() {
+        println!("{}", "Stopping native launchd service...".green());
+
+        let output = Command::new("launchctl")
+            .args(["unload", "-w"])
+            .arg(&native_plist)
+            .output()
+            .context("Failed to run launchctl unload")?;
+
+        if output.status.success() {
+            println!("{} Launchd service stopped", "Success:".green());
+            return Ok(Some(true));
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("Could not find specified service") {
+                println!(
+                    "{} launchctl unload failed: {}",
+                    "Warning:".yellow(),
+                    stderr.trim()
+                );
+            }
+            // Fall through to IPC/SIGTERM
+            return Ok(Some(false));
+        }
+    }
+
+    // No service installed, use IPC/SIGTERM
+    Ok(None)
+}
+
+/// Attempts to stop a Linux systemd-managed daemon.
+///
+/// Returns:
+/// - Ok(Some(true)) if the service was stopped successfully
+/// - Ok(Some(false)) if service exists but stop failed (should fall back to IPC)
+/// - Ok(None) if no service is installed (should use IPC/SIGTERM)
+#[cfg(target_os = "linux")]
+fn try_stop_linux_service() -> Result<Option<bool>> {
+    let unit_path = get_systemd_unit_path()?;
+
+    if unit_path.exists() {
+        println!("{}", "Stopping systemd user service...".green());
+
+        let output = Command::new("systemctl")
+            .args(["--user", "stop", SYSTEMD_SERVICE_NAME])
+            .output()
+            .context("Failed to run systemctl stop")?;
+
+        if output.status.success() {
+            println!("{} Systemd service stopped", "Success:".green());
+            return Ok(Some(true));
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!(
+                "{} systemctl stop failed: {}",
+                "Warning:".yellow(),
+                stderr.trim()
+            );
+            // Fall through to IPC/SIGTERM
+            return Ok(Some(false));
+        }
+    }
+
+    // No service installed, use IPC/SIGTERM
+    Ok(None)
+}
+
+/// Stops the daemon using IPC socket and/or SIGTERM.
+///
+/// This is the fallback method when the daemon is not running as a managed service.
+fn stop_daemon_via_ipc(state: &DaemonState) -> Result<()> {
     let pid = state.get_pid().unwrap_or(0);
     println!("Stopping daemon (PID {pid})...");
 

@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// Lore configuration settings.
 ///
@@ -28,6 +29,18 @@ pub struct Config {
 
     /// Whether to append session references to commit messages.
     pub commit_footer: bool,
+
+    /// Unique machine identifier (UUID) for cloud sync deduplication.
+    ///
+    /// Auto-generated on first access via `get_or_create_machine_id()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+
+    /// Human-readable machine name.
+    ///
+    /// Defaults to hostname if not set. Can be customized by the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_name: Option<String>,
 }
 
 impl Default for Config {
@@ -37,6 +50,8 @@ impl Default for Config {
             auto_link: false,
             auto_link_threshold: 0.7,
             commit_footer: false,
+            machine_id: None,
+            machine_name: None,
         }
     }
 }
@@ -53,7 +68,6 @@ impl Config {
     /// Saves configuration to the default config file.
     ///
     /// Creates the `~/.lore` directory if it does not exist.
-    #[allow(dead_code)]
     pub fn save(&self) -> Result<()> {
         let path = Self::config_path()?;
         self.save_to_path(&path)
@@ -98,6 +112,47 @@ impl Config {
         Ok(())
     }
 
+    /// Returns the machine UUID, generating and saving a new one if needed.
+    ///
+    /// If no machine_id exists in config, generates a new UUIDv4 and saves
+    /// it to the config file. This ensures a consistent machine identifier
+    /// across sessions for cloud sync deduplication.
+    pub fn get_or_create_machine_id(&mut self) -> Result<String> {
+        if let Some(ref id) = self.machine_id {
+            return Ok(id.clone());
+        }
+
+        let id = Uuid::new_v4().to_string();
+        self.machine_id = Some(id.clone());
+        self.save()?;
+        Ok(id)
+    }
+
+    /// Returns the machine name.
+    ///
+    /// If a custom machine_name is set, returns that. Otherwise returns
+    /// the system hostname. Returns "unknown" if hostname cannot be determined.
+    pub fn get_machine_name(&self) -> String {
+        if let Some(ref name) = self.machine_name {
+            return name.clone();
+        }
+
+        hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Sets a custom machine name and saves the configuration.
+    ///
+    /// The machine name is a human-readable identifier for this machine,
+    /// displayed in session listings and useful for identifying which
+    /// machine created a session.
+    pub fn set_machine_name(&mut self, name: &str) -> Result<()> {
+        self.machine_name = Some(name.to_string());
+        self.save()
+    }
+
     /// Gets a configuration value by key.
     ///
     /// Supported keys:
@@ -105,6 +160,8 @@ impl Config {
     /// - `auto_link` - "true" or "false"
     /// - `auto_link_threshold` - float between 0.0 and 1.0
     /// - `commit_footer` - "true" or "false"
+    /// - `machine_id` - the machine UUID (read-only, auto-generated)
+    /// - `machine_name` - human-readable machine name
     ///
     /// Returns `None` if the key is not recognized.
     pub fn get(&self, key: &str) -> Option<String> {
@@ -113,6 +170,8 @@ impl Config {
             "auto_link" => Some(self.auto_link.to_string()),
             "auto_link_threshold" => Some(self.auto_link_threshold.to_string()),
             "commit_footer" => Some(self.commit_footer.to_string()),
+            "machine_id" => self.machine_id.clone(),
+            "machine_name" => Some(self.get_machine_name()),
             _ => None,
         }
     }
@@ -124,6 +183,9 @@ impl Config {
     /// - `auto_link` - "true" or "false"
     /// - `auto_link_threshold` - float between 0.0 and 1.0 (inclusive)
     /// - `commit_footer` - "true" or "false"
+    /// - `machine_name` - human-readable machine name
+    ///
+    /// Note: `machine_id` cannot be set manually; it is auto-generated.
     ///
     /// Returns an error if the key is not recognized or the value is invalid.
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
@@ -152,6 +214,12 @@ impl Config {
                 self.commit_footer = parse_bool(value)
                     .with_context(|| format!("Invalid value for commit_footer: '{value}'"))?;
             }
+            "machine_name" => {
+                self.machine_name = Some(value.to_string());
+            }
+            "machine_id" => {
+                bail!("machine_id cannot be set manually; it is auto-generated");
+            }
             _ => {
                 bail!("Unknown configuration key: '{key}'");
             }
@@ -177,6 +245,8 @@ impl Config {
             "auto_link",
             "auto_link_threshold",
             "commit_footer",
+            "machine_id",
+            "machine_name",
         ]
     }
 }
@@ -204,6 +274,8 @@ mod tests {
         assert!(!config.auto_link);
         assert!((config.auto_link_threshold - 0.7).abs() < f64::EPSILON);
         assert!(!config.commit_footer);
+        assert!(config.machine_id.is_none());
+        assert!(config.machine_name.is_none());
     }
 
     #[test]
@@ -396,6 +468,8 @@ mod tests {
         assert!(keys.contains(&"auto_link"));
         assert!(keys.contains(&"auto_link_threshold"));
         assert!(keys.contains(&"commit_footer"));
+        assert!(keys.contains(&"machine_id"));
+        assert!(keys.contains(&"machine_name"));
     }
 
     #[test]
@@ -415,5 +489,102 @@ mod tests {
         assert!(!parse_bool("NO").unwrap());
 
         assert!(parse_bool("invalid").is_err());
+    }
+
+    #[test]
+    fn test_get_machine_name_returns_custom_name() {
+        let config = Config {
+            machine_name: Some("my-laptop".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.get_machine_name(), "my-laptop");
+    }
+
+    #[test]
+    fn test_get_machine_name_returns_hostname_when_not_set() {
+        let config = Config::default();
+        let name = config.get_machine_name();
+        // Should return some non-empty string (hostname or "unknown")
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn test_set_machine_name_via_set_method() {
+        let mut config = Config::default();
+        config.set("machine_name", "dev-workstation").unwrap();
+        assert_eq!(config.machine_name, Some("dev-workstation".to_string()));
+    }
+
+    #[test]
+    fn test_get_machine_name_via_get_method() {
+        let config = Config {
+            machine_name: Some("test-machine".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.get("machine_name"), Some("test-machine".to_string()));
+    }
+
+    #[test]
+    fn test_get_machine_id_returns_none_when_not_set() {
+        let config = Config::default();
+        assert_eq!(config.get("machine_id"), None);
+    }
+
+    #[test]
+    fn test_get_machine_id_returns_value_when_set() {
+        let config = Config {
+            machine_id: Some("test-uuid-1234".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.get("machine_id"), Some("test-uuid-1234".to_string()));
+    }
+
+    #[test]
+    fn test_set_machine_id_fails() {
+        let mut config = Config::default();
+        let result = config.set("machine_id", "some-uuid");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be set manually"));
+    }
+
+    #[test]
+    fn test_machine_id_and_name_omitted_from_yaml_when_none() {
+        let config = Config::default();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(!yaml.contains("machine_id"));
+        assert!(!yaml.contains("machine_name"));
+    }
+
+    #[test]
+    fn test_machine_id_and_name_included_in_yaml_when_set() {
+        let config = Config {
+            machine_id: Some("uuid-1234".to_string()),
+            machine_name: Some("my-machine".to_string()),
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(yaml.contains("machine_id"));
+        assert!(yaml.contains("machine_name"));
+    }
+
+    #[test]
+    fn test_save_and_load_with_machine_identity() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("config.yaml");
+
+        let config = Config {
+            machine_id: Some("test-uuid".to_string()),
+            machine_name: Some("test-name".to_string()),
+            ..Default::default()
+        };
+
+        config.save_to_path(&path).unwrap();
+        let loaded = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(loaded.machine_id, Some("test-uuid".to_string()));
+        assert_eq!(loaded.machine_name, Some("test-name".to_string()));
     }
 }
