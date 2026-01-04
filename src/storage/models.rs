@@ -40,6 +40,11 @@ pub struct Session {
 
     /// Number of messages in this session
     pub message_count: i32,
+
+    /// Machine identifier (hostname) where the session was captured.
+    /// Used for cloud sync to identify which machine created the session.
+    /// Optional for backwards compatibility with existing sessions.
+    pub machine_id: Option<String>,
 }
 
 /// A single message in a session
@@ -383,6 +388,83 @@ pub struct ContextMessage {
     /// Whether this is the matching message.
     #[serde(default)]
     pub is_match: bool,
+}
+
+/// An annotation on a session.
+///
+/// Annotations are user-created bookmarks or notes attached to sessions.
+/// They can be used to mark important moments, add context, or organize
+/// sessions for later reference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Annotation {
+    /// Unique identifier for this annotation.
+    pub id: Uuid,
+
+    /// The session this annotation belongs to.
+    pub session_id: Uuid,
+
+    /// The annotation content (user-provided note or bookmark).
+    pub content: String,
+
+    /// When the annotation was created.
+    pub created_at: DateTime<Utc>,
+}
+
+/// A tag applied to a session.
+///
+/// Tags provide a way to categorize and organize sessions. Each session
+/// can have multiple tags, and the same tag label can be applied to
+/// multiple sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tag {
+    /// Unique identifier for this tag instance.
+    pub id: Uuid,
+
+    /// The session this tag is applied to.
+    pub session_id: Uuid,
+
+    /// The tag label (e.g., "bug-fix", "feature", "refactor").
+    pub label: String,
+
+    /// When the tag was applied.
+    pub created_at: DateTime<Utc>,
+}
+
+/// A summary of a session.
+///
+/// Summaries provide a concise description of what happened in a session,
+/// useful for quickly understanding the session context when continuing
+/// work or reviewing history. Each session can have at most one summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Summary {
+    /// Unique identifier for this summary.
+    pub id: Uuid,
+
+    /// The session this summary describes.
+    pub session_id: Uuid,
+
+    /// The summary content text.
+    pub content: String,
+
+    /// When the summary was generated or last updated.
+    pub generated_at: DateTime<Utc>,
+}
+
+/// Represents a machine that has captured sessions.
+///
+/// Used for cloud sync to map machine UUIDs to friendly names. Each machine
+/// has a unique identifier (UUID) and a human-readable name that can be
+/// customized by the user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Machine {
+    /// Unique machine identifier (UUID).
+    pub id: String,
+
+    /// Human-readable machine name (e.g., hostname or custom name).
+    pub name: String,
+
+    /// When this machine was first registered (RFC3339 format).
+    pub created_at: String,
 }
 
 /// A tracked git repository.

@@ -94,6 +94,22 @@ enum Commands {
     )]
     Status(commands::status::Args),
 
+    /// Show the active session for the current directory
+    #[command(
+        long_about = "Reports the active session ID for the current working directory.\n\
+        Queries the daemon if running, otherwise checks the database for\n\
+        the most recent session."
+    )]
+    Current(commands::current::Args),
+
+    /// Show recent sessions for quick orientation
+    #[command(
+        long_about = "Provides a summary of recent sessions for the current repository.\n\
+        Shows session ID, tool, start time, message count, and linked commits.\n\
+        Use --last for detailed info about the most recent session only."
+    )]
+    Context(commands::context::Args),
+
     /// List and filter imported sessions
     #[command(
         long_about = "Displays a table of imported sessions with their IDs, timestamps,\n\
@@ -129,6 +145,30 @@ enum Commands {
         link using --commit, or remove all links for a session."
     )]
     Unlink(commands::unlink::Args),
+
+    /// Add a bookmark or note to the current session
+    #[command(
+        long_about = "Adds an annotation (bookmark or note) to the current active session\n\
+        or a specified session. Annotations help mark important moments\n\
+        in a session for later reference."
+    )]
+    Annotate(commands::annotate::Args),
+
+    /// Add or remove tags from a session
+    #[command(
+        long_about = "Tags sessions for organization and filtering. Each session can\n\
+        have multiple tags. Use --remove to remove a tag. Tags are shown\n\
+        in 'lore show' output and can be filtered with 'lore sessions --tag'."
+    )]
+    Tag(commands::tag::Args),
+
+    /// Add or view a session summary
+    #[command(
+        long_about = "Manages session summaries that provide concise descriptions of\n\
+        what happened in a session. Summaries help with quickly understanding\n\
+        session context when continuing work or reviewing history."
+    )]
+    Summarize(commands::summarize::Args),
 
     /// Permanently delete a session and its data
     #[command(
@@ -301,10 +341,15 @@ fn command_name(command: &Commands) -> &'static str {
     match command {
         Commands::Init(_) => "init",
         Commands::Status(_) => "status",
+        Commands::Current(_) => "current",
+        Commands::Context(_) => "context",
         Commands::Sessions(_) => "sessions",
         Commands::Show(_) => "show",
         Commands::Link(_) => "link",
         Commands::Unlink(_) => "unlink",
+        Commands::Annotate(_) => "annotate",
+        Commands::Tag(_) => "tag",
+        Commands::Summarize(_) => "summarize",
         Commands::Delete(_) => "delete",
         Commands::Search(_) => "search",
         Commands::Config(_) => "config",
@@ -372,10 +417,15 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Init(args) => commands::init::run(args),
         Commands::Status(args) => commands::status::run(args),
+        Commands::Current(args) => commands::current::run(args),
+        Commands::Context(args) => commands::context::run(args),
         Commands::Sessions(args) => commands::sessions::run(args),
         Commands::Show(args) => commands::show::run(args),
         Commands::Link(args) => commands::link::run(args),
         Commands::Unlink(args) => commands::unlink::run(args),
+        Commands::Annotate(args) => commands::annotate::run(args),
+        Commands::Tag(args) => commands::tag::run(args),
+        Commands::Summarize(args) => commands::summarize::run(args),
         Commands::Delete(args) => commands::delete::run(args),
         Commands::Search(args) => commands::search::run(args),
         Commands::Config(args) => commands::config::run(args),
@@ -428,6 +478,7 @@ mod tests {
     fn test_should_not_skip_first_run_prompt_sessions() {
         let command = Commands::Sessions(commands::sessions::Args {
             repo: None,
+            tag: None,
             limit: 20,
             format: OutputFormat::Text,
         });
@@ -486,6 +537,7 @@ mod tests {
     fn test_command_name_sessions() {
         let command = Commands::Sessions(commands::sessions::Args {
             repo: None,
+            tag: None,
             limit: 20,
             format: OutputFormat::Text,
         });

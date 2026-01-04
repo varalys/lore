@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::cli::OutputFormat;
 use crate::config::Config;
 use crate::storage::db::default_db_path;
+use crate::storage::{Database, Machine};
 
 /// Arguments for the config command.
 #[derive(clap::Args)]
@@ -57,6 +58,8 @@ struct ConfigShowOutput {
 /// JSON representation of config settings.
 #[derive(Serialize)]
 struct ConfigSettings {
+    machine_id: Option<String>,
+    machine_name: Option<String>,
     watchers: Vec<String>,
     auto_link: bool,
     auto_link_threshold: f64,
@@ -86,6 +89,8 @@ fn run_show(format: OutputFormat) -> Result<()> {
                 config_path: config_path.display().to_string(),
                 config_exists,
                 settings: ConfigSettings {
+                    machine_id: config.machine_id.clone(),
+                    machine_name: config.machine_name.clone(),
                     watchers: config.watchers.clone(),
                     auto_link: config.auto_link,
                     auto_link_threshold: config.auto_link_threshold,
@@ -105,6 +110,24 @@ fn run_show(format: OutputFormat) -> Result<()> {
                 print!(" {}", "(not created)".dimmed());
             }
             println!();
+            println!();
+            println!("{}", "Machine Identity:".dimmed());
+            println!(
+                "  machine_id:   {}",
+                config
+                    .machine_id
+                    .as_deref()
+                    .map(|s| s.cyan().to_string())
+                    .unwrap_or_else(|| "(not set)".dimmed().to_string())
+            );
+            println!(
+                "  machine_name: {}",
+                config
+                    .machine_name
+                    .as_deref()
+                    .map(|s| s.cyan().to_string())
+                    .unwrap_or_else(|| "(not set)".dimmed().to_string())
+            );
             println!();
             println!("{}", "Settings:".dimmed());
             println!(
@@ -184,6 +207,21 @@ fn run_set(key: &str, value: &str) -> Result<()> {
     config.set(key, value)?;
     config.save_to_path(&config_path)?;
 
+    // If setting machine_name, also update the machines table
+    if key == "machine_name" {
+        if let Ok(machine_id) = config.get_or_create_machine_id() {
+            if let Ok(db) = Database::open_default() {
+                let machine = Machine {
+                    id: machine_id,
+                    name: value.to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                // Ignore errors here since config update was successful
+                let _ = db.upsert_machine(&machine);
+            }
+        }
+    }
+
     println!("{} {} = {}", "Set".green(), key.cyan(), value.cyan());
 
     Ok(())
@@ -208,6 +246,8 @@ mod tests {
             config_path: "/test/config".to_string(),
             config_exists: true,
             settings: ConfigSettings {
+                machine_id: Some("test-uuid".to_string()),
+                machine_name: Some("test-machine".to_string()),
                 watchers: vec!["claude-code".to_string()],
                 auto_link: false,
                 auto_link_threshold: 0.7,
@@ -225,6 +265,8 @@ mod tests {
     #[test]
     fn test_config_settings_serialization() {
         let settings = ConfigSettings {
+            machine_id: Some("test-uuid".to_string()),
+            machine_name: Some("test-machine".to_string()),
             watchers: vec!["aider".to_string(), "claude-code".to_string()],
             auto_link: true,
             auto_link_threshold: 0.8,

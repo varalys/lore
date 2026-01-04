@@ -18,7 +18,8 @@ When you use AI coding tools like Claude Code or Aider, the conversation history
 - [Quick Start](#quick-start)
 - [Example Workflow](#example-workflow)
 - [Search](#search)
-- [Commands](#commands)
+- [Session Awareness](#session-awareness)
+- [Command Reference](#command-reference)
 - [Supported Tools](#supported-tools)
 - [Background Daemon](#background-daemon)
 - [Git Hooks](#git-hooks)
@@ -45,22 +46,7 @@ Lore reads session data from AI coding tools, stores it in a local SQLite databa
 
 ### Capture
 
-Lore includes parsers for each supported tool:
-
-| Tool | Format |
-|------|--------|
-| Claude Code | JSONL |
-| Codex CLI | JSONL |
-| Gemini CLI | JSON |
-| Amp | JSON |
-| Aider | Markdown |
-| Continue.dev | JSON |
-| Cline | JSON |
-| Roo Code | JSON |
-| Kilo Code | JSON |
-| OpenCode | JSON |
-
-Import existing sessions with `lore import`, or run `lore daemon start` to watch for new sessions in real-time.
+Lore includes parsers for each [supported tool](#supported-tools). Import existing sessions with `lore import`, or run `lore daemon start` to watch for new sessions in real-time.
 
 ### Storage
 
@@ -177,35 +163,50 @@ lore search "error handling" --context 3
 
 Search matches message content, project names, branches, and tool names. Results show surrounding context so you can understand the conversation flow.
 
-## Commands
+## Session Awareness
 
-| Command | Description |
-|---------|-------------|
-| `lore init` | Guided first-run setup (auto-detects AI tools) |
-| `lore status` | Show daemon status, watchers, and recent sessions |
-| `lore sessions` | List sessions with branch history (supports `--repo`, `--limit`, `--format`) |
-| `lore show <id>` | View session details |
-| `lore show --commit <ref>` | View sessions linked to a commit |
-| `lore import` | Import sessions from all enabled watchers |
-| `lore link <id>` | Link session to HEAD |
-| `lore unlink <id>` | Remove a session-commit link |
-| `lore delete <id>` | Permanently delete a session |
-| `lore search <query>` | Full-text search with filters and context |
-| `lore hooks install` | Install git hooks for automatic linking |
-| `lore hooks status` | Check installed git hooks |
-| `lore hooks uninstall` | Remove installed git hooks |
-| `lore daemon start` | Start background watcher for real-time capture |
-| `lore daemon stop` | Stop background watcher |
-| `lore daemon logs` | View daemon logs |
-| `lore daemon install` | Install daemon as a system service |
-| `lore daemon uninstall` | Remove daemon service |
-| `lore db stats` | Show database statistics |
-| `lore db vacuum` | Reclaim unused disk space |
-| `lore db prune` | Delete old sessions |
-| `lore config` | View configuration |
-| `lore config get <key>` | Get a config value |
-| `lore config set <key> <val>` | Set a config value |
-| `lore completions <shell>` | Generate shell completions |
+Lore helps you pick up where you left off and organize your sessions:
+
+```bash
+# See what session is active in the current directory
+lore current
+
+# Get quick context on recent sessions in this repo
+lore context
+
+# Get detailed summary of the last session (for "continue where we left off")
+lore context --last
+
+# Add a bookmark or note to the current session
+lore annotate "Implemented auth, need to add tests"
+
+# Tag sessions for organization
+lore tag abc123 needs-review
+lore tag abc123 feature-auth
+lore sessions --tag needs-review    # Filter by tag
+
+# Add a summary to a session for future reference
+lore summarize abc123 "Added OAuth2 login flow with Google and GitHub providers"
+lore summarize abc123 --show        # View existing summary
+```
+
+Tags, annotations, and summaries appear in `lore show` output and help you quickly understand past sessions.
+
+## Command Reference
+
+Essential commands to get started:
+
+```bash
+lore init           # First-run setup (auto-detects AI tools)
+lore import         # Import sessions from enabled tools
+lore sessions       # List recent sessions
+lore show <id>      # View session details
+lore search <query> # Full-text search
+lore context --last # Quick summary of last session
+lore daemon start   # Start real-time capture
+```
+
+Run `lore --help` for the full command list, or `lore <command> --help` for details on any command.
 
 ## Supported Tools
 
@@ -215,18 +216,18 @@ the Linux filesystem. VS Code extension sessions are only discovered when the
 extensions run in WSL (Remote - WSL); if you run VS Code natively on Windows,
 those sessions live under `%APPDATA%` and are not detected today.
 
-| Tool | Status | Storage Location |
+| Tool | Format | Storage Location |
 |------|--------|------------------|
-| Claude Code | Supported | `~/.claude/projects/` |
-| Codex CLI | Supported | `~/.codex/sessions/` |
-| Gemini CLI | Supported | `~/.gemini/tmp/*/chats/` |
-| Amp | Supported | `~/.local/share/amp/threads/` |
-| Aider | Supported | `.aider.chat.history.md` |
-| Continue.dev | Supported | `~/.continue/sessions/` |
-| Cline | Supported | VS Code extension storage |
-| Roo Code | Supported | VS Code extension storage |
-| Kilo Code | Supported | VS Code extension storage |
-| OpenCode | Supported | `~/.local/share/opencode/storage/` |
+| Claude Code | JSONL | `~/.claude/projects/` |
+| Codex CLI | JSONL | `~/.codex/sessions/` |
+| Gemini CLI | JSON | `~/.gemini/tmp/*/chats/` |
+| Amp | JSON | `~/.local/share/amp/threads/` |
+| Aider | Markdown | `.aider.chat.history.md` |
+| Continue.dev | JSON | `~/.continue/sessions/` |
+| Cline | JSON | VS Code extension storage |
+| Roo Code | JSON | VS Code extension storage |
+| Kilo Code | JSON | VS Code extension storage |
+| OpenCode | JSON | `~/.local/share/opencode/storage/` |
 
 **Building an AI coding tool?** We welcome contributions to support additional tools. Open an issue with your tool's session storage location and format, or submit a PR adding a watcher. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 

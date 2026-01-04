@@ -290,6 +290,7 @@ fn parse_roo_code_task(history_path: &Path) -> Result<Option<(Session, Vec<Messa
         git_branch: None,
         source_path: Some(history_path.to_string_lossy().to_string()),
         message_count: raw_messages.len() as i32,
+        machine_id: crate::storage::get_machine_id(),
     };
 
     // Convert messages

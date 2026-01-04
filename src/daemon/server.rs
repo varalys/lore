@@ -13,6 +13,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{oneshot, RwLock};
 
 use super::state::DaemonStats;
+use crate::storage::Database;
 
 /// Commands that can be sent to the daemon via IPC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +27,11 @@ pub enum DaemonCommand {
     Stats,
     /// Ping to check if daemon is responsive.
     Ping,
+    /// Request the current active session for a working directory.
+    GetCurrentSession {
+        /// The working directory to check for an active session.
+        working_directory: String,
+    },
 }
 
 /// Responses from the daemon to IPC commands.
@@ -44,6 +50,11 @@ pub enum DaemonResponse {
     Stats(DaemonStats),
     /// Ping response.
     Pong,
+    /// Current session response.
+    CurrentSession {
+        /// The session ID if an active session was found.
+        session_id: Option<String>,
+    },
     /// Error response.
     Error { message: String },
 }
@@ -158,6 +169,15 @@ async fn handle_connection(
             DaemonResponse::Stats(stats_guard.clone())
         }
         DaemonCommand::Ping => DaemonResponse::Pong,
+        DaemonCommand::GetCurrentSession { working_directory } => {
+            // Query the database for the most recent session in this directory
+            match get_current_session_for_directory(&working_directory) {
+                Ok(session_id) => DaemonResponse::CurrentSession { session_id },
+                Err(e) => DaemonResponse::Error {
+                    message: format!("Failed to get current session: {e}"),
+                },
+            }
+        }
     };
 
     let response_json = serde_json::to_string(&response).context("Failed to serialize response")?;
@@ -228,6 +248,19 @@ pub async fn send_command(socket_path: &Path, command: DaemonCommand) -> Result<
 pub fn send_command_sync(socket_path: &Path, command: DaemonCommand) -> Result<DaemonResponse> {
     let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
     rt.block_on(send_command(socket_path, command))
+}
+
+/// Gets the current active session for a working directory.
+///
+/// Queries the database for the most recent session whose working directory
+/// matches or contains the given path. This is used by the daemon to respond
+/// to GetCurrentSession IPC requests.
+///
+/// Returns the session ID as a string if found, or None if no matching session exists.
+fn get_current_session_for_directory(working_dir: &str) -> Result<Option<String>> {
+    let db = Database::open_default()?;
+    let session = db.get_most_recent_session_for_directory(working_dir)?;
+    Ok(session.map(|s| s.id.to_string()))
 }
 
 #[cfg(test)]

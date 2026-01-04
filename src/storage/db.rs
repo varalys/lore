@@ -10,7 +10,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use super::models::{Message, MessageContent, MessageRole, SearchResult, Session, SessionLink};
+use super::models::{
+    Annotation, Machine, Message, MessageContent, MessageRole, SearchResult, Session, SessionLink,
+    Summary, Tag,
+};
 
 /// Parses a UUID from a string, converting errors to rusqlite errors.
 ///
@@ -115,7 +118,8 @@ impl Database {
                 git_branch TEXT,
                 source_path TEXT,
                 message_count INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                machine_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -154,12 +158,46 @@ impl Database {
                 last_session_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS annotations (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS tags (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id),
+                UNIQUE(session_id, label)
+            );
+
+            CREATE TABLE IF NOT EXISTS summaries (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL UNIQUE,
+                content TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS machines (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             -- Indexes for common queries
             CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
             CREATE INDEX IF NOT EXISTS idx_sessions_working_directory ON sessions(working_directory);
             CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
             CREATE INDEX IF NOT EXISTS idx_session_links_session_id ON session_links(session_id);
             CREATE INDEX IF NOT EXISTS idx_session_links_commit_sha ON session_links(commit_sha);
+            CREATE INDEX IF NOT EXISTS idx_annotations_session_id ON annotations(session_id);
+            CREATE INDEX IF NOT EXISTS idx_tags_session_id ON tags(session_id);
+            CREATE INDEX IF NOT EXISTS idx_tags_label ON tags(label);
             "#,
         )?;
 
@@ -191,6 +229,52 @@ impl Database {
             "#,
         )?;
 
+        // Migration: Add machine_id column to existing sessions table if not present.
+        // This handles upgrades from databases created before machine_id was added.
+        self.migrate_add_machine_id()?;
+
+        Ok(())
+    }
+
+    /// Adds the machine_id column to the sessions table if it does not exist,
+    /// and backfills NULL values with the current machine's UUID.
+    ///
+    /// Also migrates sessions that were previously backfilled with hostname
+    /// to use the UUID instead.
+    ///
+    /// This migration is idempotent and safe to run on both new and existing databases.
+    fn migrate_add_machine_id(&self) -> Result<()> {
+        // Check if machine_id column already exists
+        let columns: Vec<String> = self
+            .conn
+            .prepare("PRAGMA table_info(sessions)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if !columns.iter().any(|c| c == "machine_id") {
+            self.conn
+                .execute("ALTER TABLE sessions ADD COLUMN machine_id TEXT", [])?;
+        }
+
+        // Backfill NULL machine_id values with current machine UUID
+        if let Some(machine_uuid) = super::get_machine_id() {
+            self.conn.execute(
+                "UPDATE sessions SET machine_id = ?1 WHERE machine_id IS NULL",
+                [&machine_uuid],
+            )?;
+
+            // Migrate sessions that were backfilled with hostname to use UUID.
+            // We detect hostname-based machine_ids by checking if they don't look
+            // like UUIDs (UUIDs contain dashes in the format 8-4-4-4-12).
+            // This is safe because it only affects sessions from this machine.
+            if let Some(hostname) = hostname::get().ok().and_then(|h| h.into_string().ok()) {
+                self.conn.execute(
+                    "UPDATE sessions SET machine_id = ?1 WHERE machine_id = ?2",
+                    [&machine_uuid, &hostname],
+                )?;
+            }
+        }
+
         Ok(())
     }
 
@@ -204,8 +288,8 @@ impl Database {
     pub fn insert_session(&self, session: &Session) -> Result<()> {
         let rows_changed = self.conn.execute(
             r#"
-            INSERT INTO sessions (id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            INSERT INTO sessions (id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             ON CONFLICT(id) DO UPDATE SET
                 ended_at = ?5,
                 message_count = ?10
@@ -221,6 +305,7 @@ impl Database {
                 session.git_branch,
                 session.source_path,
                 session.message_count,
+                session.machine_id,
             ],
         )?;
 
@@ -255,7 +340,7 @@ impl Database {
     pub fn get_session(&self, id: &Uuid) -> Result<Option<Session>> {
         self.conn
             .query_row(
-                "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count FROM sessions WHERE id = ?1",
+                "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id FROM sessions WHERE id = ?1",
                 params![id.to_string()],
                 Self::row_to_session,
             )
@@ -270,17 +355,17 @@ impl Database {
     pub fn list_sessions(&self, limit: usize, working_dir: Option<&str>) -> Result<Vec<Session>> {
         let mut stmt = if working_dir.is_some() {
             self.conn.prepare(
-                "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count 
-                 FROM sessions 
+                "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
+                 FROM sessions
                  WHERE working_directory LIKE ?1
-                 ORDER BY started_at DESC 
+                 ORDER BY started_at DESC
                  LIMIT ?2"
             )?
         } else {
             self.conn.prepare(
-                "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count 
-                 FROM sessions 
-                 ORDER BY started_at DESC 
+                "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
+                 FROM sessions
+                 ORDER BY started_at DESC
                  LIMIT ?1"
             )?
         };
@@ -349,6 +434,7 @@ impl Database {
             git_branch: row.get(7)?,
             source_path: row.get(8)?,
             message_count: row.get(9)?,
+            machine_id: row.get(10)?,
         })
     }
 
@@ -1102,7 +1188,7 @@ impl Database {
         let sql = if working_dir.is_some() {
             r#"
             SELECT id, tool, tool_version, started_at, ended_at, model,
-                   working_directory, git_branch, source_path, message_count
+                   working_directory, git_branch, source_path, message_count, machine_id
             FROM sessions
             WHERE working_directory LIKE ?1
               AND (
@@ -1119,7 +1205,7 @@ impl Database {
         } else {
             r#"
             SELECT id, tool, tool_version, started_at, ended_at, model,
-                   working_directory, git_branch, source_path, message_count
+                   working_directory, git_branch, source_path, message_count, machine_id
             FROM sessions
             WHERE
               -- Session started before or during the window
@@ -1195,6 +1281,24 @@ impl Database {
             params![session_id_str],
         )?;
 
+        // Delete annotations
+        self.conn.execute(
+            "DELETE FROM annotations WHERE session_id = ?1",
+            params![session_id_str],
+        )?;
+
+        // Delete tags
+        self.conn.execute(
+            "DELETE FROM tags WHERE session_id = ?1",
+            params![session_id_str],
+        )?;
+
+        // Delete summary
+        self.conn.execute(
+            "DELETE FROM summaries WHERE session_id = ?1",
+            params![session_id_str],
+        )?;
+
         // Delete from sessions_fts
         self.conn.execute(
             "DELETE FROM sessions_fts WHERE session_id = ?1",
@@ -1208,6 +1312,345 @@ impl Database {
         )?;
 
         Ok((messages_deleted, links_deleted))
+    }
+
+    // ==================== Annotations ====================
+
+    /// Inserts a new annotation for a session.
+    ///
+    /// Annotations are user-created bookmarks or notes attached to sessions.
+    pub fn insert_annotation(&self, annotation: &Annotation) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO annotations (id, session_id, content, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                annotation.id.to_string(),
+                annotation.session_id.to_string(),
+                annotation.content,
+                annotation.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieves all annotations for a session.
+    ///
+    /// Annotations are returned in order of creation (oldest first).
+    #[allow(dead_code)]
+    pub fn get_annotations(&self, session_id: &Uuid) -> Result<Vec<Annotation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, content, created_at
+             FROM annotations
+             WHERE session_id = ?1
+             ORDER BY created_at ASC",
+        )?;
+
+        let rows = stmt.query_map(params![session_id.to_string()], |row| {
+            Ok(Annotation {
+                id: parse_uuid(&row.get::<_, String>(0)?)?,
+                session_id: parse_uuid(&row.get::<_, String>(1)?)?,
+                content: row.get(2)?,
+                created_at: parse_datetime(&row.get::<_, String>(3)?)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to get annotations")
+    }
+
+    /// Deletes an annotation by its ID.
+    ///
+    /// Returns `true` if an annotation was deleted, `false` if not found.
+    #[allow(dead_code)]
+    pub fn delete_annotation(&self, annotation_id: &Uuid) -> Result<bool> {
+        let rows_affected = self.conn.execute(
+            "DELETE FROM annotations WHERE id = ?1",
+            params![annotation_id.to_string()],
+        )?;
+        Ok(rows_affected > 0)
+    }
+
+    /// Deletes all annotations for a session.
+    ///
+    /// Returns the number of annotations deleted.
+    #[allow(dead_code)]
+    pub fn delete_annotations_by_session(&self, session_id: &Uuid) -> Result<usize> {
+        let rows_affected = self.conn.execute(
+            "DELETE FROM annotations WHERE session_id = ?1",
+            params![session_id.to_string()],
+        )?;
+        Ok(rows_affected)
+    }
+
+    // ==================== Tags ====================
+
+    /// Inserts a new tag for a session.
+    ///
+    /// Tags are unique per session, so attempting to add a duplicate
+    /// tag label to the same session will fail with a constraint error.
+    pub fn insert_tag(&self, tag: &Tag) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO tags (id, session_id, label, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                tag.id.to_string(),
+                tag.session_id.to_string(),
+                tag.label,
+                tag.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieves all tags for a session.
+    ///
+    /// Tags are returned in alphabetical order by label.
+    pub fn get_tags(&self, session_id: &Uuid) -> Result<Vec<Tag>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, label, created_at
+             FROM tags
+             WHERE session_id = ?1
+             ORDER BY label ASC",
+        )?;
+
+        let rows = stmt.query_map(params![session_id.to_string()], |row| {
+            Ok(Tag {
+                id: parse_uuid(&row.get::<_, String>(0)?)?,
+                session_id: parse_uuid(&row.get::<_, String>(1)?)?,
+                label: row.get(2)?,
+                created_at: parse_datetime(&row.get::<_, String>(3)?)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to get tags")
+    }
+
+    /// Checks if a tag with the given label exists for a session.
+    pub fn tag_exists(&self, session_id: &Uuid, label: &str) -> Result<bool> {
+        let count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tags WHERE session_id = ?1 AND label = ?2",
+            params![session_id.to_string(), label],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Deletes a tag by session ID and label.
+    ///
+    /// Returns `true` if a tag was deleted, `false` if not found.
+    pub fn delete_tag(&self, session_id: &Uuid, label: &str) -> Result<bool> {
+        let rows_affected = self.conn.execute(
+            "DELETE FROM tags WHERE session_id = ?1 AND label = ?2",
+            params![session_id.to_string(), label],
+        )?;
+        Ok(rows_affected > 0)
+    }
+
+    /// Deletes all tags for a session.
+    ///
+    /// Returns the number of tags deleted.
+    #[allow(dead_code)]
+    pub fn delete_tags_by_session(&self, session_id: &Uuid) -> Result<usize> {
+        let rows_affected = self.conn.execute(
+            "DELETE FROM tags WHERE session_id = ?1",
+            params![session_id.to_string()],
+        )?;
+        Ok(rows_affected)
+    }
+
+    /// Lists sessions with a specific tag label.
+    ///
+    /// Returns sessions ordered by start time (most recent first).
+    pub fn list_sessions_with_tag(&self, label: &str, limit: usize) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.tool, s.tool_version, s.started_at, s.ended_at, s.model,
+                    s.working_directory, s.git_branch, s.source_path, s.message_count, s.machine_id
+             FROM sessions s
+             INNER JOIN tags t ON s.id = t.session_id
+             WHERE t.label = ?1
+             ORDER BY s.started_at DESC
+             LIMIT ?2",
+        )?;
+
+        let rows = stmt.query_map(params![label, limit], Self::row_to_session)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list sessions with tag")
+    }
+
+    // ==================== Summaries ====================
+
+    /// Inserts a new summary for a session.
+    ///
+    /// Each session can have at most one summary. If a summary already exists
+    /// for the session, this will fail due to the unique constraint.
+    pub fn insert_summary(&self, summary: &Summary) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO summaries (id, session_id, content, generated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                summary.id.to_string(),
+                summary.session_id.to_string(),
+                summary.content,
+                summary.generated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieves the summary for a session, if one exists.
+    pub fn get_summary(&self, session_id: &Uuid) -> Result<Option<Summary>> {
+        self.conn
+            .query_row(
+                "SELECT id, session_id, content, generated_at
+                 FROM summaries
+                 WHERE session_id = ?1",
+                params![session_id.to_string()],
+                |row| {
+                    Ok(Summary {
+                        id: parse_uuid(&row.get::<_, String>(0)?)?,
+                        session_id: parse_uuid(&row.get::<_, String>(1)?)?,
+                        content: row.get(2)?,
+                        generated_at: parse_datetime(&row.get::<_, String>(3)?)?,
+                    })
+                },
+            )
+            .optional()
+            .context("Failed to get summary")
+    }
+
+    /// Updates the summary for a session.
+    ///
+    /// Updates the content and generated_at timestamp for an existing summary.
+    /// Returns `true` if a summary was updated, `false` if no summary exists.
+    pub fn update_summary(&self, session_id: &Uuid, content: &str) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows_affected = self.conn.execute(
+            "UPDATE summaries SET content = ?1, generated_at = ?2 WHERE session_id = ?3",
+            params![content, now, session_id.to_string()],
+        )?;
+        Ok(rows_affected > 0)
+    }
+
+    /// Deletes the summary for a session.
+    ///
+    /// Returns `true` if a summary was deleted, `false` if no summary existed.
+    #[allow(dead_code)]
+    pub fn delete_summary(&self, session_id: &Uuid) -> Result<bool> {
+        let rows_affected = self.conn.execute(
+            "DELETE FROM summaries WHERE session_id = ?1",
+            params![session_id.to_string()],
+        )?;
+        Ok(rows_affected > 0)
+    }
+
+    // ==================== Machines ====================
+
+    /// Registers a machine or updates its name if it already exists.
+    ///
+    /// Used to store machine identity information for cloud sync.
+    /// If a machine with the given ID already exists, updates the name.
+    pub fn upsert_machine(&self, machine: &Machine) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO machines (id, name, created_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(id) DO UPDATE SET
+                name = ?2
+            "#,
+            params![machine.id, machine.name, machine.created_at],
+        )?;
+        Ok(())
+    }
+
+    /// Gets a machine by ID.
+    ///
+    /// Returns `None` if no machine with the given ID exists.
+    #[allow(dead_code)]
+    pub fn get_machine(&self, id: &str) -> Result<Option<Machine>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, created_at FROM machines WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(Machine {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        created_at: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .context("Failed to get machine")
+    }
+
+    /// Gets the display name for a machine ID.
+    ///
+    /// Returns the machine name if found, otherwise returns a truncated UUID
+    /// (first 8 characters) for readability.
+    #[allow(dead_code)]
+    pub fn get_machine_name(&self, id: &str) -> Result<String> {
+        if let Some(machine) = self.get_machine(id)? {
+            Ok(machine.name)
+        } else {
+            // Fallback to truncated UUID
+            if id.len() > 8 {
+                Ok(id[..8].to_string())
+            } else {
+                Ok(id.to_string())
+            }
+        }
+    }
+
+    /// Lists all registered machines.
+    ///
+    /// Returns machines ordered by creation date (oldest first).
+    #[allow(dead_code)]
+    pub fn list_machines(&self) -> Result<Vec<Machine>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, created_at FROM machines ORDER BY created_at ASC")?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(Machine {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list machines")
+    }
+
+    /// Gets the most recent session for a given working directory.
+    ///
+    /// Returns the session with the most recent started_at timestamp
+    /// where the working directory matches or is a subdirectory of the given path.
+    pub fn get_most_recent_session_for_directory(
+        &self,
+        working_dir: &str,
+    ) -> Result<Option<Session>> {
+        self.conn
+            .query_row(
+                "SELECT id, tool, tool_version, started_at, ended_at, model,
+                        working_directory, git_branch, source_path, message_count, machine_id
+                 FROM sessions
+                 WHERE working_directory LIKE ?1
+                 ORDER BY started_at DESC
+                 LIMIT 1",
+                params![format!("{working_dir}%")],
+                Self::row_to_session,
+            )
+            .optional()
+            .context("Failed to get most recent session for directory")
     }
 
     // ==================== Database Maintenance ====================
@@ -1281,6 +1724,24 @@ impl Database {
                 params![session_id_str],
             )?;
 
+            // Delete annotations
+            self.conn.execute(
+                "DELETE FROM annotations WHERE session_id = ?1",
+                params![session_id_str],
+            )?;
+
+            // Delete tags
+            self.conn.execute(
+                "DELETE FROM tags WHERE session_id = ?1",
+                params![session_id_str],
+            )?;
+
+            // Delete summary
+            self.conn.execute(
+                "DELETE FROM summaries WHERE session_id = ?1",
+                params![session_id_str],
+            )?;
+
             // Delete from sessions_fts
             self.conn.execute(
                 "DELETE FROM sessions_fts WHERE session_id = ?1",
@@ -1328,7 +1789,7 @@ impl Database {
     pub fn get_sessions_older_than(&self, before: DateTime<Utc>) -> Result<Vec<Session>> {
         let before_str = before.to_rfc3339();
         let mut stmt = self.conn.prepare(
-            "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count
+            "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
              FROM sessions
              WHERE started_at < ?1
              ORDER BY started_at ASC",
@@ -1445,6 +1906,7 @@ mod tests {
             git_branch: Some("main".to_string()),
             source_path: source_path.map(|s| s.to_string()),
             message_count: 0,
+            machine_id: Some("test-machine".to_string()),
         }
     }
 
@@ -2853,6 +3315,7 @@ mod tests {
             git_branch: Some("feat/auth".to_string()),
             source_path: None,
             message_count: 0,
+            machine_id: None,
         };
         let session2 = Session {
             id: Uuid::new_v4(),
@@ -2865,6 +3328,7 @@ mod tests {
             git_branch: Some("main".to_string()),
             source_path: None,
             message_count: 0,
+            machine_id: None,
         };
 
         db.insert_session(&session1).expect("insert session1");
@@ -2936,6 +3400,7 @@ mod tests {
             git_branch: Some("develop".to_string()),
             source_path: None,
             message_count: 5,
+            machine_id: None,
         };
         db.insert_session(&session).expect("insert session");
 
@@ -3062,6 +3527,7 @@ mod tests {
             git_branch: Some("feat/api".to_string()),
             source_path: None,
             message_count: 1,
+            machine_id: None,
         };
         let session2 = Session {
             id: Uuid::new_v4(),
@@ -3074,6 +3540,7 @@ mod tests {
             git_branch: Some("feat/api".to_string()),
             source_path: None,
             message_count: 1,
+            machine_id: None,
         };
 
         db.insert_session(&session1).expect("insert session1");
@@ -3465,5 +3932,599 @@ mod tests {
             branches.is_empty(),
             "Session with all None branches should return empty"
         );
+    }
+
+    // ==================== Machine ID Tests ====================
+
+    #[test]
+    fn test_session_stores_machine_id() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        let retrieved = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+
+        assert_eq!(
+            retrieved.machine_id,
+            Some("test-machine".to_string()),
+            "Machine ID should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_session_with_none_machine_id() {
+        let (db, _dir) = create_test_db();
+        let mut session = create_test_session("claude-code", "/project", Utc::now(), None);
+        session.machine_id = None;
+
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        let retrieved = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+
+        assert!(
+            retrieved.machine_id.is_none(),
+            "Session with None machine_id should preserve None"
+        );
+    }
+
+    #[test]
+    fn test_migration_adds_machine_id_column() {
+        // Create a database and verify the machine_id column works
+        let (db, _dir) = create_test_db();
+
+        // Insert a session with machine_id to confirm the column exists
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session)
+            .expect("Should insert session with machine_id column");
+
+        // Retrieve and verify
+        let retrieved = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+
+        assert_eq!(
+            retrieved.machine_id,
+            Some("test-machine".to_string()),
+            "Machine ID should be stored and retrieved"
+        );
+    }
+
+    #[test]
+    fn test_list_sessions_includes_machine_id() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let mut session1 = create_test_session("claude-code", "/project1", now, None);
+        session1.machine_id = Some("machine-a".to_string());
+
+        let mut session2 = create_test_session("claude-code", "/project2", now, None);
+        session2.machine_id = Some("machine-b".to_string());
+
+        db.insert_session(&session1).expect("insert");
+        db.insert_session(&session2).expect("insert");
+
+        let sessions = db.list_sessions(10, None).expect("list");
+
+        assert_eq!(sessions.len(), 2);
+        let machine_ids: Vec<Option<String>> =
+            sessions.iter().map(|s| s.machine_id.clone()).collect();
+        assert!(machine_ids.contains(&Some("machine-a".to_string())));
+        assert!(machine_ids.contains(&Some("machine-b".to_string())));
+    }
+
+    // ==================== Annotation Tests ====================
+
+    #[test]
+    fn test_insert_and_get_annotations() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let annotation = Annotation {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "This is a test note".to_string(),
+            created_at: Utc::now(),
+        };
+        db.insert_annotation(&annotation)
+            .expect("insert annotation");
+
+        let annotations = db.get_annotations(&session.id).expect("get annotations");
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].content, "This is a test note");
+        assert_eq!(annotations[0].session_id, session.id);
+    }
+
+    #[test]
+    fn test_delete_annotation() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let annotation = Annotation {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "Test annotation".to_string(),
+            created_at: Utc::now(),
+        };
+        db.insert_annotation(&annotation).expect("insert");
+
+        let deleted = db.delete_annotation(&annotation.id).expect("delete");
+        assert!(deleted);
+
+        let annotations = db.get_annotations(&session.id).expect("get");
+        assert!(annotations.is_empty());
+    }
+
+    #[test]
+    fn test_delete_annotations_by_session() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        for i in 0..3 {
+            let annotation = Annotation {
+                id: Uuid::new_v4(),
+                session_id: session.id,
+                content: format!("Annotation {i}"),
+                created_at: Utc::now(),
+            };
+            db.insert_annotation(&annotation).expect("insert");
+        }
+
+        let count = db
+            .delete_annotations_by_session(&session.id)
+            .expect("delete all");
+        assert_eq!(count, 3);
+
+        let annotations = db.get_annotations(&session.id).expect("get");
+        assert!(annotations.is_empty());
+    }
+
+    // ==================== Tag Tests ====================
+
+    #[test]
+    fn test_insert_and_get_tags() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let tag = Tag {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            label: "bug-fix".to_string(),
+            created_at: Utc::now(),
+        };
+        db.insert_tag(&tag).expect("insert tag");
+
+        let tags = db.get_tags(&session.id).expect("get tags");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].label, "bug-fix");
+    }
+
+    #[test]
+    fn test_tag_exists() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        assert!(!db.tag_exists(&session.id, "bug-fix").expect("check"));
+
+        let tag = Tag {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            label: "bug-fix".to_string(),
+            created_at: Utc::now(),
+        };
+        db.insert_tag(&tag).expect("insert tag");
+
+        assert!(db.tag_exists(&session.id, "bug-fix").expect("check"));
+        assert!(!db.tag_exists(&session.id, "feature").expect("check other"));
+    }
+
+    #[test]
+    fn test_delete_tag() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let tag = Tag {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            label: "wip".to_string(),
+            created_at: Utc::now(),
+        };
+        db.insert_tag(&tag).expect("insert tag");
+
+        let deleted = db.delete_tag(&session.id, "wip").expect("delete");
+        assert!(deleted);
+
+        let deleted_again = db.delete_tag(&session.id, "wip").expect("delete again");
+        assert!(!deleted_again);
+    }
+
+    #[test]
+    fn test_list_sessions_with_tag() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let session1 = create_test_session("claude-code", "/project1", now, None);
+        let session2 =
+            create_test_session("claude-code", "/project2", now - Duration::minutes(5), None);
+        let session3 = create_test_session(
+            "claude-code",
+            "/project3",
+            now - Duration::minutes(10),
+            None,
+        );
+
+        db.insert_session(&session1).expect("insert");
+        db.insert_session(&session2).expect("insert");
+        db.insert_session(&session3).expect("insert");
+
+        // Tag session1 and session3 with "feature"
+        let tag1 = Tag {
+            id: Uuid::new_v4(),
+            session_id: session1.id,
+            label: "feature".to_string(),
+            created_at: Utc::now(),
+        };
+        let tag3 = Tag {
+            id: Uuid::new_v4(),
+            session_id: session3.id,
+            label: "feature".to_string(),
+            created_at: Utc::now(),
+        };
+        db.insert_tag(&tag1).expect("insert tag");
+        db.insert_tag(&tag3).expect("insert tag");
+
+        let sessions = db.list_sessions_with_tag("feature", 10).expect("list");
+        assert_eq!(sessions.len(), 2);
+        // Should be ordered by start time descending
+        assert_eq!(sessions[0].id, session1.id);
+        assert_eq!(sessions[1].id, session3.id);
+
+        let sessions = db.list_sessions_with_tag("nonexistent", 10).expect("list");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_get_most_recent_session_for_directory() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let session1 = create_test_session(
+            "claude-code",
+            "/home/user/project",
+            now - Duration::hours(1),
+            None,
+        );
+        let session2 = create_test_session("claude-code", "/home/user/project", now, None);
+        let session3 = create_test_session("claude-code", "/home/user/other", now, None);
+
+        db.insert_session(&session1).expect("insert");
+        db.insert_session(&session2).expect("insert");
+        db.insert_session(&session3).expect("insert");
+
+        let result = db
+            .get_most_recent_session_for_directory("/home/user/project")
+            .expect("get");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().id, session2.id);
+
+        let result = db
+            .get_most_recent_session_for_directory("/home/user/nonexistent")
+            .expect("get");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_session_deletion_removes_annotations_and_tags() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // Add annotation
+        let annotation = Annotation {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "Test annotation".to_string(),
+            created_at: Utc::now(),
+        };
+        db.insert_annotation(&annotation).expect("insert");
+
+        // Add tag
+        let tag = Tag {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            label: "test-tag".to_string(),
+            created_at: Utc::now(),
+        };
+        db.insert_tag(&tag).expect("insert");
+
+        // Delete the session
+        db.delete_session(&session.id).expect("delete");
+
+        // Verify annotations and tags are gone
+        let annotations = db.get_annotations(&session.id).expect("get");
+        assert!(annotations.is_empty());
+
+        let tags = db.get_tags(&session.id).expect("get");
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn test_insert_and_get_summary() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("test-tool", "/test/path", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let summary = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "Test summary content".to_string(),
+            generated_at: Utc::now(),
+        };
+        db.insert_summary(&summary).expect("insert summary");
+
+        let retrieved = db.get_summary(&session.id).expect("get summary");
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.content, "Test summary content");
+        assert_eq!(retrieved.session_id, session.id);
+    }
+
+    #[test]
+    fn test_get_summary_nonexistent() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("test-tool", "/test/path", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let retrieved = db.get_summary(&session.id).expect("get summary");
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_update_summary() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("test-tool", "/test/path", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let summary = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "Original content".to_string(),
+            generated_at: Utc::now(),
+        };
+        db.insert_summary(&summary).expect("insert summary");
+
+        // Update the summary
+        let updated = db
+            .update_summary(&session.id, "Updated content")
+            .expect("update summary");
+        assert!(updated);
+
+        let retrieved = db.get_summary(&session.id).expect("get summary");
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().content, "Updated content");
+    }
+
+    #[test]
+    fn test_update_summary_nonexistent() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("test-tool", "/test/path", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // Try to update a summary that does not exist
+        let updated = db
+            .update_summary(&session.id, "New content")
+            .expect("update summary");
+        assert!(!updated);
+    }
+
+    #[test]
+    fn test_delete_summary() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("test-tool", "/test/path", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let summary = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "To be deleted".to_string(),
+            generated_at: Utc::now(),
+        };
+        db.insert_summary(&summary).expect("insert summary");
+
+        // Delete the summary
+        let deleted = db.delete_summary(&session.id).expect("delete summary");
+        assert!(deleted);
+
+        // Verify it's gone
+        let retrieved = db.get_summary(&session.id).expect("get summary");
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_delete_session_removes_summary() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("test-tool", "/test/path", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let summary = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "Session summary".to_string(),
+            generated_at: Utc::now(),
+        };
+        db.insert_summary(&summary).expect("insert summary");
+
+        // Delete the session
+        db.delete_session(&session.id).expect("delete session");
+
+        // Verify summary is also deleted
+        let retrieved = db.get_summary(&session.id).expect("get summary");
+        assert!(retrieved.is_none());
+    }
+
+    // ==================== Machine Tests ====================
+
+    #[test]
+    fn test_upsert_machine_insert() {
+        let (db, _dir) = create_test_db();
+
+        let machine = Machine {
+            id: "test-uuid-1234".to_string(),
+            name: "my-laptop".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+
+        db.upsert_machine(&machine)
+            .expect("Failed to upsert machine");
+
+        let retrieved = db
+            .get_machine("test-uuid-1234")
+            .expect("Failed to get machine")
+            .expect("Machine should exist");
+
+        assert_eq!(retrieved.id, "test-uuid-1234");
+        assert_eq!(retrieved.name, "my-laptop");
+    }
+
+    #[test]
+    fn test_upsert_machine_update() {
+        let (db, _dir) = create_test_db();
+
+        // Insert initial machine
+        let machine1 = Machine {
+            id: "test-uuid-5678".to_string(),
+            name: "old-name".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        db.upsert_machine(&machine1)
+            .expect("Failed to upsert machine");
+
+        // Update with new name
+        let machine2 = Machine {
+            id: "test-uuid-5678".to_string(),
+            name: "new-name".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        db.upsert_machine(&machine2)
+            .expect("Failed to upsert machine");
+
+        // Verify name was updated
+        let retrieved = db
+            .get_machine("test-uuid-5678")
+            .expect("Failed to get machine")
+            .expect("Machine should exist");
+
+        assert_eq!(retrieved.name, "new-name");
+    }
+
+    #[test]
+    fn test_get_machine() {
+        let (db, _dir) = create_test_db();
+
+        // Machine does not exist initially
+        let not_found = db.get_machine("nonexistent-uuid").expect("Failed to query");
+        assert!(not_found.is_none(), "Machine should not exist");
+
+        // Insert a machine
+        let machine = Machine {
+            id: "existing-uuid".to_string(),
+            name: "test-machine".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        db.upsert_machine(&machine).expect("Failed to upsert");
+
+        // Now it should be found
+        let found = db
+            .get_machine("existing-uuid")
+            .expect("Failed to query")
+            .expect("Machine should exist");
+
+        assert_eq!(found.id, "existing-uuid");
+        assert_eq!(found.name, "test-machine");
+    }
+
+    #[test]
+    fn test_get_machine_name_found() {
+        let (db, _dir) = create_test_db();
+
+        let machine = Machine {
+            id: "uuid-for-name-test".to_string(),
+            name: "my-workstation".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        db.upsert_machine(&machine).expect("Failed to upsert");
+
+        let name = db
+            .get_machine_name("uuid-for-name-test")
+            .expect("Failed to get name");
+
+        assert_eq!(name, "my-workstation");
+    }
+
+    #[test]
+    fn test_get_machine_name_not_found() {
+        let (db, _dir) = create_test_db();
+
+        // Machine does not exist, should return truncated UUID
+        let name = db
+            .get_machine_name("abc123def456789")
+            .expect("Failed to get name");
+
+        assert_eq!(name, "abc123de", "Should return first 8 characters");
+
+        // Test with short ID
+        let short_name = db.get_machine_name("short").expect("Failed to get name");
+
+        assert_eq!(
+            short_name, "short",
+            "Should return full ID if shorter than 8 chars"
+        );
+    }
+
+    #[test]
+    fn test_list_machines() {
+        let (db, _dir) = create_test_db();
+
+        // Initially empty
+        let machines = db.list_machines().expect("Failed to list");
+        assert!(machines.is_empty(), "Should have no machines initially");
+
+        // Add machines
+        let machine1 = Machine {
+            id: "uuid-1".to_string(),
+            name: "machine-1".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let machine2 = Machine {
+            id: "uuid-2".to_string(),
+            name: "machine-2".to_string(),
+            created_at: "2024-01-02T00:00:00Z".to_string(),
+        };
+
+        db.upsert_machine(&machine1).expect("Failed to upsert");
+        db.upsert_machine(&machine2).expect("Failed to upsert");
+
+        // List should return both machines
+        let machines = db.list_machines().expect("Failed to list");
+        assert_eq!(machines.len(), 2, "Should have 2 machines");
+
+        // Should be ordered by created_at (oldest first)
+        assert_eq!(machines[0].id, "uuid-1");
+        assert_eq!(machines[1].id, "uuid-2");
     }
 }

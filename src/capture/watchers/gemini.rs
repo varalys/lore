@@ -216,6 +216,7 @@ impl ParsedGeminiSession {
             git_branch: None,
             source_path: Some(self.source_path.clone()),
             message_count: self.messages.len() as i32,
+            machine_id: crate::storage::get_machine_id(),
         };
 
         let messages: Vec<Message> = self

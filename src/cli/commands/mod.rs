@@ -3,11 +3,20 @@
 //! Each submodule implements a single CLI command with its argument
 //! parsing and execution logic.
 
+/// Add a bookmark or note to a session.
+pub mod annotate;
+
 /// Shell completion script generation.
 pub mod completions;
 
 /// Configuration viewing and management.
 pub mod config;
+
+/// Show recent sessions for quick orientation.
+pub mod context;
+
+/// Show the active session for the current directory.
+pub mod current;
 
 /// Background daemon management (start, stop, status, logs).
 pub mod daemon;
@@ -39,8 +48,14 @@ pub mod sessions;
 /// Display session details or commit-linked sessions.
 pub mod show;
 
+/// Add or view session summaries.
+pub mod summarize;
+
 /// Show current Lore status and recent sessions.
 pub mod status;
+
+/// Add or remove tags from sessions.
+pub mod tag;
 
 /// Remove session-to-commit links.
 pub mod unlink;
