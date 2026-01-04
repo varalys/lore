@@ -46,22 +46,7 @@ Lore reads session data from AI coding tools, stores it in a local SQLite databa
 
 ### Capture
 
-Lore includes parsers for each supported tool:
-
-| Tool | Format |
-|------|--------|
-| Claude Code | JSONL |
-| Codex CLI | JSONL |
-| Gemini CLI | JSON |
-| Amp | JSON |
-| Aider | Markdown |
-| Continue.dev | JSON |
-| Cline | JSON |
-| Roo Code | JSON |
-| Kilo Code | JSON |
-| OpenCode | JSON |
-
-Import existing sessions with `lore import`, or run `lore daemon start` to watch for new sessions in real-time.
+Lore includes parsers for each [supported tool](#supported-tools). Import existing sessions with `lore import`, or run `lore daemon start` to watch for new sessions in real-time.
 
 ### Storage
 
@@ -231,18 +216,18 @@ the Linux filesystem. VS Code extension sessions are only discovered when the
 extensions run in WSL (Remote - WSL); if you run VS Code natively on Windows,
 those sessions live under `%APPDATA%` and are not detected today.
 
-| Tool | Status | Storage Location |
+| Tool | Format | Storage Location |
 |------|--------|------------------|
-| Claude Code | Supported | `~/.claude/projects/` |
-| Codex CLI | Supported | `~/.codex/sessions/` |
-| Gemini CLI | Supported | `~/.gemini/tmp/*/chats/` |
-| Amp | Supported | `~/.local/share/amp/threads/` |
-| Aider | Supported | `.aider.chat.history.md` |
-| Continue.dev | Supported | `~/.continue/sessions/` |
-| Cline | Supported | VS Code extension storage |
-| Roo Code | Supported | VS Code extension storage |
-| Kilo Code | Supported | VS Code extension storage |
-| OpenCode | Supported | `~/.local/share/opencode/storage/` |
+| Claude Code | JSONL | `~/.claude/projects/` |
+| Codex CLI | JSONL | `~/.codex/sessions/` |
+| Gemini CLI | JSON | `~/.gemini/tmp/*/chats/` |
+| Amp | JSON | `~/.local/share/amp/threads/` |
+| Aider | Markdown | `.aider.chat.history.md` |
+| Continue.dev | JSON | `~/.continue/sessions/` |
+| Cline | JSON | VS Code extension storage |
+| Roo Code | JSON | VS Code extension storage |
+| Kilo Code | JSON | VS Code extension storage |
+| OpenCode | JSON | `~/.local/share/opencode/storage/` |
 
 **Building an AI coding tool?** We welcome contributions to support additional tools. Open an issue with your tool's session storage location and format, or submit a PR adding a watcher. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
