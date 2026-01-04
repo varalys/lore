@@ -171,10 +171,26 @@ fn show_session(
             println!("{json}");
         }
         OutputFormat::Markdown => {
-            print_session_markdown(session, &messages, &links, &tags, &summary, full, show_thinking);
+            print_session_markdown(
+                session,
+                &messages,
+                &links,
+                &tags,
+                &summary,
+                full,
+                show_thinking,
+            );
         }
         OutputFormat::Text => {
-            print_session_text(session, &messages, &links, &tags, &summary, full, show_thinking);
+            print_session_text(
+                session,
+                &messages,
+                &links,
+                &tags,
+                &summary,
+                full,
+                show_thinking,
+            );
         }
     }
 

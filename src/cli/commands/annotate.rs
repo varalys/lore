@@ -71,7 +71,10 @@ fn find_session_by_prefix(db: &Database, id_prefix: &str) -> Result<Uuid> {
         0 => bail!("No session found matching '{id_prefix}'"),
         1 => Ok(matching[0].id),
         _ => {
-            let ids: Vec<String> = matching.iter().map(|s| s.id.to_string()[..8].to_string()).collect();
+            let ids: Vec<String> = matching
+                .iter()
+                .map(|s| s.id.to_string()[..8].to_string())
+                .collect();
             bail!(
                 "Ambiguous session prefix '{}'. Matches: {}",
                 id_prefix,

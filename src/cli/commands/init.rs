@@ -156,7 +156,10 @@ pub fn run(args: Args) -> Result<()> {
     println!("  Detected hostname: {}", detected_hostname.cyan());
     println!();
 
-    let prompt_text = format!("What would you like to call this machine? [{}]", detected_hostname);
+    let prompt_text = format!(
+        "What would you like to call this machine? [{}]",
+        detected_hostname
+    );
     print!("{}: ", prompt_text);
     io::stdout().flush()?;
 

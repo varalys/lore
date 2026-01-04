@@ -1634,7 +1634,10 @@ impl Database {
     ///
     /// Returns the session with the most recent started_at timestamp
     /// where the working directory matches or is a subdirectory of the given path.
-    pub fn get_most_recent_session_for_directory(&self, working_dir: &str) -> Result<Option<Session>> {
+    pub fn get_most_recent_session_for_directory(
+        &self,
+        working_dir: &str,
+    ) -> Result<Option<Session>> {
         self.conn
             .query_row(
                 "SELECT id, tool, tool_version, started_at, ended_at, model,
@@ -4156,12 +4159,8 @@ mod tests {
         let now = Utc::now();
 
         let session1 = create_test_session("claude-code", "/project1", now, None);
-        let session2 = create_test_session(
-            "claude-code",
-            "/project2",
-            now - Duration::minutes(5),
-            None,
-        );
+        let session2 =
+            create_test_session("claude-code", "/project2", now - Duration::minutes(5), None);
         let session3 = create_test_session(
             "claude-code",
             "/project3",
@@ -4210,10 +4209,8 @@ mod tests {
             now - Duration::hours(1),
             None,
         );
-        let session2 =
-            create_test_session("claude-code", "/home/user/project", now, None);
-        let session3 =
-            create_test_session("claude-code", "/home/user/other", now, None);
+        let session2 = create_test_session("claude-code", "/home/user/project", now, None);
+        let session3 = create_test_session("claude-code", "/home/user/other", now, None);
 
         db.insert_session(&session1).expect("insert");
         db.insert_session(&session2).expect("insert");
@@ -4392,7 +4389,8 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
         };
 
-        db.upsert_machine(&machine).expect("Failed to upsert machine");
+        db.upsert_machine(&machine)
+            .expect("Failed to upsert machine");
 
         let retrieved = db
             .get_machine("test-uuid-1234")
@@ -4413,7 +4411,8 @@ mod tests {
             name: "old-name".to_string(),
             created_at: Utc::now().to_rfc3339(),
         };
-        db.upsert_machine(&machine1).expect("Failed to upsert machine");
+        db.upsert_machine(&machine1)
+            .expect("Failed to upsert machine");
 
         // Update with new name
         let machine2 = Machine {
@@ -4421,7 +4420,8 @@ mod tests {
             name: "new-name".to_string(),
             created_at: Utc::now().to_rfc3339(),
         };
-        db.upsert_machine(&machine2).expect("Failed to upsert machine");
+        db.upsert_machine(&machine2)
+            .expect("Failed to upsert machine");
 
         // Verify name was updated
         let retrieved = db
@@ -4437,9 +4437,7 @@ mod tests {
         let (db, _dir) = create_test_db();
 
         // Machine does not exist initially
-        let not_found = db
-            .get_machine("nonexistent-uuid")
-            .expect("Failed to query");
+        let not_found = db.get_machine("nonexistent-uuid").expect("Failed to query");
         assert!(not_found.is_none(), "Machine should not exist");
 
         // Insert a machine
@@ -4492,7 +4490,10 @@ mod tests {
         // Test with short ID
         let short_name = db.get_machine_name("short").expect("Failed to get name");
 
-        assert_eq!(short_name, "short", "Should return full ID if shorter than 8 chars");
+        assert_eq!(
+            short_name, "short",
+            "Should return full ID if shorter than 8 chars"
+        );
     }
 
     #[test]
