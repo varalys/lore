@@ -27,6 +27,7 @@ mod cli;
 mod config;
 mod daemon;
 mod git;
+mod mcp;
 mod storage;
 
 use cli::commands;
@@ -230,6 +231,14 @@ enum Commands {
     )]
     Db(commands::db::Args),
 
+    /// Run the MCP server for AI tool integration
+    #[command(
+        long_about = "Runs the MCP (Model Context Protocol) server on stdio.\n\
+        This allows AI coding tools like Claude Code to query Lore\n\
+        session data directly."
+    )]
+    Mcp(commands::mcp::Args),
+
     /// Generate shell completions
     #[command(
         long_about = "Generates shell completion scripts for various shells.\n\
@@ -251,10 +260,11 @@ fn is_configured() -> bool {
 /// - `init` (the setup command itself)
 /// - `config` (should work without init for debugging)
 /// - `completions` (should work without init for shell setup)
+/// - `mcp` (MCP server should work without init for tool integration)
 fn should_skip_first_run_prompt(command: &Commands) -> bool {
     matches!(
         command,
-        Commands::Init(_) | Commands::Config(_) | Commands::Completions(_)
+        Commands::Init(_) | Commands::Config(_) | Commands::Completions(_) | Commands::Mcp(_)
     )
 }
 
@@ -357,6 +367,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Hooks(_) => "hooks",
         Commands::Daemon(_) => "daemon",
         Commands::Db(_) => "db",
+        Commands::Mcp(_) => "mcp",
         Commands::Completions(_) => "completions",
     }
 }
@@ -433,6 +444,7 @@ fn main() -> Result<()> {
         Commands::Hooks(args) => commands::hooks::run(args),
         Commands::Daemon(args) => commands::daemon::run(args),
         Commands::Db(args) => commands::db::run(args),
+        Commands::Mcp(args) => commands::mcp::run(args),
         Commands::Completions(args) => {
             let mut cmd = Cli::command();
             commands::completions::run(args, &mut cmd)

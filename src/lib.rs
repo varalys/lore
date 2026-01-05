@@ -12,6 +12,7 @@
 //! - [`config`] - Configuration management
 //! - [`daemon`] - Background daemon for automatic session capture
 //! - [`git`] - Git repository integration and auto-linking
+//! - [`mcp`] - MCP (Model Context Protocol) server
 //! - [`storage`] - SQLite database operations and data models
 
 /// Session capture from AI coding tools like Claude Code and Copilot.
@@ -25,6 +26,9 @@ pub mod daemon;
 
 /// Git repository integration for commit linking and auto-detection.
 pub mod git;
+
+/// MCP (Model Context Protocol) server for exposing Lore data to AI tools.
+pub mod mcp;
 
 /// SQLite storage layer for sessions, messages, and links.
 pub mod storage;
