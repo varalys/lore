@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-01-05
+
+### Added
+
+- MCP (Model Context Protocol) server for AI tool integration
+- `lore mcp serve` command to start the MCP server on stdio
+- Five MCP tools exposed to AI assistants:
+  - `lore_search` - search session messages with filters
+  - `lore_get_session` - get full session details by ID
+  - `lore_list_sessions` - list recent sessions
+  - `lore_get_context` - get recent session context for a repository
+  - `lore_get_linked_sessions` - get sessions linked to a commit
+- Claude Code MCP configuration documentation in README
+
 ## [0.1.2] - 2026-01-04
 
 ### Added
@@ -71,7 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON and Markdown output formats
 - GitHub Actions CI and release workflows
 
-[Unreleased]: https://github.com/varalys/lore/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/varalys/lore/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/varalys/lore/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/varalys/lore/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/varalys/lore/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/varalys/lore/releases/tag/v0.1.0
