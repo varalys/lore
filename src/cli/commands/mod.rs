@@ -39,6 +39,9 @@ pub mod init;
 /// Link sessions to git commits.
 pub mod link;
 
+/// MCP (Model Context Protocol) server.
+pub mod mcp;
+
 /// Search session content using FTS5 full-text search.
 pub mod search;
 

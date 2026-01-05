@@ -10,6 +10,8 @@ Lore captures AI coding sessions and links them to git commits.
 
 When you use AI coding tools like Claude Code or Aider, the conversation history contains valuable context. This includes everything from the prompts you wrote, the approaches you tried, and the decisions you made. Git captures the final code, but does not contain reasoning history for your commits. Lore preserves both.
 
+**MCP Integration**: Lore includes an [MCP server](#mcp-server) that lets AI tools query your session history directly. Claude Code can search past sessions, retrieve context, and pick up where you left off.
+
 ## Table of Contents
 
 - [Use Cases](#use-cases)
@@ -17,6 +19,7 @@ When you use AI coding tools like Claude Code or Aider, the conversation history
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Example Workflow](#example-workflow)
+- [MCP Server](#mcp-server)
 - [Search](#search)
 - [Session Awareness](#session-awareness)
 - [Command Reference](#command-reference)
@@ -135,6 +138,57 @@ Sessions linked to commit a1b2c3d:
 # View the full conversation
 $ lore show 7f3a2b1
 ```
+
+## MCP Server
+
+Lore includes an MCP (Model Context Protocol) server that allows AI coding tools to query your session history directly. This enables tools like Claude Code to access your past sessions and reasoning history.
+
+### Starting the Server
+
+```bash
+lore mcp serve
+```
+
+The server runs on stdio and responds to MCP protocol requests.
+
+### Configuring Claude Code
+
+Add Lore to your Claude Code MCP settings. Edit `~/.claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "lore": {
+      "command": "lore",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+Restart Claude Code after editing the configuration.
+
+### Available Tools
+
+The MCP server exposes these tools to AI assistants:
+
+| Tool | Description |
+|------|-------------|
+| `lore_search` | Search session messages for text content |
+| `lore_get_session` | Get full details of a session by ID |
+| `lore_list_sessions` | List recent sessions with optional filters |
+| `lore_get_context` | Get recent session context for a repository |
+| `lore_get_linked_sessions` | Get sessions linked to a git commit |
+
+### Example Usage
+
+Once configured, Claude Code can use Lore tools naturally:
+
+- "Search my sessions for authentication code"
+- "Show me the last session in this project"
+- "What sessions are linked to the previous commit?"
+
+The AI assistant will automatically call the appropriate Lore tools and incorporate the results into its responses.
 
 ## Search
 
