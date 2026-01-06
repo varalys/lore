@@ -179,6 +179,23 @@ enum Commands {
     )]
     Delete(commands::delete::Args),
 
+    /// Show which AI session led to a specific line of code
+    #[command(
+        long_about = "Uses git blame to find the commit that introduced a specific\n\
+        line of code, then looks up any sessions linked to that commit.\n\
+        Displays the session info and relevant message excerpts."
+    )]
+    Blame(commands::blame::Args),
+
+    /// Export a session in various formats
+    #[command(
+        long_about = "Exports session data as markdown or JSON. Supports redaction\n\
+        of sensitive information like API keys, tokens, passwords,\n\
+        and email addresses. Use --redact for built-in patterns or\n\
+        --redact-pattern for custom regex patterns."
+    )]
+    Export(commands::export::Args),
+
     /// Search session content using full-text search
     #[command(
         long_about = "Searches message content using SQLite FTS5 full-text search.\n\
@@ -361,6 +378,8 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Tag(_) => "tag",
         Commands::Summarize(_) => "summarize",
         Commands::Delete(_) => "delete",
+        Commands::Blame(_) => "blame",
+        Commands::Export(_) => "export",
         Commands::Search(_) => "search",
         Commands::Config(_) => "config",
         Commands::Import(_) => "import",
@@ -438,6 +457,8 @@ fn main() -> Result<()> {
         Commands::Tag(args) => commands::tag::run(args),
         Commands::Summarize(args) => commands::summarize::run(args),
         Commands::Delete(args) => commands::delete::run(args),
+        Commands::Blame(args) => commands::blame::run(args),
+        Commands::Export(args) => commands::export::run(args),
         Commands::Search(args) => commands::search::run(args),
         Commands::Config(args) => commands::config::run(args),
         Commands::Import(args) => commands::import::run(args),
