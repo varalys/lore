@@ -143,17 +143,15 @@ $ lore show 7f3a2b1
 
 Lore includes an MCP (Model Context Protocol) server that allows AI coding tools to query your session history directly. This enables tools like Claude Code to access your past sessions and reasoning history.
 
-### Starting the Server
+### Claude Code
+
+Add Lore as an MCP server:
 
 ```bash
-lore mcp serve
+claude mcp add lore -- lore mcp serve
 ```
 
-The server runs on stdio and responds to MCP protocol requests.
-
-### Configuring Claude Code
-
-Add Lore to your Claude Code MCP settings. Edit `~/.claude/claude_desktop_config.json`:
+Or manually edit `~/.claude/settings.json`:
 
 ```json
 {
@@ -166,7 +164,24 @@ Add Lore to your Claude Code MCP settings. Edit `~/.claude/claude_desktop_config
 }
 ```
 
-Restart Claude Code after editing the configuration.
+Restart Claude Code after adding the server.
+
+### Claude Desktop
+
+Edit `~/.claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "lore": {
+      "command": "lore",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop after editing the configuration.
 
 ### Available Tools
 
