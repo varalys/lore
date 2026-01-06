@@ -6,6 +6,9 @@
 /// Add a bookmark or note to a session.
 pub mod annotate;
 
+/// Show which AI session led to a specific line of code.
+pub mod blame;
+
 /// Shell completion script generation.
 pub mod completions;
 
@@ -26,6 +29,9 @@ pub mod db;
 
 /// Permanently delete a session and its data.
 pub mod delete;
+
+/// Export sessions in various formats with optional redaction.
+pub mod export;
 
 /// Git hooks management (install, uninstall, status).
 pub mod hooks;
