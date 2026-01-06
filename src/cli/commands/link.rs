@@ -83,7 +83,8 @@ pub fn run(args: Args) -> Result<()> {
 fn run_manual_link(args: Args) -> Result<()> {
     if args.sessions.is_empty() {
         anyhow::bail!(
-            "No sessions specified. Use --auto for automatic linking or provide session IDs."
+            "No sessions specified. Provide one or more session IDs to link.\n\
+             Run 'lore sessions' to list available sessions."
         );
     }
 
@@ -94,18 +95,13 @@ fn run_manual_link(args: Args) -> Result<()> {
     let short_sha = &commit_sha[..8.min(commit_sha.len())];
     println!("Linking to commit {}", short_sha.yellow());
 
-    // Find and link each session
-    let all_sessions = db.list_sessions(1000, None)?;
-
+    // Find and link each session using efficient database lookup
     for session_prefix in &args.sessions {
-        let session = all_sessions
-            .iter()
-            .find(|s| s.id.to_string().starts_with(session_prefix));
-
-        let session = match session {
+        let session = match db.find_session_by_id_prefix(session_prefix)? {
             Some(s) => s,
             None => {
-                if all_sessions.is_empty() {
+                // Check if database is empty for a better error message
+                if db.session_count()? == 0 {
                     anyhow::bail!(
                         "No session found matching '{session_prefix}'. No sessions in database. \
                          Run 'lore import' to import sessions first."

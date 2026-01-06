@@ -392,6 +392,61 @@ impl Database {
         Ok(count > 0)
     }
 
+    /// Finds a session by ID prefix, searching all sessions in the database.
+    ///
+    /// This method uses SQL LIKE to efficiently search by prefix without
+    /// loading all sessions into memory. Returns an error if the prefix
+    /// is ambiguous (matches multiple sessions).
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - The UUID prefix to search for (can be any length)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(session))` - If exactly one session matches the prefix
+    /// * `Ok(None)` - If no sessions match the prefix
+    /// * `Err` - If multiple sessions match (ambiguous prefix) or database error
+    pub fn find_session_by_id_prefix(&self, prefix: &str) -> Result<Option<Session>> {
+        // First try parsing as a full UUID
+        if let Ok(uuid) = Uuid::parse_str(prefix) {
+            return self.get_session(&uuid);
+        }
+
+        // Search by prefix using LIKE
+        let pattern = format!("{prefix}%");
+
+        // First, count how many sessions match
+        let count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE id LIKE ?1",
+            params![pattern],
+            |row| row.get(0),
+        )?;
+
+        match count {
+            0 => Ok(None),
+            1 => {
+                // Exactly one match, retrieve it
+                self.conn
+                    .query_row(
+                        "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
+                         FROM sessions
+                         WHERE id LIKE ?1",
+                        params![pattern],
+                        Self::row_to_session,
+                    )
+                    .optional()
+                    .context("Failed to find session by prefix")
+            }
+            n => {
+                // Multiple matches - return an error indicating ambiguity
+                anyhow::bail!(
+                    "Ambiguous session ID prefix '{prefix}' matches {n} sessions. Use a longer prefix."
+                )
+            }
+        }
+    }
+
     /// Updates the git branch for a session.
     ///
     /// Used by the daemon when a message is processed with a different branch
@@ -4526,5 +4581,186 @@ mod tests {
         // Should be ordered by created_at (oldest first)
         assert_eq!(machines[0].id, "uuid-1");
         assert_eq!(machines[1].id, "uuid-2");
+    }
+
+    // ==================== Session ID Prefix Lookup Tests ====================
+
+    #[test]
+    fn test_find_session_by_id_prefix_full_uuid() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // Find by full UUID string
+        let found = db
+            .find_session_by_id_prefix(&session.id.to_string())
+            .expect("find session")
+            .expect("session should exist");
+
+        assert_eq!(found.id, session.id, "Should find session by full UUID");
+    }
+
+    #[test]
+    fn test_find_session_by_id_prefix_short_prefix() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // Get a short prefix (first 8 characters)
+        let prefix = &session.id.to_string()[..8];
+
+        let found = db
+            .find_session_by_id_prefix(prefix)
+            .expect("find session")
+            .expect("session should exist");
+
+        assert_eq!(found.id, session.id, "Should find session by short prefix");
+    }
+
+    #[test]
+    fn test_find_session_by_id_prefix_very_short_prefix() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // Get just the first 4 characters
+        let prefix = &session.id.to_string()[..4];
+
+        let found = db
+            .find_session_by_id_prefix(prefix)
+            .expect("find session")
+            .expect("session should exist");
+
+        assert_eq!(
+            found.id, session.id,
+            "Should find session by very short prefix"
+        );
+    }
+
+    #[test]
+    fn test_find_session_by_id_prefix_not_found() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        // Try to find with a non-matching prefix
+        let found = db
+            .find_session_by_id_prefix("zzz999")
+            .expect("find session");
+
+        assert!(
+            found.is_none(),
+            "Should return None for non-matching prefix"
+        );
+    }
+
+    #[test]
+    fn test_find_session_by_id_prefix_empty_db() {
+        let (db, _dir) = create_test_db();
+
+        let found = db
+            .find_session_by_id_prefix("abc123")
+            .expect("find session");
+
+        assert!(found.is_none(), "Should return None for empty database");
+    }
+
+    #[test]
+    fn test_find_session_by_id_prefix_ambiguous() {
+        let (db, _dir) = create_test_db();
+
+        // Create 100 sessions to increase chance of prefix collision
+        let mut sessions = Vec::new();
+        for _ in 0..100 {
+            let session = create_test_session("claude-code", "/project", Utc::now(), None);
+            db.insert_session(&session).expect("insert session");
+            sessions.push(session);
+        }
+
+        // Find two sessions that share a common prefix (first char)
+        let first_session = &sessions[0];
+        let first_char = first_session.id.to_string().chars().next().unwrap();
+
+        // Count how many sessions start with the same character
+        let matching_count = sessions
+            .iter()
+            .filter(|s| s.id.to_string().starts_with(first_char))
+            .count();
+
+        if matching_count > 1 {
+            // If we have multiple sessions starting with same character,
+            // a single-character prefix should return an ambiguity error
+            let result = db.find_session_by_id_prefix(&first_char.to_string());
+            assert!(
+                result.is_err(),
+                "Should return error for ambiguous single-character prefix"
+            );
+            let error_msg = result.unwrap_err().to_string();
+            assert!(
+                error_msg.contains("Ambiguous"),
+                "Error should mention ambiguity"
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_session_by_id_prefix_returns_correct_session_data() {
+        let (db, _dir) = create_test_db();
+
+        let mut session =
+            create_test_session("claude-code", "/home/user/myproject", Utc::now(), None);
+        session.tool_version = Some("2.0.0".to_string());
+        session.model = Some("claude-opus-4".to_string());
+        session.git_branch = Some("feature/test".to_string());
+        session.message_count = 42;
+        db.insert_session(&session).expect("insert session");
+
+        // Find by prefix
+        let prefix = &session.id.to_string()[..8];
+        let found = db
+            .find_session_by_id_prefix(prefix)
+            .expect("find session")
+            .expect("session should exist");
+
+        // Verify all fields are correctly returned
+        assert_eq!(found.id, session.id);
+        assert_eq!(found.tool, "claude-code");
+        assert_eq!(found.tool_version, Some("2.0.0".to_string()));
+        assert_eq!(found.model, Some("claude-opus-4".to_string()));
+        assert_eq!(found.working_directory, "/home/user/myproject");
+        assert_eq!(found.git_branch, Some("feature/test".to_string()));
+        assert_eq!(found.message_count, 42);
+    }
+
+    #[test]
+    fn test_find_session_by_id_prefix_many_sessions() {
+        let (db, _dir) = create_test_db();
+
+        // Insert many sessions (more than the old 100/1000 limits)
+        let mut target_session = None;
+        for i in 0..200 {
+            let session =
+                create_test_session("claude-code", &format!("/project/{i}"), Utc::now(), None);
+            db.insert_session(&session).expect("insert session");
+            // Save a session to search for later
+            if i == 150 {
+                target_session = Some(session);
+            }
+        }
+
+        let target = target_session.expect("should have target session");
+        let prefix = &target.id.to_string()[..8];
+
+        // Should still find the session even with many sessions in the database
+        let found = db
+            .find_session_by_id_prefix(prefix)
+            .expect("find session")
+            .expect("session should exist");
+
+        assert_eq!(
+            found.id, target.id,
+            "Should find correct session among many"
+        );
+        assert_eq!(found.working_directory, "/project/150");
     }
 }

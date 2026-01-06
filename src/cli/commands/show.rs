@@ -124,16 +124,12 @@ fn show_session(
     show_thinking: bool,
     format: OutputFormat,
 ) -> Result<()> {
-    // Find session by ID prefix
-    let sessions = db.list_sessions(100, None)?;
-    let session = sessions
-        .iter()
-        .find(|s| s.id.to_string().starts_with(id_prefix));
-
-    let session = match session {
+    // Find session by ID prefix using efficient database lookup
+    let session = match db.find_session_by_id_prefix(id_prefix)? {
         Some(s) => s,
         None => {
-            if sessions.is_empty() {
+            // Check if database is empty for a better error message
+            if db.session_count()? == 0 {
                 anyhow::bail!(
                     "No session found matching '{id_prefix}'. No sessions in database. \
                      Run 'lore import' to import sessions from Claude Code."
@@ -172,7 +168,7 @@ fn show_session(
         }
         OutputFormat::Markdown => {
             print_session_markdown(
-                session,
+                &session,
                 &messages,
                 &links,
                 &tags,
@@ -183,7 +179,7 @@ fn show_session(
         }
         OutputFormat::Text => {
             print_session_text(
-                session,
+                &session,
                 &messages,
                 &links,
                 &tags,
