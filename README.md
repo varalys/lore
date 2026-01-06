@@ -21,6 +21,8 @@ When you use AI coding tools like Claude Code or Aider, the conversation history
 - [Example Workflow](#example-workflow)
 - [MCP Server](#mcp-server)
 - [Search](#search)
+- [Blame](#blame)
+- [Export](#export)
 - [Session Awareness](#session-awareness)
 - [Command Reference](#command-reference)
 - [Supported Tools](#supported-tools)
@@ -232,6 +234,78 @@ lore search "error handling" --context 3
 
 Search matches message content, project names, branches, and tool names. Results show surrounding context so you can understand the conversation flow.
 
+## Blame
+
+See which AI session led to a specific line of code:
+
+```bash
+# Find the session that produced line 42 of main.rs
+lore blame src/main.rs:42
+
+# Example output:
+# Line 42 of src/main.rs
+#   Content: pub fn initialize_database() -> Result<Database> {
+#   Commit:  a1b2c3d (2025-01-05)
+#   Author:  Jane Developer
+#   Message: feat: add database initialization
+#
+# Linked Sessions:
+#   Session 7f3a2b1 (claude-code, 23 messages)
+#
+# Relevant Excerpts:
+#   [User] Can you help me write a function to initialize the database?
+#   [Assistant] I'll create an initialize_database function that...
+```
+
+This connects git blame to your AI reasoning history. For any line of code, you can trace back to the conversation that produced it.
+
+```bash
+# Output as JSON for scripting
+lore blame src/lib.rs:100 --format json
+
+# Output as markdown
+lore blame src/lib.rs:100 --format markdown
+```
+
+## Export
+
+Export sessions for sharing, archiving, or backup:
+
+```bash
+# Export as markdown (default)
+lore export abc123
+
+# Export as JSON
+lore export abc123 --format json
+
+# Write to a file
+lore export abc123 -o session.md
+lore export abc123 --format json -o session.json
+```
+
+### Redaction
+
+Remove sensitive content before sharing:
+
+```bash
+# Automatic redaction of common secrets
+lore export abc123 --redact
+
+# Add custom patterns
+lore export abc123 --redact --redact-pattern "internal_\w+"
+```
+
+Built-in redaction patterns:
+- API keys and tokens (`sk-`, `Bearer`, `api_key=`)
+- AWS credentials (`AKIA...`, `aws_secret_access_key`)
+- GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`)
+- Email addresses
+- IPv4 addresses
+- Private keys (RSA, DSA, EC headers)
+- Connection strings (mysql://, postgres://, mongodb://, redis://)
+
+Redacted content is replaced with `[REDACTED]`.
+
 ## Session Awareness
 
 Lore helps you pick up where you left off and organize your sessions:
@@ -266,13 +340,15 @@ Tags, annotations, and summaries appear in `lore show` output and help you quick
 Essential commands to get started:
 
 ```bash
-lore init           # First-run setup (auto-detects AI tools)
-lore import         # Import sessions from enabled tools
-lore sessions       # List recent sessions
-lore show <id>      # View session details
-lore search <query> # Full-text search
-lore context --last # Quick summary of last session
-lore daemon start   # Start real-time capture
+lore init             # First-run setup (auto-detects AI tools)
+lore import           # Import sessions from enabled tools
+lore sessions         # List recent sessions
+lore show <id>        # View session details
+lore search <query>   # Full-text search
+lore blame <file:ln>  # Find session that produced a line of code
+lore export <id>      # Export session for sharing
+lore context --last   # Quick summary of last session
+lore daemon start     # Start real-time capture
 ```
 
 Run `lore --help` for the full command list, or `lore <command> --help` for details on any command.
