@@ -528,24 +528,10 @@ fn get_linked_sessions_impl(
 
 /// Resolves a session ID prefix to a full UUID.
 fn resolve_session_id(db: &Database, id_prefix: &str) -> anyhow::Result<uuid::Uuid> {
-    // Try parsing as full UUID first
-    if let Ok(uuid) = uuid::Uuid::parse_str(id_prefix) {
-        return Ok(uuid);
-    }
-
-    // Otherwise, search by prefix
-    let sessions = db.list_sessions(100, None)?;
-    let matches: Vec<_> = sessions
-        .iter()
-        .filter(|s| s.id.to_string().starts_with(id_prefix))
-        .collect();
-
-    match matches.len() {
-        0 => anyhow::bail!("No session found with ID prefix: {id_prefix}"),
-        1 => Ok(matches[0].id),
-        n => anyhow::bail!(
-            "Ambiguous session ID prefix '{id_prefix}' matches {n} sessions. Use a longer prefix."
-        ),
+    // Use the efficient database method that searches all sessions
+    match db.find_session_by_id_prefix(id_prefix)? {
+        Some(session) => Ok(session.id),
+        None => anyhow::bail!("No session found with ID prefix: {id_prefix}"),
     }
 }
 

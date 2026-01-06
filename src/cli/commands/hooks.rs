@@ -18,14 +18,18 @@ use std::os::unix::fs::PermissionsExt;
 const LORE_HOOK_MARKER: &str = "# Lore hook - managed by lore hooks install";
 
 /// Post-commit hook script content.
+///
+/// Note: Auto-linking is not yet implemented. This hook is a placeholder
+/// that will be updated when auto-linking functionality is available.
+/// For now, users should manually link sessions using `lore link <session> --commit HEAD`.
 const POST_COMMIT_HOOK: &str = r#"#!/bin/sh
-# Lore post-commit hook - auto-link sessions to commits
+# Lore post-commit hook
 # Lore hook - managed by lore hooks install
-
-# Only run if lore is available
-if command -v lore >/dev/null 2>&1; then
-    lore link --auto --commit HEAD 2>/dev/null || true
-fi
+#
+# NOTE: Auto-linking is not yet available.
+# This hook is a placeholder for future functionality.
+# To manually link a session to a commit, run:
+#   lore link <session-id> --commit HEAD
 "#;
 
 /// Prepare-commit-msg hook script content.
