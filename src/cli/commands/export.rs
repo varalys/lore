@@ -29,22 +29,18 @@ pub struct Args {
 
     /// Redact sensitive data (API keys, tokens, passwords, emails, IPs)
     #[arg(long)]
-    #[arg(
-        long_help = "Redact common sensitive patterns from the output:\n\
+    #[arg(long_help = "Redact common sensitive patterns from the output:\n\
         - API keys and tokens (Bearer, sk-, api_key, etc.)\n\
         - Passwords and secrets\n\
         - Email addresses\n\
-        - IP addresses"
-    )]
+        - IP addresses")]
     pub redact: bool,
 
     /// Additional regex pattern to redact (can be specified multiple times)
     #[arg(long = "redact-pattern", value_name = "REGEX")]
-    #[arg(
-        long_help = "Custom regex pattern to redact from the output.\n\
+    #[arg(long_help = "Custom regex pattern to redact from the output.\n\
         Can be specified multiple times for multiple patterns.\n\
-        Example: --redact-pattern 'secret_\\w+'"
-    )]
+        Example: --redact-pattern 'secret_\\w+'")]
     pub redact_patterns: Vec<String>,
 
     /// Write output to a file instead of stdout
@@ -145,9 +141,7 @@ pub fn run(args: Args) -> Result<()> {
         ExportFormat::Markdown => {
             export_markdown(&session, &messages, &links, &tags, &summary, &redactor)
         }
-        ExportFormat::Json => {
-            export_json(&session, &messages, &links, &tags, &summary, &redactor)?
-        }
+        ExportFormat::Json => export_json(&session, &messages, &links, &tags, &summary, &redactor)?,
     };
 
     // Write output
@@ -174,15 +168,23 @@ impl Redactor {
 
         if use_builtin {
             // API keys and tokens
-            patterns.push(Regex::new(r#"(?i)(api[_-]?key|apikey|api_secret)[=:\s]+['"]?[\w\-]{16,}['"]?"#)?);
-            patterns.push(Regex::new(r#"(?i)(access[_-]?token|auth[_-]?token|bearer)[=:\s]+['"]?[\w\-\.]{16,}['"]?"#)?);
+            patterns.push(Regex::new(
+                r#"(?i)(api[_-]?key|apikey|api_secret)[=:\s]+['"]?[\w\-]{16,}['"]?"#,
+            )?);
+            patterns.push(Regex::new(
+                r#"(?i)(access[_-]?token|auth[_-]?token|bearer)[=:\s]+['"]?[\w\-\.]{16,}['"]?"#,
+            )?);
             patterns.push(Regex::new(r"(?i)Bearer\s+[\w\-\.]{16,}")?);
             patterns.push(Regex::new(r"sk-[a-zA-Z0-9]{20,}")?); // OpenAI-style keys
-            patterns.push(Regex::new(r#"(?i)(secret|password|passwd|pwd)[=:\s]+['"]?[^\s'"]{8,}['"]?"#)?);
+            patterns.push(Regex::new(
+                r#"(?i)(secret|password|passwd|pwd)[=:\s]+['"]?[^\s'"]{8,}['"]?"#,
+            )?);
 
             // AWS keys
             patterns.push(Regex::new(r"AKIA[0-9A-Z]{16}")?);
-            patterns.push(Regex::new(r#"(?i)aws[_-]?secret[_-]?access[_-]?key[=:\s]+['"]?[\w/\+]{40}['"]?"#)?);
+            patterns.push(Regex::new(
+                r#"(?i)aws[_-]?secret[_-]?access[_-]?key[=:\s]+['"]?[\w/\+]{40}['"]?"#,
+            )?);
 
             // GitHub tokens
             patterns.push(Regex::new(r"ghp_[a-zA-Z0-9]{36}")?);
@@ -192,23 +194,30 @@ impl Redactor {
             patterns.push(Regex::new(r"ghr_[a-zA-Z0-9]{36}")?);
 
             // Email addresses
-            patterns.push(Regex::new(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")?);
+            patterns.push(Regex::new(
+                r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+            )?);
 
             // IP addresses (IPv4)
             patterns.push(Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b")?);
 
             // Private keys
-            patterns.push(Regex::new(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----")?);
+            patterns.push(Regex::new(
+                r"-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----",
+            )?);
 
             // Connection strings
-            patterns.push(Regex::new(r"(?i)(mysql|postgres|postgresql|mongodb|redis)://[^\s]+")?);
+            patterns.push(Regex::new(
+                r"(?i)(mysql|postgres|postgresql|mongodb|redis)://[^\s]+",
+            )?);
         }
 
         // Add custom patterns
         for pattern in custom_patterns {
-            patterns.push(Regex::new(pattern).map_err(|e| {
-                anyhow::anyhow!("Invalid regex pattern '{}': {}", pattern, e)
-            })?);
+            patterns.push(
+                Regex::new(pattern)
+                    .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", pattern, e))?,
+            );
         }
 
         Ok(Self { patterns })
@@ -259,7 +268,10 @@ fn export_markdown(
             "| Ended | {} |\n",
             ended.format("%Y-%m-%d %H:%M:%S UTC")
         ));
-        output.push_str(&format!("| Duration | {} minutes |\n", duration.num_minutes()));
+        output.push_str(&format!(
+            "| Duration | {} minutes |\n",
+            duration.num_minutes()
+        ));
     }
     output.push_str(&format!("| Messages | {} |\n", session.message_count));
     output.push_str(&format!(
@@ -376,9 +388,11 @@ fn export_json(
     summary: &Option<crate::storage::Summary>,
     redactor: &Redactor,
 ) -> Result<String> {
-    let duration = session
-        .ended_at
-        .map(|ended| ended.signed_duration_since(session.started_at).num_minutes());
+    let duration = session.ended_at.map(|ended| {
+        ended
+            .signed_duration_since(session.started_at)
+            .num_minutes()
+    });
 
     let exported = ExportedSession {
         session: SessionMetadata {
@@ -412,9 +426,7 @@ fn export_json(
             })
             .collect(),
         tags: tags.iter().map(|t| t.label.clone()).collect(),
-        summary: summary
-            .as_ref()
-            .map(|s| redactor.redact(&s.content)),
+        summary: summary.as_ref().map(|s| redactor.redact(&s.content)),
     };
 
     let json = serde_json::to_string_pretty(&exported)?;

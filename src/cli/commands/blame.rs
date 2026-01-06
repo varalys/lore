@@ -136,8 +136,8 @@ fn parse_file_line(target: &str) -> Result<(String, usize)> {
 
 /// Runs git blame on a specific line and extracts commit information.
 fn git_blame(file_path: &str, line_num: usize) -> Result<BlameInfo> {
-    let repo =
-        git2::Repository::discover(".").context("Not in a git repository. Run this command from within a git repository.")?;
+    let repo = git2::Repository::discover(".")
+        .context("Not in a git repository. Run this command from within a git repository.")?;
 
     let workdir = repo
         .workdir()
@@ -222,7 +222,11 @@ fn git_blame(file_path: &str, line_num: usize) -> Result<BlameInfo> {
 /// Searches for:
 /// 1. Messages that mention the file path
 /// 2. Messages that contain code similar to the blamed line
-fn find_relevant_excerpts(messages: &[Message], file_path: &str, line_content: &str) -> Vec<String> {
+fn find_relevant_excerpts(
+    messages: &[Message],
+    file_path: &str,
+    line_content: &str,
+) -> Vec<String> {
     let mut excerpts = Vec::new();
     let file_name = Path::new(file_path)
         .file_name()
@@ -426,10 +430,7 @@ fn print_text(
     println!();
 
     if session_infos.is_empty() {
-        println!(
-            "{}",
-            "No linked sessions found for this commit.".dimmed()
-        );
+        println!("{}", "No linked sessions found for this commit.".dimmed());
         println!();
         println!(
             "{}",
