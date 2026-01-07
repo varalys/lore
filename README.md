@@ -4,73 +4,19 @@
 [![CI](https://github.com/varalys/lore/actions/workflows/ci.yml/badge.svg)](https://github.com/varalys/lore/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/varalys/lore)](https://github.com/varalys/lore/releases)
 ![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20WSL2-blue)
-![Windows](https://img.shields.io/badge/windows-planned-lightgrey)
 
-Lore captures AI coding sessions and links them to git commits.
+**Reasoning history for code.** Lore captures AI coding sessions and links them to git commits.
 
-When you use AI coding tools like Claude Code or Aider, the conversation history contains valuable context. This includes everything from the prompts you wrote, the approaches you tried, and the decisions you made. Git captures the final code, but does not contain reasoning history for your commits. Lore preserves both.
+Git captures what changed, Lore captures why it changed. The prompts, approaches, and decisions from your AI conversations.
 
-**MCP Integration**: Lore includes an [MCP server](#mcp-server) that lets AI tools query your session history directly. Claude Code can search past sessions, retrieve context, and pick up where you left off.
-
-## Table of Contents
-
-- [Use Cases](#use-cases)
-- [How It Works](#how-it-works)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Example Workflow](#example-workflow)
-- [MCP Server](#mcp-server)
-- [Search](#search)
-- [Blame](#blame)
-- [Export](#export)
-- [Session Awareness](#session-awareness)
-- [Command Reference](#command-reference)
-- [Supported Tools](#supported-tools)
-- [Background Daemon](#background-daemon)
-- [Git Hooks](#git-hooks)
-- [Output Formats](#output-formats)
-- [Configuration](#configuration)
-- [Database Management](#database-management)
-- [Session Deletion](#session-deletion)
-- [Shell Completions](#shell-completions)
-- [Data Location](#data-location)
-- [License](#license)
-- [Contributing](#contributing)
+**Documentation:** [lore.varalys.com](https://lore.varalys.com)
 
 ## Use Cases
 
 - **Code review**: See the AI conversation that produced a PR, not just the diff
-- **Debugging**: Understand why code was written a certain way by reading the original discussion
-- **Knowledge transfer**: When someone leaves a project, their AI conversations stay with the code
-- **Learning**: Study how problems were solved by browsing linked sessions
-- **Search**: Find that conversation where you solved a similar problem - search by keyword, project, tool, or date
-
-## How It Works
-
-Lore reads session data from AI coding tools, stores it in a local SQLite database, and creates links between sessions and git commits.
-
-### Capture
-
-Lore includes parsers for each [supported tool](#supported-tools). Import existing sessions with `lore import`, or run `lore daemon start` to watch for new sessions in real-time.
-
-### Storage
-
-Sessions and messages are stored in a SQLite database at `~/.lore/lore.db`. The schema includes:
-
-- **sessions**: ID, tool, timestamps, working directory, message count
-- **messages**: ID, session ID, role (user/assistant), content, timestamp
-- **session_links**: Maps session IDs to git commit SHAs
-
-Full-text search uses SQLite FTS5 to index message content.
-
-### Linking
-
-Links connect sessions to commits. You can create them:
-
-- **Manually**: `lore link <session-id> --commit <sha>`
-- **Via hooks**: `lore hooks install` adds a post-commit hook that prompts for linking
-
-Links are bidirectional: given a session, find its commits; given a commit, find its sessions.
+- **Debugging**: Understand why code was written a certain way
+- **Knowledge transfer**: AI conversations stay with the code when people leave
+- **Search**: Find that conversation where you solved a similar problem
 
 ## Installation
 
@@ -88,484 +34,74 @@ cargo install lore-cli
 
 ### From Releases
 
-Download the latest binary from [GitHub Releases](https://github.com/varalys/lore/releases) and add it to your PATH.
-
-### From Source
-
-```bash
-git clone https://github.com/varalys/lore.git
-cd lore
-cargo install --path .
-```
+Download from [GitHub Releases](https://github.com/varalys/lore/releases).
 
 ## Quick Start
 
 ```bash
-# First time? Run init for guided setup
+# Guided setup
 lore init
 
-# Or just start using lore - it will prompt for setup automatically
-lore sessions
+# Import existing sessions
+lore import
 
-# Example output - shows branch transitions during each session
-# ID        STARTED           MESSAGES  BRANCH                    DIRECTORY
-# c9731a91  2025-12-25 17:52       566  main -> feat/auth -> main myapp
-# 24af9690  2025-12-22 19:13      1910  feat/phase-0-foundati...  lore
+# List sessions
+lore sessions
 
 # View a session
 lore show abc123
 
-# Link a session to the current commit
+# Link to current commit
 lore link abc123
 
-# Later, view what sessions informed a commit
+# Find sessions for a commit
 lore show --commit HEAD
+
+# Trace a line of code to its AI session
+lore blame src/main.rs:42
+
+# Search across all sessions
+lore search "authentication"
 ```
 
-## Example Workflow
+## Key Features
 
-```bash
-# You're reviewing a PR and want to understand a change
-$ git log --oneline -1
-a1b2c3d feat: add rate limiting to API
+| Feature | Description |
+|---------|-------------|
+| **Session Capture** | Import from 10+ AI coding tools |
+| **Git Linking** | Connect sessions to commits |
+| **Full-text Search** | Find any conversation |
+| **Blame Integration** | Trace code to sessions |
+| **MCP Server** | Let AI tools query your history |
+| **Background Daemon** | Real-time capture |
 
-$ lore show --commit a1b2c3d
-Sessions linked to commit a1b2c3d:
+## Supported Tools
 
-  Session: 7f3a2b1
-  Tool: claude-code
-  Duration: 45 minutes
-  Messages: 23
+Claude Code, Codex CLI, Gemini CLI, Amp, Aider, Continue.dev, Cline, Roo Code, Kilo Code, OpenCode
 
-# View the full conversation
-$ lore show 7f3a2b1
-```
+See [Supported Tools](https://lore.varalys.com/reference/supported-tools/) for details.
 
-## MCP Server
+## MCP Integration
 
-Lore includes an MCP (Model Context Protocol) server that allows AI coding tools to query your session history directly. This enables tools like Claude Code to access your past sessions and reasoning history.
-
-### Claude Code
-
-Add Lore as an MCP server:
+Let Claude Code query your session history:
 
 ```bash
 claude mcp add lore -- lore mcp serve
 ```
 
-Or manually edit `~/.claude/settings.json`:
+Claude can then search sessions, retrieve context, and continue where you left off.
 
-```json
-{
-  "mcpServers": {
-    "lore": {
-      "command": "lore",
-      "args": ["mcp", "serve"]
-    }
-  }
-}
-```
+See [MCP Guide](https://lore.varalys.com/guides/mcp/) for setup details.
 
-Restart Claude Code after adding the server.
+## Documentation
 
-### Claude Desktop
+Full documentation at **[lore.varalys.com](https://lore.varalys.com)**:
 
-Edit `~/.claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "lore": {
-      "command": "lore",
-      "args": ["mcp", "serve"]
-    }
-  }
-}
-```
-
-Restart Claude Desktop after editing the configuration.
-
-### Available Tools
-
-The MCP server exposes these tools to AI assistants:
-
-| Tool | Description |
-|------|-------------|
-| `lore_search` | Search session messages for text content |
-| `lore_get_session` | Get full details of a session by ID |
-| `lore_list_sessions` | List recent sessions with optional filters |
-| `lore_get_context` | Get recent session context for a repository |
-| `lore_get_linked_sessions` | Get sessions linked to a git commit |
-
-### Example Usage
-
-Once configured, Claude Code can use Lore tools naturally:
-
-- "Search my sessions for authentication code"
-- "Show me the last session in this project"
-- "What sessions are linked to the previous commit?"
-
-The AI assistant will automatically call the appropriate Lore tools and incorporate the results into its responses.
-
-## Search
-
-Find any conversation across all your AI coding sessions:
-
-```bash
-# Basic search
-lore search "authentication"
-
-# Filter by tool
-lore search "bug fix" --tool claude-code
-
-# Filter by date range
-lore search "refactor" --since 2025-12-01 --until 2025-12-15
-
-# Filter by project or branch
-lore search "api" --project myapp
-lore search "feature" --branch main
-
-# Combine filters
-lore search "database" --tool aider --project backend --since 2025-12-01
-
-# Show more context around matches
-lore search "error handling" --context 3
-```
-
-Search matches message content, project names, branches, and tool names. Results show surrounding context so you can understand the conversation flow.
-
-## Blame
-
-See which AI session led to a specific line of code:
-
-```bash
-# Find the session that produced line 42 of main.rs
-lore blame src/main.rs:42
-
-# Example output:
-# Line 42 of src/main.rs
-#   Content: pub fn initialize_database() -> Result<Database> {
-#   Commit:  a1b2c3d (2025-01-05)
-#   Author:  Jane Developer
-#   Message: feat: add database initialization
-#
-# Linked Sessions:
-#   Session 7f3a2b1 (claude-code, 23 messages)
-#
-# Relevant Excerpts:
-#   [User] Can you help me write a function to initialize the database?
-#   [Assistant] I'll create an initialize_database function that...
-```
-
-This connects git blame to your AI reasoning history. For any line of code, you can trace back to the conversation that produced it.
-
-```bash
-# Output as JSON for scripting
-lore blame src/lib.rs:100 --format json
-
-# Output as markdown
-lore blame src/lib.rs:100 --format markdown
-```
-
-## Export
-
-Export sessions for sharing, archiving, or backup:
-
-```bash
-# Export as markdown (default)
-lore export abc123
-
-# Export as JSON
-lore export abc123 --format json
-
-# Write to a file
-lore export abc123 -o session.md
-lore export abc123 --format json -o session.json
-```
-
-### Redaction
-
-Remove sensitive content before sharing:
-
-```bash
-# Automatic redaction of common secrets
-lore export abc123 --redact
-
-# Add custom patterns
-lore export abc123 --redact --redact-pattern "internal_\w+"
-```
-
-Built-in redaction patterns:
-- API keys and tokens (`sk-`, `Bearer`, `api_key=`)
-- AWS credentials (`AKIA...`, `aws_secret_access_key`)
-- GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`)
-- Email addresses
-- IPv4 addresses
-- Private keys (RSA, DSA, EC headers)
-- Connection strings (mysql://, postgres://, mongodb://, redis://)
-
-Redacted content is replaced with `[REDACTED]`.
-
-## Session Awareness
-
-Lore helps you pick up where you left off and organize your sessions:
-
-```bash
-# See what session is active in the current directory
-lore current
-
-# Get quick context on recent sessions in this repo
-lore context
-
-# Get detailed summary of the last session (for "continue where we left off")
-lore context --last
-
-# Add a bookmark or note to the current session
-lore annotate "Implemented auth, need to add tests"
-
-# Tag sessions for organization
-lore tag abc123 needs-review
-lore tag abc123 feature-auth
-lore sessions --tag needs-review    # Filter by tag
-
-# Add a summary to a session for future reference
-lore summarize abc123 "Added OAuth2 login flow with Google and GitHub providers"
-lore summarize abc123 --show        # View existing summary
-```
-
-Tags, annotations, and summaries appear in `lore show` output and help you quickly understand past sessions.
-
-## Command Reference
-
-Essential commands to get started:
-
-```bash
-lore init             # First-run setup (auto-detects AI tools)
-lore import           # Import sessions from enabled tools
-lore sessions         # List recent sessions
-lore show <id>        # View session details
-lore search <query>   # Full-text search
-lore blame <file:ln>  # Find session that produced a line of code
-lore export <id>      # Export session for sharing
-lore context --last   # Quick summary of last session
-lore daemon start     # Start real-time capture
-```
-
-Run `lore --help` for the full command list, or `lore <command> --help` for details on any command.
-
-## Supported Tools
-
-Lore targets Linux, macOS, and WSL2. Windows native support is planned for a
-future release. For WSL2, CLI-based tools work as long as the sessions live in
-the Linux filesystem. VS Code extension sessions are only discovered when the
-extensions run in WSL (Remote - WSL); if you run VS Code natively on Windows,
-those sessions live under `%APPDATA%` and are not detected today.
-
-| Tool | Format | Storage Location |
-|------|--------|------------------|
-| Claude Code | JSONL | `~/.claude/projects/` |
-| Codex CLI | JSONL | `~/.codex/sessions/` |
-| Gemini CLI | JSON | `~/.gemini/tmp/*/chats/` |
-| Amp | JSON | `~/.local/share/amp/threads/` |
-| Aider | Markdown | `.aider.chat.history.md` |
-| Continue.dev | JSON | `~/.continue/sessions/` |
-| Cline | JSON | VS Code extension storage |
-| Roo Code | JSON | VS Code extension storage |
-| Kilo Code | JSON | VS Code extension storage |
-| OpenCode | JSON | `~/.local/share/opencode/storage/` |
-
-**Building an AI coding tool?** We welcome contributions to support additional tools. Open an issue with your tool's session storage location and format, or submit a PR adding a watcher. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
-
-## Background Daemon
-
-The daemon watches for new sessions in real-time and imports them automatically.
-
-### Manual Start
-
-```bash
-lore daemon start    # Start watching
-lore daemon status   # Check what's being watched
-lore daemon logs     # View daemon logs
-lore daemon stop     # Stop watching
-```
-
-### Run as a Service
-
-Install the daemon as a system service to start automatically on login.
-
-#### macOS with Homebrew (Recommended)
-
-If you installed via Homebrew, use brew services:
-
-```bash
-brew services start lore
-brew services stop lore
-```
-
-#### Linux with systemd
-
-Use the built-in service installer:
-
-```bash
-lore daemon install    # Install and enable systemd service
-lore daemon uninstall  # Remove systemd service
-```
-
-The service restarts automatically on failure.
-
-#### Manual systemd Setup (Linux)
-
-If you prefer to configure systemd yourself:
-
-```bash
-mkdir -p ~/.config/systemd/user
-```
-
-Create `~/.config/systemd/user/lore.service`:
-
-```ini
-[Unit]
-Description=Lore AI session capture daemon
-After=default.target
-
-[Service]
-Type=simple
-ExecStart=%h/.cargo/bin/lore daemon start --foreground
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-Then enable and start:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now lore.service
-systemctl --user status lore.service
-```
-
-## Git Hooks
-
-Install hooks to automatically record session links on commit:
-
-```bash
-lore hooks install   # Install post-commit hook
-lore hooks status    # Check hook status
-lore hooks uninstall # Remove hooks
-```
-
-## Output Formats
-
-Commands support `--format` for scripting and integration:
-
-```bash
-lore sessions --format json
-lore show abc123 --format json
-lore show abc123 --format markdown
-lore status --format json
-```
-
-## Configuration
-
-On first run, Lore prompts for setup automatically. You can also run `lore init` manually.
-
-The init wizard:
-1. Detects installed AI coding tools
-2. Shows which tools have existing sessions
-3. Lets you choose which watchers to enable
-4. Offers to import existing sessions
-5. Offers to install shell completions
-6. Offers to start the background service (for real-time capture)
-
-Configure which tools to track:
-
-```bash
-lore config set watchers claude-code,aider,gemini
-lore config get watchers
-```
-
-For scripting, use `--no-init` to skip the first-run prompt:
-
-```bash
-lore --no-init sessions --format json
-```
-
-## Database Management
-
-Lore provides commands for managing the database:
-
-```bash
-# View database statistics
-lore db stats
-
-# Example output:
-# Database Statistics
-#
-#   Sessions:  142
-#   Messages:  8934
-#   Links:     67
-#   File size: 12.45 MB
-#
-# Date Range
-#   Oldest:   2024-06-15 09:23
-#   Newest:   2025-01-02 14:56
-#
-# Sessions by Tool
-#    claude-code:  98
-#          aider:  31
-#         gemini:  13
-
-# Reclaim unused disk space
-lore db vacuum
-
-# Delete old sessions (preview first with --dry-run)
-lore db prune --older-than 90d --dry-run
-lore db prune --older-than 6m --force
-```
-
-Duration formats for `--older-than`:
-- `Nd` - days (e.g., `90d`)
-- `Nw` - weeks (e.g., `12w`)
-- `Nm` - months (e.g., `6m`)
-- `Ny` - years (e.g., `1y`)
-
-## Session Deletion
-
-Delete a single session and all its data:
-
-```bash
-lore delete abc123
-```
-
-This permanently removes the session, its messages, and any commit links.
-
-## Shell Completions
-
-The easiest way to install completions is to let Lore auto-detect your shell:
-
-```bash
-lore completions install
-```
-
-Or specify a shell explicitly:
-
-```bash
-lore completions install --shell fish
-```
-
-You can also output completions to stdout for manual installation:
-
-```bash
-lore completions bash > ~/.local/share/bash-completion/completions/lore
-lore completions zsh > ~/.zfunc/_lore
-lore completions fish > ~/.config/fish/completions/lore.fish
-```
-
-After installing, restart your shell or source the completion file.
-
-PowerShell and Elvish completions are also available (`lore completions powershell`, `lore completions elvish`) and will be documented when Windows support is added.
+- [Installation](https://lore.varalys.com/getting-started/installation/)
+- [Quick Start](https://lore.varalys.com/getting-started/quick-start/)
+- [Command Reference](https://lore.varalys.com/commands/)
+- [Guides](https://lore.varalys.com/guides/linking/)
+- [FAQ](https://lore.varalys.com/about/faq/)
 
 ## Data Location
 
@@ -576,7 +112,7 @@ PowerShell and Elvish completions are also available (`lore completions powershe
 └── logs/         # Daemon logs
 ```
 
-All data stays on your machine. There is no cloud sync or external service.
+All data stays on your machine.
 
 ## License
 
