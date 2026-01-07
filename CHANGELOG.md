@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-01-06
+
+### Added
+
+- `lore blame <file:line>` command to trace code back to AI sessions
+  - Uses git blame to find the commit that introduced a line
+  - Shows linked sessions and relevant message excerpts
+  - Supports text (colored), JSON, and Markdown output formats
+- `lore export <session-id>` command to export sessions for sharing/archiving
+  - Supports Markdown (default) and JSON output formats
+  - Includes session metadata, messages, linked commits, tags, and summary
+  - `--redact` flag for automatic sensitive content redaction
+  - Built-in patterns for API keys, tokens, AWS credentials, emails, IPs, private keys
+  - `--redact-pattern <regex>` for custom redaction patterns
+  - `-o/--output <file>` to write directly to file
+
+### Fixed
+
+- Session prefix resolution now searches all sessions efficiently (not limited to recent 100-1000)
+- Post-commit hook script updated with placeholder documentation
+
 ## [0.1.3] - 2026-01-05
 
 ### Added
@@ -85,7 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON and Markdown output formats
 - GitHub Actions CI and release workflows
 
-[Unreleased]: https://github.com/varalys/lore/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/varalys/lore/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/varalys/lore/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/varalys/lore/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/varalys/lore/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/varalys/lore/compare/v0.1.0...v0.1.1
