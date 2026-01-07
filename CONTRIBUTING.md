@@ -150,6 +150,10 @@ When reporting issues, please include:
 5. Address review feedback
 6. Squash commits if requested
 
+## AI-Assisted Contributions
+
+Contributions developed with AI assistance are welcome. All contributions, regardless of how they were created, must meet the same quality standards and pass the same review process. The contributor submitting the PR is responsible for understanding and standing behind the code.
+
 ## Questions?
 
 Open an issue for questions or discussions about contributing.
