@@ -114,10 +114,6 @@ Full documentation at **[lore.varalys.com](https://lore.varalys.com)**:
 
 All data stays on your machine.
 
-## License
-
-Apache 2.0
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
