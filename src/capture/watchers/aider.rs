@@ -111,6 +111,137 @@ fn find_aider_history_files() -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Directories that should be skipped when scanning for aider files.
+///
+/// These are typically hidden directories, build artifacts, or cache directories
+/// that are unlikely to contain project files and would slow down scanning.
+const SKIP_DIRS: &[&str] = &[
+    // Hidden directories (general)
+    ".git",
+    ".svn",
+    ".hg",
+    // Build artifacts and dependencies
+    "node_modules",
+    "target",
+    "build",
+    "dist",
+    "out",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    "venv",
+    ".venv",
+    "env",
+    ".env",
+    ".tox",
+    ".nox",
+    // Package managers
+    ".npm",
+    ".yarn",
+    ".pnpm",
+    ".cargo",
+    ".rustup",
+    // IDE and editor directories
+    ".idea",
+    ".vscode",
+    ".eclipse",
+    // Cache and temp directories
+    ".cache",
+    ".local",
+    ".config",
+    ".Trash",
+    // macOS
+    "Library",
+    // Other
+    "vendor",
+    ".bundle",
+];
+
+/// Directories that should not be skipped even if they start with a dot.
+///
+/// These are known tool directories that may contain useful session data.
+const ALLOW_HIDDEN_DIRS: &[&str] = &[".claude", ".continue", ".codex", ".amp"];
+
+/// Scans directories recursively for aider history files.
+///
+/// This function searches the given directories for `.aider.chat.history.md` files,
+/// skipping hidden directories and common build artifact locations for efficiency.
+///
+/// # Arguments
+/// * `directories` - List of directories to scan
+/// * `progress_callback` - Called with (current_dir, files_found_so_far) during scanning
+///
+/// # Returns
+/// A vector of paths to discovered aider history files.
+pub fn scan_directories_for_aider_files<F>(
+    directories: &[PathBuf],
+    mut progress_callback: F,
+) -> Vec<PathBuf>
+where
+    F: FnMut(&Path, usize),
+{
+    let mut found_files = Vec::new();
+
+    for dir in directories {
+        if dir.exists() && dir.is_dir() {
+            scan_directory_recursive(dir, &mut found_files, &mut progress_callback);
+        }
+    }
+
+    found_files
+}
+
+/// Recursively scans a directory for aider history files.
+fn scan_directory_recursive<F>(
+    dir: &Path,
+    found_files: &mut Vec<PathBuf>,
+    progress_callback: &mut F,
+) where
+    F: FnMut(&Path, usize),
+{
+    // Report progress
+    progress_callback(dir, found_files.len());
+
+    // Check for aider history file in this directory
+    let history_file = dir.join(".aider.chat.history.md");
+    if history_file.exists() {
+        found_files.push(history_file);
+    }
+
+    // Read directory entries
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return, // Skip directories we can't read
+    };
+
+    // Recurse into subdirectories
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+
+        if !path.is_dir() {
+            continue;
+        }
+
+        let dir_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+
+        // Skip directories in the skip list
+        if SKIP_DIRS.contains(&dir_name) {
+            continue;
+        }
+
+        // Skip hidden directories unless they're in the allow list
+        if dir_name.starts_with('.') && !ALLOW_HIDDEN_DIRS.contains(&dir_name) {
+            continue;
+        }
+
+        // Recurse
+        scan_directory_recursive(&path, found_files, progress_callback);
+    }
+}
+
 /// Parses an Aider chat history markdown file.
 ///
 /// The format consists of:
@@ -501,5 +632,76 @@ Assistant response 2
                 assert_eq!(msg.role, MessageRole::Assistant);
             }
         }
+    }
+
+    #[test]
+    fn test_scan_directories_finds_aider_files() {
+        use tempfile::TempDir;
+
+        // Create a temp directory structure with an aider file
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let project_dir = temp_dir.path().join("my-project");
+        std::fs::create_dir(&project_dir).expect("Failed to create project dir");
+
+        // Create an aider history file
+        let history_file = project_dir.join(".aider.chat.history.md");
+        std::fs::write(&history_file, "#### Test\n\nResponse\n").expect("Failed to write file");
+
+        // Scan the directory
+        let mut progress_calls = 0;
+        let found = scan_directories_for_aider_files(&[temp_dir.path().to_path_buf()], |_, _| {
+            progress_calls += 1;
+        });
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0], history_file);
+        assert!(progress_calls > 0, "Progress callback should be called");
+    }
+
+    #[test]
+    fn test_scan_directories_skips_hidden_dirs() {
+        use tempfile::TempDir;
+
+        // Create a temp directory with a hidden directory containing an aider file
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let hidden_dir = temp_dir.path().join(".hidden-project");
+        std::fs::create_dir(&hidden_dir).expect("Failed to create hidden dir");
+
+        // Create an aider history file in the hidden directory
+        let history_file = hidden_dir.join(".aider.chat.history.md");
+        std::fs::write(&history_file, "#### Test\n\nResponse\n").expect("Failed to write file");
+
+        // Scan the directory - should NOT find the file in hidden dir
+        let found = scan_directories_for_aider_files(&[temp_dir.path().to_path_buf()], |_, _| {});
+
+        assert!(
+            found.is_empty(),
+            "Should not find files in hidden directories"
+        );
+    }
+
+    #[test]
+    fn test_scan_directories_skips_node_modules() {
+        use tempfile::TempDir;
+
+        // Create a temp directory with node_modules containing an aider file
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let node_modules = temp_dir.path().join("node_modules").join("some-package");
+        std::fs::create_dir_all(&node_modules).expect("Failed to create node_modules");
+
+        // Create an aider history file in node_modules
+        let history_file = node_modules.join(".aider.chat.history.md");
+        std::fs::write(&history_file, "#### Test\n\nResponse\n").expect("Failed to write file");
+
+        // Scan the directory - should NOT find the file
+        let found = scan_directories_for_aider_files(&[temp_dir.path().to_path_buf()], |_, _| {});
+
+        assert!(found.is_empty(), "Should not find files in node_modules");
+    }
+
+    #[test]
+    fn test_scan_directories_empty_input() {
+        let found = scan_directories_for_aider_files(&[], |_, _| {});
+        assert!(found.is_empty());
     }
 }
