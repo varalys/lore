@@ -11,6 +11,7 @@ use serde::Serialize;
 use crate::capture::watchers::{default_registry, WatcherRegistry};
 use crate::cli::OutputFormat;
 use crate::config::Config;
+use crate::daemon::DaemonState;
 use crate::git;
 use crate::storage::Database;
 
@@ -151,11 +152,30 @@ fn run_json(db: &Database, registry: &WatcherRegistry, config: &Config) -> Resul
         })
         .collect();
 
-    let output = StatusOutput {
-        daemon: DaemonStatus {
+    // Check daemon status
+    let daemon_status = match DaemonState::new() {
+        Ok(state) => {
+            if state.is_running() {
+                let pid = state.get_pid().unwrap_or(0);
+                DaemonStatus {
+                    running: true,
+                    message: format!("running (PID {})", pid),
+                }
+            } else {
+                DaemonStatus {
+                    running: false,
+                    message: "not running".to_string(),
+                }
+            }
+        }
+        Err(_) => DaemonStatus {
             running: false,
-            message: "daemon not yet implemented".to_string(),
+            message: "not running".to_string(),
         },
+    };
+
+    let output = StatusOutput {
+        daemon: daemon_status,
         watchers,
         database: DatabaseStats {
             sessions: session_count,
@@ -237,10 +257,24 @@ fn run_text(db: &Database, registry: &WatcherRegistry, config: &Config) -> Resul
 
 /// Prints the daemon status section.
 ///
-/// Currently shows a placeholder since the daemon is not yet implemented.
+/// Shows whether the daemon is currently running and its PID if available.
 fn print_daemon_status() {
     println!("{}", "Daemon:".bold());
-    println!("  {}", "not running (daemon not yet implemented)".dimmed());
+
+    match DaemonState::new() {
+        Ok(state) => {
+            if state.is_running() {
+                let pid = state.get_pid().unwrap_or(0);
+                println!("  {} (PID {})", "running".green(), pid);
+            } else {
+                println!("  {}", "not running".yellow());
+            }
+        }
+        Err(_) => {
+            println!("  {}", "not running".yellow());
+        }
+    }
+
     println!();
 }
 
