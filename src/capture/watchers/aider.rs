@@ -39,11 +39,19 @@ impl Watcher for AiderWatcher {
     }
 
     fn is_available(&self) -> bool {
-        // Aider stores files in project directories, not a central location.
-        // We check if the aider command exists or if there are any history files
-        // in common locations. For now, we always return true since files can
-        // exist anywhere.
-        true
+        // Check if aider command exists or if any history files exist
+        if std::process::Command::new("aider")
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
+            return true;
+        }
+
+        // Fall back to checking if any history files exist
+        find_aider_history_files()
+            .map(|files| !files.is_empty())
+            .unwrap_or(false)
     }
 
     fn find_sources(&self) -> Result<Vec<PathBuf>> {
@@ -59,13 +67,13 @@ impl Watcher for AiderWatcher {
     }
 
     fn watch_paths(&self) -> Vec<PathBuf> {
-        // Aider files are in project directories, not a central location.
-        // Return home directory as a broad watch target.
-        if let Some(home) = dirs::home_dir() {
-            vec![home]
-        } else {
-            vec![]
-        }
+        // Aider stores .aider.chat.history.md files in individual project directories,
+        // not in a central location. Watching the entire home directory is impractical
+        // (too many files, exceeds inotify limits, high memory usage).
+        //
+        // Instead, aider sessions are only captured via manual `lore import`.
+        // Real-time watching is not supported for aider.
+        vec![]
     }
 }
 
@@ -325,8 +333,21 @@ mod tests {
     #[test]
     fn test_watcher_is_available() {
         let watcher = AiderWatcher;
-        // Aider watcher is always available since files can be anywhere
-        assert!(watcher.is_available());
+        // is_available returns true if aider command exists or history files found
+        // We just verify the method runs without panicking
+        let _ = watcher.is_available();
+    }
+
+    #[test]
+    fn test_watcher_watch_paths_returns_empty() {
+        let watcher = AiderWatcher;
+        // Aider files are scattered across project directories, so we don't watch
+        // any paths in real-time (would require watching entire home directory)
+        let paths = watcher.watch_paths();
+        assert!(
+            paths.is_empty(),
+            "watch_paths should return empty vec for aider"
+        );
     }
 
     #[test]
