@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-01-08
+
+### Added
+
+- Aider project scanning during `lore init` - detects `.aider.chat.history.md` files and offers to add their directories to watched paths
+
+### Fixed
+
+- Linux systemd service command now uses correct binary path
+- Daemon status display on Linux now correctly detects running state
+- Aider watcher no longer watches entire home directory when history files are in `~`
+- Init UX improved: comma-separated directory input with interactive validation
+- Systemd service setup now stops existing daemon first to prevent conflicts
+- Reduced log spam for transient database errors during init (logged at DEBUG instead of WARN)
+
 ## [0.1.4] - 2026-01-06
 
 ### Added
