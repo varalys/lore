@@ -758,7 +758,7 @@ Documentation=https://github.com/varalys/lore
 
 [Service]
 Type=simple
-ExecStart=%h/.cargo/bin/lore daemon run
+ExecStart=%h/.cargo/bin/lore daemon start --foreground
 Restart=on-failure
 RestartSec=5
 
