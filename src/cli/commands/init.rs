@@ -872,8 +872,8 @@ fn offer_aider_scan(db: &Database) -> Result<()> {
     }
 
     println!();
-    println!("Enter directories to scan (comma-separated), or press Enter to skip:");
-    println!("{}", "  Examples: ~/projects, ~/code, ~/work".dimmed());
+    println!("Enter directories to scan, or press Enter to skip:");
+    println!("{}", "  Examples: ~/projects ~/code ~/work".dimmed());
     print!("{}", "> ".cyan());
     io::stdout().flush()?;
 
@@ -886,10 +886,16 @@ fn offer_aider_scan(db: &Database) -> Result<()> {
         return Ok(());
     }
 
-    // Parse comma-separated directories
-    let directories: Vec<PathBuf> = input
+    // Parse directories - support comma, space, or mixed separation
+    // Split on commas first, then split each part on whitespace
+    // This handles: "~/a ~/b" or "~/a, ~/b" or "~/a ~/b, ~/c"
+    let parts: Vec<&str> = input
         .split(',')
-        .map(|s| s.trim())
+        .flat_map(|s| s.split_whitespace())
+        .collect();
+
+    let directories: Vec<PathBuf> = parts
+        .into_iter()
         .filter(|s| !s.is_empty())
         .map(|s| {
             // Expand ~ to home directory
