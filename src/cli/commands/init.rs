@@ -11,6 +11,7 @@ use crate::capture::watchers::aider::scan_directories_for_aider_files;
 use crate::capture::watchers::{default_registry, Watcher, WatcherRegistry};
 use crate::cli::commands::{completions, import};
 use crate::config::Config;
+use crate::daemon::DaemonState;
 use crate::storage::db::default_db_path;
 use crate::storage::{Database, Machine};
 use clap::CommandFactory;
@@ -670,6 +671,25 @@ fn offer_linux_service() -> Result<()> {
 
     match systemctl_check {
         Ok(output) if output.status.success() => {
+            // Check if daemon is already running (outside of systemd)
+            // If so, we need to stop it before enabling systemd
+            if let Ok(state) = DaemonState::new() {
+                if state.is_running() {
+                    if let Some(pid) = state.get_pid() {
+                        println!(
+                            "{}",
+                            format!("Stopping existing daemon (PID {})...", pid).dimmed()
+                        );
+                        // Stop the existing daemon
+                        let _ = std::process::Command::new("kill")
+                            .arg(pid.to_string())
+                            .output();
+                        // Give it a moment to stop
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                }
+            }
+
             // Create systemd user service directory and file
             if let Err(e) = create_systemd_service_file() {
                 println!(
@@ -871,74 +891,107 @@ fn offer_aider_scan(db: &Database) -> Result<()> {
         return Ok(());
     }
 
-    println!();
-    println!("Enter directories to scan (comma-separated), or press Enter to skip:");
-    println!("{}", "  Examples: ~/projects, ~/code, ~/work".dimmed());
-    print!("{}", "> ".cyan());
-    io::stdout().flush()?;
+    // Loop to allow re-entry on invalid paths
+    let valid_dirs = loop {
+        println!();
+        println!("Enter directories to scan (comma-separated), or press Enter to skip:");
+        println!("{}", "  Examples: ~/projects, ~/code, ~/work".dimmed());
+        print!("{}", "> ".cyan());
+        io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let input = input.trim();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
 
-    // Parse directories - empty input means skip
-    if input.is_empty() {
-        return Ok(());
-    }
+        // Empty input means skip
+        if input.is_empty() {
+            return Ok(());
+        }
 
-    // Parse comma-separated directories
-    let directories: Vec<PathBuf> = input
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            // Expand ~ to home directory
-            if let Some(rest) = s.strip_prefix("~/") {
-                if let Some(home) = dirs::home_dir() {
-                    home.join(rest)
+        // Parse directories - comma-separated only
+        let parts: Vec<&str> = input.split(',').map(|s| s.trim()).collect();
+
+        let directories: Vec<PathBuf> = parts
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                // Expand ~ to home directory
+                if let Some(rest) = s.strip_prefix("~/") {
+                    if let Some(home) = dirs::home_dir() {
+                        home.join(rest)
+                    } else {
+                        PathBuf::from(s)
+                    }
+                } else if s == "~" {
+                    // Don't allow scanning entire home directory
+                    PathBuf::from("~") // Will be caught as invalid
                 } else {
                     PathBuf::from(s)
                 }
-            } else if s == "~" {
-                // Don't allow scanning entire home directory
+            })
+            .collect();
+
+        if directories.is_empty() {
+            println!("{}", "No directories specified.".yellow());
+            return Ok(());
+        }
+
+        // Validate directories exist and collect invalid ones
+        let mut valid = Vec::new();
+        let mut invalid = Vec::new();
+
+        for d in directories {
+            if d.as_os_str() == "~" {
                 println!(
                     "{}",
-                    "Scanning entire home directory is not recommended. Please specify subdirectories."
-                        .yellow()
+                    "Scanning entire home directory is not recommended.".yellow()
                 );
-                PathBuf::new() // Will be filtered out as invalid
+                invalid.push(d);
+            } else if d.exists() && d.is_dir() {
+                valid.push(d);
             } else {
-                PathBuf::from(s)
+                invalid.push(d);
             }
-        })
-        .collect();
+        }
 
-    if directories.is_empty() {
-        println!("{}", "No directories specified.".yellow());
-        return Ok(());
-    }
+        // If all directories are valid, proceed
+        if invalid.is_empty() {
+            break valid;
+        }
 
-    // Validate directories exist
-    let valid_dirs: Vec<PathBuf> = directories
-        .into_iter()
-        .filter(|d| {
-            if d.exists() && d.is_dir() {
-                true
-            } else {
-                println!(
-                    "{}: {} does not exist or is not a directory",
-                    "Warning".yellow(),
-                    d.display()
-                );
-                false
-            }
-        })
-        .collect();
+        // Show invalid directories
+        println!();
+        println!("{}", "Some directories were not found:".yellow());
+        for d in &invalid {
+            println!("  - {}", d.display());
+        }
 
-    if valid_dirs.is_empty() {
-        println!("{}", "No valid directories to scan.".yellow());
-        return Ok(());
-    }
+        if valid.is_empty() {
+            // All were invalid - prompt to re-enter
+            println!();
+            println!("Please re-enter directories (comma-separated), or press Enter to skip.");
+            continue;
+        }
+
+        // Some valid, some invalid - ask if they want to continue with valid ones
+        println!();
+        println!(
+            "Found {} valid director{}:",
+            valid.len(),
+            if valid.len() == 1 { "y" } else { "ies" }
+        );
+        for d in &valid {
+            println!("  - {}", d.display());
+        }
+        println!();
+
+        if prompt_yes_no("Continue with these directories?", true)? {
+            break valid;
+        }
+
+        // User declined - let them re-enter
+        println!("Please re-enter directories (comma-separated), or press Enter to skip.");
+    };
 
     println!();
     println!("{}", "Scanning for aider projects...".bold());

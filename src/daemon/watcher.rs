@@ -158,9 +158,26 @@ impl SessionWatcher {
                 Some(events) = rx.recv() => {
                     for event in events {
                         if let Err(e) = self.handle_file_event(&event.path, &stats).await {
-                            tracing::warn!("Error handling file event for {:?}: {}", event.path, e);
-                            let mut stats_guard = stats.write().await;
-                            stats_guard.errors += 1;
+                            let error_msg = e.to_string();
+                            // Database unavailable errors are transient (e.g., during lore init)
+                            // Log at debug level to avoid spam
+                            if error_msg.contains("unable to open database")
+                                || error_msg.contains("database is locked")
+                            {
+                                tracing::debug!(
+                                    "Database temporarily unavailable for {:?}: {}",
+                                    event.path,
+                                    e
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "Error handling file event for {:?}: {}",
+                                    event.path,
+                                    e
+                                );
+                                let mut stats_guard = stats.write().await;
+                                stats_guard.errors += 1;
+                            }
                         }
                     }
                 }
