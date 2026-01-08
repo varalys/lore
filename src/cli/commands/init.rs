@@ -7,11 +7,12 @@ use colored::Colorize;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::capture::watchers::{default_registry, WatcherRegistry};
+use crate::capture::watchers::aider::scan_directories_for_aider_files;
+use crate::capture::watchers::{default_registry, Watcher, WatcherRegistry};
 use crate::cli::commands::{completions, import};
 use crate::config::Config;
 use crate::storage::db::default_db_path;
-use crate::storage::Machine;
+use crate::storage::{Database, Machine};
 use clap::CommandFactory;
 
 /// Arguments for the init command.
@@ -229,6 +230,12 @@ pub fn run(args: Args) -> Result<()> {
                 println!("  ({} skipped, {} errors)", stats.skipped, stats.errors);
             }
         }
+    }
+
+    // Offer to scan for additional aider projects if aider was enabled
+    let aider_enabled = selected_watchers.iter().any(|w| w == "aider");
+    if aider_enabled {
+        offer_aider_scan(&db)?;
     }
 
     // Offer to install shell completions
@@ -839,6 +846,194 @@ pub fn cursor_data_path() -> PathBuf {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Cursor")
     }
+}
+
+/// Offers to scan additional directories for aider projects.
+///
+/// Aider stores `.aider.chat.history.md` files in project directories rather than
+/// a central location. This prompts the user to scan additional directories beyond
+/// the common project folders that are checked by default.
+fn offer_aider_scan(db: &Database) -> Result<()> {
+    println!();
+    println!("{}", "Aider Projects".bold());
+    println!();
+    println!(
+        "{}",
+        "Aider stores chat history in project directories, not a central location.".dimmed()
+    );
+    println!(
+        "{}",
+        "Common folders (~/projects, ~/code, etc.) were already checked.".dimmed()
+    );
+    println!();
+
+    if !prompt_yes_no("Scan additional directories for aider projects?", false)? {
+        return Ok(());
+    }
+
+    println!();
+    println!("Enter directories to scan (comma-separated), or press Enter to skip:");
+    println!("{}", "  Examples: ~/projects, ~/code, ~/work".dimmed());
+    print!("{}", "> ".cyan());
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    // Parse directories - empty input means skip
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    // Parse comma-separated directories
+    let directories: Vec<PathBuf> = input
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            // Expand ~ to home directory
+            if let Some(rest) = s.strip_prefix("~/") {
+                if let Some(home) = dirs::home_dir() {
+                    home.join(rest)
+                } else {
+                    PathBuf::from(s)
+                }
+            } else if s == "~" {
+                // Don't allow scanning entire home directory
+                println!(
+                    "{}",
+                    "Scanning entire home directory is not recommended. Please specify subdirectories."
+                        .yellow()
+                );
+                PathBuf::new() // Will be filtered out as invalid
+            } else {
+                PathBuf::from(s)
+            }
+        })
+        .collect();
+
+    if directories.is_empty() {
+        println!("{}", "No directories specified.".yellow());
+        return Ok(());
+    }
+
+    // Validate directories exist
+    let valid_dirs: Vec<PathBuf> = directories
+        .into_iter()
+        .filter(|d| {
+            if d.exists() && d.is_dir() {
+                true
+            } else {
+                println!(
+                    "{}: {} does not exist or is not a directory",
+                    "Warning".yellow(),
+                    d.display()
+                );
+                false
+            }
+        })
+        .collect();
+
+    if valid_dirs.is_empty() {
+        println!("{}", "No valid directories to scan.".yellow());
+        return Ok(());
+    }
+
+    println!();
+    println!("{}", "Scanning for aider projects...".bold());
+
+    // Track the last printed line length for clearing
+    let mut last_line_len = 0;
+
+    // Scan with progress display
+    let found_files = scan_directories_for_aider_files(&valid_dirs, |current_dir, found_count| {
+        // Create progress line
+        let dir_display = current_dir
+            .to_string_lossy()
+            .chars()
+            .take(60)
+            .collect::<String>();
+        let line = format!(
+            "  {} {} [{}]",
+            "scanning".dimmed(),
+            dir_display,
+            format!("{} found", found_count).green()
+        );
+
+        // Clear previous line and print new one
+        print!("\r{:width$}\r", "", width = last_line_len);
+        print!("{}", line);
+        io::stdout().flush().ok();
+        last_line_len = line.len();
+    });
+
+    // Clear the progress line
+    print!("\r{:width$}\r", "", width = last_line_len);
+    io::stdout().flush().ok();
+
+    if found_files.is_empty() {
+        println!("  {}", "No additional aider projects found.".dimmed());
+        return Ok(());
+    }
+
+    println!(
+        "  Found {} aider project(s)",
+        found_files.len().to_string().green()
+    );
+
+    // Import the found files
+    let watcher = crate::capture::watchers::aider::AiderWatcher;
+    let mut imported = 0;
+    let mut skipped = 0;
+
+    for file_path in &found_files {
+        match watcher.parse_source(file_path) {
+            Ok(sessions) => {
+                for (session, messages) in sessions {
+                    // Check if already imported
+                    if db.get_session(&session.id).ok().flatten().is_some() {
+                        skipped += 1;
+                        continue;
+                    }
+
+                    // Import the session
+                    if let Err(e) = db.insert_session(&session) {
+                        println!("  {}: Failed to import session: {}", "Warning".yellow(), e);
+                        continue;
+                    }
+
+                    for message in &messages {
+                        if let Err(e) = db.insert_message(message) {
+                            println!("  {}: Failed to import message: {}", "Warning".yellow(), e);
+                        }
+                    }
+
+                    imported += 1;
+                }
+            }
+            Err(e) => {
+                println!(
+                    "  {}: Failed to parse {}: {}",
+                    "Warning".yellow(),
+                    file_path.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    if imported > 0 {
+        println!(
+            "  Imported {} aider session(s)",
+            imported.to_string().green()
+        );
+    }
+    if skipped > 0 {
+        println!("  ({} already imported)", skipped);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
