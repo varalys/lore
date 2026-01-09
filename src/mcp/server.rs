@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, tool::Parameters},
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, Content, ErrorCode, ErrorData as McpError, Implementation, ProtocolVersion,
         ServerCapabilities, ServerInfo,
@@ -17,7 +17,6 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::future::Future;
 
 use crate::storage::models::{Message, SearchOptions, Session};
 use crate::storage::Database;
@@ -201,8 +200,9 @@ impl LoreServer {
     #[tool(description = "Search Lore session messages for text content")]
     async fn lore_search(
         &self,
-        Parameters(params): Parameters<SearchParams>,
+        params: Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
         let result = search_impl(params);
         match result {
             Ok(response) => {
@@ -221,8 +221,9 @@ impl LoreServer {
     #[tool(description = "Get full details of a Lore session by ID")]
     async fn lore_get_session(
         &self,
-        Parameters(params): Parameters<GetSessionParams>,
+        params: Parameters<GetSessionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
         let result = get_session_impl(params);
         match result {
             Ok(response) => {
@@ -240,8 +241,9 @@ impl LoreServer {
     #[tool(description = "List recent Lore sessions")]
     async fn lore_list_sessions(
         &self,
-        Parameters(params): Parameters<ListSessionsParams>,
+        params: Parameters<ListSessionsParams>,
     ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
         let result = list_sessions_impl(params);
         match result {
             Ok(sessions) => {
@@ -259,8 +261,9 @@ impl LoreServer {
     #[tool(description = "Get recent session context for a repository")]
     async fn lore_get_context(
         &self,
-        Parameters(params): Parameters<GetContextParams>,
+        params: Parameters<GetContextParams>,
     ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
         let result = get_context_impl(params);
         match result {
             Ok(response) => {
@@ -278,8 +281,9 @@ impl LoreServer {
     #[tool(description = "Get Lore sessions linked to a git commit")]
     async fn lore_get_linked_sessions(
         &self,
-        Parameters(params): Parameters<GetLinkedSessionsParams>,
+        params: Parameters<GetLinkedSessionsParams>,
     ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
         let result = get_linked_sessions_impl(params);
         match result {
             Ok(response) => {

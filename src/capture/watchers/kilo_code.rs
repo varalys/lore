@@ -366,24 +366,9 @@ mod tests {
         temp_dir
     }
 
-    #[test]
-    fn test_watcher_info() {
-        let watcher = KiloCodeWatcher;
-        let info = watcher.info();
-
-        assert_eq!(info.name, "kilo-code");
-        assert_eq!(info.description, "Kilo Code VS Code extension sessions");
-    }
-
-    #[test]
-    fn test_watcher_watch_paths() {
-        let watcher = KiloCodeWatcher;
-        let paths = watcher.watch_paths();
-
-        assert!(!paths.is_empty());
-        assert!(paths[0].to_string_lossy().contains("kilocode.Kilo-Code"));
-        assert!(paths[0].to_string_lossy().contains("tasks"));
-    }
+    // Note: Common watcher trait tests (info, watch_paths, find_sources) are in
+    // src/capture/watchers/test_common.rs to avoid duplication across all watchers.
+    // Only tool-specific parsing tests remain here.
 
     #[test]
     fn test_parse_simple_conversation() {
@@ -476,12 +461,6 @@ mod tests {
         let (_, messages) = result.expect("Should have session");
         // Empty content should be filtered
         assert_eq!(messages.len(), 1);
-    }
-
-    #[test]
-    fn test_find_tasks_returns_ok_when_dir_missing() {
-        let result = find_kilo_code_tasks();
-        assert!(result.is_ok());
     }
 
     #[test]

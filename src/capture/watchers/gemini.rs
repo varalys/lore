@@ -325,25 +325,9 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_watcher_info() {
-        let watcher = GeminiWatcher;
-        let info = watcher.info();
-
-        assert_eq!(info.name, "gemini");
-        assert_eq!(info.description, "Google Gemini CLI");
-        assert!(!info.default_paths.is_empty());
-        assert!(info.default_paths[0].to_string_lossy().contains(".gemini"));
-    }
-
-    #[test]
-    fn test_watcher_watch_paths() {
-        let watcher = GeminiWatcher;
-        let paths = watcher.watch_paths();
-
-        assert!(!paths.is_empty());
-        assert!(paths[0].to_string_lossy().contains(".gemini"));
-    }
+    // Note: Common watcher trait tests (info, watch_paths, find_sources) are in
+    // src/capture/watchers/test_common.rs to avoid duplication across all watchers.
+    // Only tool-specific parsing tests remain here.
 
     #[test]
     fn test_parse_simple_session() {
@@ -531,13 +515,6 @@ mod tests {
         let parsed = parse_gemini_session_file(file.path()).expect("Failed to parse");
 
         assert!(parsed.messages.is_empty());
-    }
-
-    #[test]
-    fn test_find_session_files_returns_empty_when_missing() {
-        let result = find_gemini_session_files();
-        assert!(result.is_ok());
-        // May or may not find files depending on system
     }
 
     #[test]

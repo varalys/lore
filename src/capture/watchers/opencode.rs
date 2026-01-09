@@ -641,26 +641,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_watcher_info() {
-        let watcher = OpenCodeWatcher;
-        let info = watcher.info();
-
-        assert_eq!(info.name, "opencode");
-        assert_eq!(info.description, "OpenCode CLI");
-        assert!(!info.default_paths.is_empty());
-        assert!(info.default_paths[0].to_string_lossy().contains("opencode"));
-    }
-
-    #[test]
-    fn test_watcher_watch_paths() {
-        let watcher = OpenCodeWatcher;
-        let paths = watcher.watch_paths();
-
-        assert!(!paths.is_empty());
-        assert!(paths[0].to_string_lossy().contains("opencode"));
-        assert!(paths[0].to_string_lossy().contains("storage"));
-    }
+    // Note: Common watcher trait tests (info, watch_paths, find_sources) are in
+    // src/capture/watchers/test_common.rs to avoid duplication across all watchers.
+    // Only tool-specific parsing tests remain here.
 
     #[test]
     fn test_parse_simple_session() {
@@ -912,12 +895,6 @@ mod tests {
             .expect("Should parse successfully");
 
         assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_find_session_files_returns_empty_when_missing() {
-        let result = find_opencode_session_files();
-        assert!(result.is_ok());
     }
 
     #[test]

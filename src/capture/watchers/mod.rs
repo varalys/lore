@@ -43,6 +43,10 @@ pub mod opencode;
 /// Roo Code session parser for VS Code extension storage.
 pub mod roo_code;
 
+/// Shared test utilities and macros for watcher implementations.
+#[cfg(test)]
+pub mod test_common;
+
 /// Information about a tool that can be watched for sessions.
 ///
 /// Contains metadata about the watcher including its name, description,
