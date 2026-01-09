@@ -21,6 +21,8 @@ Thumbs.db
 # These are excluded to keep the open source repo clean
 # Contributors should provide their own AI/LLM configuration
 CLAUDE.md
+AGENTS.md
+GEMINI.md
 .claude/
 .cursor/
 .copilot/
@@ -51,5 +53,3 @@ secrets.json
 docs/
 ROADMAP.md
 WORKLOG.md
-AGENTS.md
-GEMINI.md
