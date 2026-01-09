@@ -339,7 +339,10 @@ mod tests {
             machine_name: Some("test-machine".to_string()),
         };
 
-        assert_eq!(config.get("watchers"), Some("claude-code,cursor".to_string()));
+        assert_eq!(
+            config.get("watchers"),
+            Some("claude-code,cursor".to_string())
+        );
         assert_eq!(config.get("auto_link"), Some("true".to_string()));
         assert_eq!(config.get("auto_link_threshold"), Some("0.85".to_string()));
         assert_eq!(config.get("commit_footer"), Some("true".to_string()));
@@ -353,10 +356,16 @@ mod tests {
         let mut config = Config::default();
 
         // Set watchers with whitespace trimming
-        config.set("watchers", "claude-code, cursor, copilot").unwrap();
+        config
+            .set("watchers", "claude-code, cursor, copilot")
+            .unwrap();
         assert_eq!(
             config.watchers,
-            vec!["claude-code".to_string(), "cursor".to_string(), "copilot".to_string()]
+            vec![
+                "claude-code".to_string(),
+                "cursor".to_string(),
+                "copilot".to_string()
+            ]
         );
 
         // Set boolean values with different formats
@@ -406,7 +415,10 @@ mod tests {
         // machine_id cannot be set manually
         let result = config.set("machine_id", "some-uuid");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cannot be set manually"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be set manually"));
     }
 
     #[test]

@@ -29,10 +29,7 @@ fn test_all_watchers_have_valid_info() {
 
     for watcher in watchers {
         let info = watcher.info();
-        assert!(
-            !info.name.is_empty(),
-            "Watcher name should not be empty"
-        );
+        assert!(!info.name.is_empty(), "Watcher name should not be empty");
         assert!(
             !info.description.is_empty(),
             "Watcher {} description should not be empty",
