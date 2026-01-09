@@ -452,34 +452,13 @@ mod tests {
         file
     }
 
-    #[test]
-    fn test_watcher_info() {
-        let watcher = AiderWatcher;
-        let info = watcher.info();
-
-        assert_eq!(info.name, "aider");
-        assert_eq!(info.description, "Aider terminal AI chat sessions");
-    }
-
-    #[test]
-    fn test_watcher_is_available() {
-        let watcher = AiderWatcher;
-        // is_available returns true if aider command exists or history files found
-        // We just verify the method runs without panicking
-        let _ = watcher.is_available();
-    }
-
-    #[test]
-    fn test_watcher_watch_paths_returns_empty() {
-        let watcher = AiderWatcher;
-        // Aider files are scattered across project directories, so we don't watch
-        // any paths in real-time (would require watching entire home directory)
-        let paths = watcher.watch_paths();
-        assert!(
-            paths.is_empty(),
-            "watch_paths should return empty vec for aider"
-        );
-    }
+    // Note: Common watcher trait tests (info, watch_paths, find_sources) are in
+    // src/capture/watchers/test_common.rs to avoid duplication across all watchers.
+    // Only tool-specific parsing tests remain here.
+    //
+    // Aider is special: watch_paths returns empty because aider files are
+    // scattered across project directories. This is tested in test_common.rs
+    // by test_all_watchers_watch_paths_are_valid which accepts empty paths.
 
     #[test]
     fn test_parse_simple_conversation() {

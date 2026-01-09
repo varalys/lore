@@ -866,27 +866,9 @@ mod tests {
     // =========================================================================
     // Unit tests for session file discovery
     // =========================================================================
-
-    #[test]
-    fn test_find_session_files_returns_empty_when_claude_dir_missing() {
-        // This test verifies the behavior when ~/.claude doesn't exist
-        // In CI or clean environments, this should return an empty vec
-        // We can't mock the home directory easily, so we test the logic path
-        // by creating a temp directory that doesn't have the expected structure
-
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let fake_claude_path = temp_dir.path().join(".claude").join("projects");
-
-        // The directory doesn't exist, so checking it should return false
-        assert!(!fake_claude_path.exists());
-
-        // The actual find_session_files uses dirs::home_dir(), so we verify
-        // the empty return logic exists by calling it - if ~/.claude doesn't
-        // exist it should return Ok(empty vec), not error
-        let result = find_session_files();
-        // This should not error even if ~/.claude doesn't exist
-        assert!(result.is_ok());
-    }
+    //
+    // Note: The test for find_sources handling missing directories is now in
+    // src/capture/watchers/test_common.rs (test_all_watchers_find_sources_handles_missing_dirs)
 
     // =========================================================================
     // Test to_storage_models conversion
@@ -1047,28 +1029,10 @@ mod tests {
     // =========================================================================
     // Tests for ClaudeCodeWatcher trait implementation
     // =========================================================================
-
-    #[test]
-    fn test_watcher_info() {
-        use super::Watcher;
-        let watcher = ClaudeCodeWatcher;
-        let info = watcher.info();
-
-        assert_eq!(info.name, "claude-code");
-        assert_eq!(info.description, "Claude Code CLI sessions");
-        assert!(!info.default_paths.is_empty());
-        assert!(info.default_paths[0].to_string_lossy().contains(".claude"));
-    }
-
-    #[test]
-    fn test_watcher_watch_paths() {
-        use super::Watcher;
-        let watcher = ClaudeCodeWatcher;
-        let paths = watcher.watch_paths();
-
-        assert!(!paths.is_empty());
-        assert!(paths[0].to_string_lossy().contains(".claude"));
-    }
+    //
+    // Note: Common watcher trait tests (info, watch_paths, find_sources) are in
+    // src/capture/watchers/test_common.rs to avoid duplication across all watchers.
+    // Only tool-specific parsing tests remain here.
 
     #[test]
     fn test_watcher_parse_source() {
