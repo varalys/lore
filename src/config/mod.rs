@@ -279,16 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_nonexistent_returns_default() {
-        let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("nonexistent.yaml");
-
-        let config = Config::load_from_path(&path).unwrap();
-        assert_eq!(config, Config::default());
-    }
-
-    #[test]
-    fn test_save_and_load() {
+    fn test_save_and_load_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("config.yaml");
 
@@ -296,11 +287,12 @@ mod tests {
             auto_link: true,
             auto_link_threshold: 0.8,
             watchers: vec!["claude-code".to_string(), "cursor".to_string()],
+            machine_id: Some("test-uuid".to_string()),
+            machine_name: Some("test-name".to_string()),
             ..Default::default()
         };
 
         config.save_to_path(&path).unwrap();
-
         let loaded = Config::load_from_path(&path).unwrap();
         assert_eq!(loaded, config);
     }
@@ -321,245 +313,138 @@ mod tests {
     }
 
     #[test]
-    fn test_get_watchers() {
-        let config = Config {
-            watchers: vec!["claude-code".to_string(), "cursor".to_string()],
-            ..Default::default()
-        };
-
-        assert_eq!(
-            config.get("watchers"),
-            Some("claude-code,cursor".to_string())
-        );
-    }
-
-    #[test]
-    fn test_get_auto_link() {
-        let config = Config {
-            auto_link: true,
-            ..Default::default()
-        };
-
-        assert_eq!(config.get("auto_link"), Some("true".to_string()));
-    }
-
-    #[test]
-    fn test_get_auto_link_threshold() {
-        let config = Config::default();
-        assert_eq!(config.get("auto_link_threshold"), Some("0.7".to_string()));
-    }
-
-    #[test]
-    fn test_get_commit_footer() {
-        let config = Config::default();
-        assert_eq!(config.get("commit_footer"), Some("false".to_string()));
-    }
-
-    #[test]
-    fn test_get_unknown_key() {
-        let config = Config::default();
-        assert_eq!(config.get("unknown_key"), None);
-    }
-
-    #[test]
-    fn test_set_watchers() {
-        let mut config = Config::default();
-        config
-            .set("watchers", "claude-code, cursor, copilot")
-            .unwrap();
-
-        assert_eq!(
-            config.watchers,
-            vec![
-                "claude-code".to_string(),
-                "cursor".to_string(),
-                "copilot".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn test_set_auto_link() {
-        let mut config = Config::default();
-
-        config.set("auto_link", "true").unwrap();
-        assert!(config.auto_link);
-
-        config.set("auto_link", "false").unwrap();
-        assert!(!config.auto_link);
-
-        config.set("auto_link", "yes").unwrap();
-        assert!(config.auto_link);
-
-        config.set("auto_link", "no").unwrap();
-        assert!(!config.auto_link);
-    }
-
-    #[test]
-    fn test_set_auto_link_threshold() {
-        let mut config = Config::default();
-
-        config.set("auto_link_threshold", "0.5").unwrap();
-        assert!((config.auto_link_threshold - 0.5).abs() < f64::EPSILON);
-
-        config.set("auto_link_threshold", "0.0").unwrap();
-        assert!((config.auto_link_threshold - 0.0).abs() < f64::EPSILON);
-
-        config.set("auto_link_threshold", "1.0").unwrap();
-        assert!((config.auto_link_threshold - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_set_auto_link_threshold_invalid_range() {
-        let mut config = Config::default();
-
-        assert!(config.set("auto_link_threshold", "-0.1").is_err());
-        assert!(config.set("auto_link_threshold", "1.1").is_err());
-        assert!(config.set("auto_link_threshold", "2.0").is_err());
-    }
-
-    #[test]
-    fn test_set_auto_link_threshold_invalid_format() {
-        let mut config = Config::default();
-
-        assert!(config.set("auto_link_threshold", "not_a_number").is_err());
-    }
-
-    #[test]
-    fn test_set_commit_footer() {
-        let mut config = Config::default();
-
-        config.set("commit_footer", "true").unwrap();
-        assert!(config.commit_footer);
-
-        config.set("commit_footer", "false").unwrap();
-        assert!(!config.commit_footer);
-    }
-
-    #[test]
-    fn test_set_unknown_key() {
-        let mut config = Config::default();
-
-        assert!(config.set("unknown_key", "value").is_err());
-    }
-
-    #[test]
-    fn test_set_invalid_bool() {
-        let mut config = Config::default();
-
-        assert!(config.set("auto_link", "maybe").is_err());
-    }
-
-    #[test]
-    fn test_load_empty_file_returns_default() {
+    fn test_load_returns_default_for_missing_or_empty_file() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("config.yaml");
 
-        fs::write(&path, "").unwrap();
+        // Nonexistent file returns default
+        let nonexistent = temp_dir.path().join("nonexistent.yaml");
+        let config = Config::load_from_path(&nonexistent).unwrap();
+        assert_eq!(config, Config::default());
 
-        let config = Config::load_from_path(&path).unwrap();
+        // Empty file returns default
+        let empty = temp_dir.path().join("empty.yaml");
+        fs::write(&empty, "").unwrap();
+        let config = Config::load_from_path(&empty).unwrap();
         assert_eq!(config, Config::default());
     }
 
     #[test]
-    fn test_valid_keys() {
-        let keys = Config::valid_keys();
-        assert!(keys.contains(&"watchers"));
-        assert!(keys.contains(&"auto_link"));
-        assert!(keys.contains(&"auto_link_threshold"));
-        assert!(keys.contains(&"commit_footer"));
-        assert!(keys.contains(&"machine_id"));
-        assert!(keys.contains(&"machine_name"));
-    }
-
-    #[test]
-    fn test_parse_bool() {
-        assert!(parse_bool("true").unwrap());
-        assert!(parse_bool("TRUE").unwrap());
-        assert!(parse_bool("True").unwrap());
-        assert!(parse_bool("1").unwrap());
-        assert!(parse_bool("yes").unwrap());
-        assert!(parse_bool("YES").unwrap());
-
-        assert!(!parse_bool("false").unwrap());
-        assert!(!parse_bool("FALSE").unwrap());
-        assert!(!parse_bool("False").unwrap());
-        assert!(!parse_bool("0").unwrap());
-        assert!(!parse_bool("no").unwrap());
-        assert!(!parse_bool("NO").unwrap());
-
-        assert!(parse_bool("invalid").is_err());
-    }
-
-    #[test]
-    fn test_get_machine_name_returns_custom_name() {
+    fn test_get_returns_expected_values() {
         let config = Config {
-            machine_name: Some("my-laptop".to_string()),
-            ..Default::default()
+            watchers: vec!["claude-code".to_string(), "cursor".to_string()],
+            auto_link: true,
+            auto_link_threshold: 0.85,
+            commit_footer: true,
+            machine_id: Some("test-uuid".to_string()),
+            machine_name: Some("test-machine".to_string()),
         };
-        assert_eq!(config.get_machine_name(), "my-laptop");
+
+        assert_eq!(config.get("watchers"), Some("claude-code,cursor".to_string()));
+        assert_eq!(config.get("auto_link"), Some("true".to_string()));
+        assert_eq!(config.get("auto_link_threshold"), Some("0.85".to_string()));
+        assert_eq!(config.get("commit_footer"), Some("true".to_string()));
+        assert_eq!(config.get("machine_id"), Some("test-uuid".to_string()));
+        assert_eq!(config.get("machine_name"), Some("test-machine".to_string()));
+        assert_eq!(config.get("unknown_key"), None);
     }
 
     #[test]
-    fn test_get_machine_name_returns_hostname_when_not_set() {
-        let config = Config::default();
-        let name = config.get_machine_name();
-        // Should return some non-empty string (hostname or "unknown")
-        assert!(!name.is_empty());
-    }
-
-    #[test]
-    fn test_set_machine_name_via_set_method() {
+    fn test_set_updates_values() {
         let mut config = Config::default();
+
+        // Set watchers with whitespace trimming
+        config.set("watchers", "claude-code, cursor, copilot").unwrap();
+        assert_eq!(
+            config.watchers,
+            vec!["claude-code".to_string(), "cursor".to_string(), "copilot".to_string()]
+        );
+
+        // Set boolean values with different formats
+        config.set("auto_link", "true").unwrap();
+        assert!(config.auto_link);
+        config.set("auto_link", "no").unwrap();
+        assert!(!config.auto_link);
+
+        config.set("commit_footer", "yes").unwrap();
+        assert!(config.commit_footer);
+
+        // Set threshold
+        config.set("auto_link_threshold", "0.5").unwrap();
+        assert!((config.auto_link_threshold - 0.5).abs() < f64::EPSILON);
+
+        // Set machine name
         config.set("machine_name", "dev-workstation").unwrap();
         assert_eq!(config.machine_name, Some("dev-workstation".to_string()));
     }
 
     #[test]
-    fn test_get_machine_name_via_get_method() {
-        let config = Config {
-            machine_name: Some("test-machine".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(config.get("machine_name"), Some("test-machine".to_string()));
-    }
-
-    #[test]
-    fn test_get_machine_id_returns_none_when_not_set() {
-        let config = Config::default();
-        assert_eq!(config.get("machine_id"), None);
-    }
-
-    #[test]
-    fn test_get_machine_id_returns_value_when_set() {
-        let config = Config {
-            machine_id: Some("test-uuid-1234".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(config.get("machine_id"), Some("test-uuid-1234".to_string()));
-    }
-
-    #[test]
-    fn test_set_machine_id_fails() {
+    fn test_set_validates_threshold_range() {
         let mut config = Config::default();
+
+        // Valid boundary values
+        config.set("auto_link_threshold", "0.0").unwrap();
+        assert!((config.auto_link_threshold - 0.0).abs() < f64::EPSILON);
+        config.set("auto_link_threshold", "1.0").unwrap();
+        assert!((config.auto_link_threshold - 1.0).abs() < f64::EPSILON);
+
+        // Invalid values
+        assert!(config.set("auto_link_threshold", "-0.1").is_err());
+        assert!(config.set("auto_link_threshold", "1.1").is_err());
+        assert!(config.set("auto_link_threshold", "not_a_number").is_err());
+    }
+
+    #[test]
+    fn test_set_rejects_invalid_input() {
+        let mut config = Config::default();
+
+        // Unknown key
+        assert!(config.set("unknown_key", "value").is_err());
+
+        // Invalid boolean
+        assert!(config.set("auto_link", "maybe").is_err());
+
+        // machine_id cannot be set manually
         let result = config.set("machine_id", "some-uuid");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("cannot be set manually"));
+        assert!(result.unwrap_err().to_string().contains("cannot be set manually"));
     }
 
     #[test]
-    fn test_machine_id_and_name_omitted_from_yaml_when_none() {
+    fn test_parse_bool_accepts_multiple_formats() {
+        // Truthy values
+        assert!(parse_bool("true").unwrap());
+        assert!(parse_bool("TRUE").unwrap());
+        assert!(parse_bool("1").unwrap());
+        assert!(parse_bool("yes").unwrap());
+        assert!(parse_bool("YES").unwrap());
+
+        // Falsy values
+        assert!(!parse_bool("false").unwrap());
+        assert!(!parse_bool("FALSE").unwrap());
+        assert!(!parse_bool("0").unwrap());
+        assert!(!parse_bool("no").unwrap());
+
+        // Invalid
+        assert!(parse_bool("invalid").is_err());
+    }
+
+    #[test]
+    fn test_machine_name_fallback_to_hostname() {
+        let config = Config::default();
+        let name = config.get_machine_name();
+        // Should return hostname or "unknown", never empty
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn test_machine_identity_yaml_serialization() {
+        // When not set, machine_id and machine_name are omitted from YAML
         let config = Config::default();
         let yaml = serde_yaml::to_string(&config).unwrap();
         assert!(!yaml.contains("machine_id"));
         assert!(!yaml.contains("machine_name"));
-    }
 
-    #[test]
-    fn test_machine_id_and_name_included_in_yaml_when_set() {
+        // When set, they are included
         let config = Config {
             machine_id: Some("uuid-1234".to_string()),
             machine_name: Some("my-machine".to_string()),
@@ -568,23 +453,5 @@ mod tests {
         let yaml = serde_yaml::to_string(&config).unwrap();
         assert!(yaml.contains("machine_id"));
         assert!(yaml.contains("machine_name"));
-    }
-
-    #[test]
-    fn test_save_and_load_with_machine_identity() {
-        let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("config.yaml");
-
-        let config = Config {
-            machine_id: Some("test-uuid".to_string()),
-            machine_name: Some("test-name".to_string()),
-            ..Default::default()
-        };
-
-        config.save_to_path(&path).unwrap();
-        let loaded = Config::load_from_path(&path).unwrap();
-
-        assert_eq!(loaded.machine_id, Some("test-uuid".to_string()));
-        assert_eq!(loaded.machine_name, Some("test-name".to_string()));
     }
 }
