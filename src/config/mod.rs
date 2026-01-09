@@ -88,7 +88,7 @@ impl Config {
             return Ok(Self::default());
         }
 
-        let config: Config = serde_yaml::from_str(&content)
+        let config: Config = serde_saphyr::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
 
         Ok(config)
@@ -104,7 +104,7 @@ impl Config {
             })?;
         }
 
-        let content = serde_yaml::to_string(self).context("Failed to serialize config")?;
+        let content = serde_saphyr::to_string(self).context("Failed to serialize config")?;
 
         fs::write(path, content)
             .with_context(|| format!("Failed to write config file: {}", path.display()))?;
@@ -452,7 +452,7 @@ mod tests {
     fn test_machine_identity_yaml_serialization() {
         // When not set, machine_id and machine_name are omitted from YAML
         let config = Config::default();
-        let yaml = serde_yaml::to_string(&config).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
         assert!(!yaml.contains("machine_id"));
         assert!(!yaml.contains("machine_name"));
 
@@ -462,7 +462,7 @@ mod tests {
             machine_name: Some("my-machine".to_string()),
             ..Default::default()
         };
-        let yaml = serde_yaml::to_string(&config).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
         assert!(yaml.contains("machine_id"));
         assert!(yaml.contains("machine_name"));
     }
