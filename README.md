@@ -26,6 +26,14 @@ Git captures what changed, Lore captures why it changed. The prompts, approaches
 brew install varalys/tap/lore
 ```
 
+### Arch Linux (AUR)
+
+```bash
+yay -S lore-cli-bin
+```
+
+Or with any AUR helper. See [lore-cli-bin](https://aur.archlinux.org/packages/lore-cli-bin).
+
 ### From crates.io
 
 ```bash
