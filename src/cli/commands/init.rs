@@ -779,21 +779,27 @@ fn create_systemd_service_file() -> Result<()> {
 
     let service_file = service_dir.join("lore.service");
 
-    let service_content = r#"[Unit]
+    // Get the actual path to the lore binary (works whether installed via cargo or package manager)
+    let lore_binary = std::env::current_exe().context("Could not determine lore binary path")?;
+    let lore_binary_path = lore_binary.display();
+
+    let service_content = format!(
+        r#"[Unit]
 Description=Lore - Reasoning history for code
 Documentation=https://github.com/varalys/lore
 
 [Service]
 Type=simple
-ExecStart=%h/.cargo/bin/lore daemon start --foreground
+ExecStart={lore_binary_path} daemon start --foreground
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=default.target
-"#;
+"#
+    );
 
-    std::fs::write(&service_file, service_content)
+    std::fs::write(&service_file, &service_content)
         .with_context(|| format!("Failed to write service file: {}", service_file.display()))?;
 
     println!(
