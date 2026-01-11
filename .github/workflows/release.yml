@@ -83,14 +83,82 @@ jobs:
 
   homebrew:
     name: Update Homebrew Formula
-    needs: release
+    needs: [build, release]
     runs-on: ubuntu-latest
     steps:
-      - name: Update Homebrew formula
-        uses: mislav/bump-homebrew-formula-action@v3
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          formula-name: lore
-          homebrew-tap: varalys/homebrew-tap
-          download-url: https://github.com/varalys/lore/archive/refs/tags/${{ github.ref_name }}.tar.gz
+          path: artifacts
+
+      - name: Calculate SHAs and update formula
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          # Calculate SHA256 for each artifact
+          SHA_MACOS_ARM=$(sha256sum artifacts/lore-aarch64-apple-darwin/lore-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
+          SHA_MACOS_INTEL=$(sha256sum artifacts/lore-x86_64-apple-darwin/lore-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_ARM=$(sha256sum artifacts/lore-aarch64-unknown-linux-gnu/lore-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_INTEL=$(sha256sum artifacts/lore-x86_64-unknown-linux-gnu/lore-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
+
+          # Strip 'v' prefix from version
+          VERSION_NUM=${VERSION#v}
+
+          # Generate formula
+          cat > lore.rb << 'FORMULA'
+          class Lore < Formula
+            desc "Capture AI coding sessions and link them to git commits"
+            homepage "https://github.com/varalys/lore"
+            version "VERSION_PLACEHOLDER"
+            license "Apache-2.0"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-aarch64-apple-darwin.tar.gz"
+                sha256 "SHA_MACOS_ARM_PLACEHOLDER"
+              end
+              on_intel do
+                url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-x86_64-apple-darwin.tar.gz"
+                sha256 "SHA_MACOS_INTEL_PLACEHOLDER"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_LINUX_ARM_PLACEHOLDER"
+              end
+              on_intel do
+                url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_LINUX_INTEL_PLACEHOLDER"
+              end
+            end
+
+            def install
+              bin.install "lore"
+            end
+
+            test do
+              assert_match "lore", shell_output("#{bin}/lore --version")
+            end
+          end
+          FORMULA
+
+          # Replace placeholders
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION_NUM}/g" lore.rb
+          sed -i "s/VERSION_TAG_PLACEHOLDER/${VERSION}/g" lore.rb
+          sed -i "s/SHA_MACOS_ARM_PLACEHOLDER/${SHA_MACOS_ARM}/g" lore.rb
+          sed -i "s/SHA_MACOS_INTEL_PLACEHOLDER/${SHA_MACOS_INTEL}/g" lore.rb
+          sed -i "s/SHA_LINUX_ARM_PLACEHOLDER/${SHA_LINUX_ARM}/g" lore.rb
+          sed -i "s/SHA_LINUX_INTEL_PLACEHOLDER/${SHA_LINUX_INTEL}/g" lore.rb
+
+          # Clone tap repo and update formula
+          git clone https://x-access-token:${COMMITTER_TOKEN}@github.com/varalys/homebrew-tap.git
+          cp lore.rb homebrew-tap/Formula/lore.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/lore.rb
+          git commit -m "lore ${VERSION_NUM}"
+          git push
