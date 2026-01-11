@@ -43,6 +43,7 @@ pub enum DaemonResponse {
         running: bool,
         pid: u32,
         uptime_seconds: u64,
+        version: String,
     },
     /// Acknowledgment that stop command was received.
     Stopping,
@@ -151,6 +152,7 @@ async fn handle_connection(
                 running: true,
                 pid: std::process::id(),
                 uptime_seconds: uptime,
+                version: env!("CARGO_PKG_VERSION").to_string(),
             }
         }
         DaemonCommand::Stop => {
@@ -291,12 +293,14 @@ mod tests {
             running: true,
             pid: 12345,
             uptime_seconds: 3600,
+            version: "0.1.6".to_string(),
         };
 
         let json = serde_json::to_string(&response).expect("Failed to serialize");
         assert!(json.contains("\"type\":\"status\""));
         assert!(json.contains("\"running\":true"));
         assert!(json.contains("\"pid\":12345"));
+        assert!(json.contains("\"version\":\"0.1.6\""));
 
         let parsed: DaemonResponse = serde_json::from_str(&json).expect("Failed to parse");
         match parsed {
@@ -304,10 +308,12 @@ mod tests {
                 running,
                 pid,
                 uptime_seconds,
+                version,
             } => {
                 assert!(running);
                 assert_eq!(pid, 12345);
                 assert_eq!(uptime_seconds, 3600);
+                assert_eq!(version, "0.1.6");
             }
             _ => panic!("Expected Status response"),
         }

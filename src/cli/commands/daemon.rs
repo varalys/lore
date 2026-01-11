@@ -411,6 +411,7 @@ fn run_status() -> Result<()> {
             running: _,
             pid: actual_pid,
             uptime_seconds,
+            version: _,
         }) => {
             println!("{}", "Daemon Status".green().bold());
             println!();
