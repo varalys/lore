@@ -7,7 +7,7 @@
 
 **Reasoning history for code.** Lore captures AI coding sessions and links them to git commits.
 
-Git captures what changed, Lore captures why it changed. The prompts, approaches, and decisions from your AI conversations.
+Lore saves all your AI coding sessions from Claude Code, Codex, etc and links them to commits. When you look at code later, you can see the conversation that produced it.
 
 **Documentation:** [lore.varalys.com](https://lore.varalys.com)
 
