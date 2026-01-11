@@ -6,9 +6,8 @@ Thank you for your interest in contributing to Lore! This document provides guid
 
 ### Prerequisites
 
-- Rust 1.70 or later
+- Rust 1.92 or later
 - Git
-- SQLite development libraries (usually included with Rust's rusqlite)
 
 ### Development Setup
 
@@ -88,7 +87,6 @@ refactor: extract common parsing logic
 ### Testing
 
 - Write unit tests for new functions
-- Write integration tests for CLI commands
 - Test edge cases and error conditions
 - Ensure tests are deterministic (no flaky tests)
 
