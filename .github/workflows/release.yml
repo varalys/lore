@@ -151,6 +151,8 @@ jobs:
               <<~EOS
                 To get started, run:
                   lore init
+
+                The Homebrew service won't start until init completes.
               EOS
             end
 
