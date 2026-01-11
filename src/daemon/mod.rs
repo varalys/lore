@@ -68,14 +68,16 @@ pub async fn run_daemon() -> Result<()> {
     // Check if lore has been initialized
     let config_path = Config::config_path()?;
     if !config_path.exists() {
-        anyhow::bail!(
-            "Lore has not been initialized.\n\n\
+        eprintln!(
+            "Error: Lore has not been initialized.\n\n\
             Run 'lore init' first to:\n  \
             - Select which AI tools to watch\n  \
             - Configure your machine identity\n  \
             - Import existing sessions\n\n\
             Then start the daemon with 'lore daemon start' or let init do it for you."
         );
+        // Exit with code 0 so launchd doesn't treat this as a crash and restart
+        std::process::exit(0);
     }
 
     // Set up file logging
