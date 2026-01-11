@@ -107,60 +107,63 @@ jobs:
 
           # Generate formula
           cat > lore.rb << 'FORMULA'
-class Lore < Formula
-  desc "Capture AI coding sessions and link them to git commits"
-  homepage "https://github.com/varalys/lore"
-  version "VERSION_PLACEHOLDER"
-  license "Apache-2.0"
+          class Lore < Formula
+            desc "Capture AI coding sessions and link them to git commits"
+            homepage "https://github.com/varalys/lore"
+            version "VERSION_PLACEHOLDER"
+            license "Apache-2.0"
 
-  on_macos do
-    on_arm do
-      url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-aarch64-apple-darwin.tar.gz"
-      sha256 "SHA_MACOS_ARM_PLACEHOLDER"
-    end
-    on_intel do
-      url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-x86_64-apple-darwin.tar.gz"
-      sha256 "SHA_MACOS_INTEL_PLACEHOLDER"
-    end
-  end
+            on_macos do
+              on_arm do
+                url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-aarch64-apple-darwin.tar.gz"
+                sha256 "SHA_MACOS_ARM_PLACEHOLDER"
+              end
+              on_intel do
+                url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-x86_64-apple-darwin.tar.gz"
+                sha256 "SHA_MACOS_INTEL_PLACEHOLDER"
+              end
+            end
 
-  on_linux do
-    on_arm do
-      url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "SHA_LINUX_ARM_PLACEHOLDER"
-    end
-    on_intel do
-      url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "SHA_LINUX_INTEL_PLACEHOLDER"
-    end
-  end
+            on_linux do
+              on_arm do
+                url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_LINUX_ARM_PLACEHOLDER"
+              end
+              on_intel do
+                url "https://github.com/varalys/lore/releases/download/VERSION_TAG_PLACEHOLDER/lore-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_LINUX_INTEL_PLACEHOLDER"
+              end
+            end
 
-  def install
-    bin.install "lore"
-  end
+            def install
+              bin.install "lore"
+            end
 
-  service do
-    run [opt_bin/"lore", "daemon", "start", "--foreground"]
-    keep_alive true
-    log_path var/"log/lore.log"
-    error_log_path var/"log/lore.log"
-    working_dir HOMEBREW_PREFIX
-  end
+            service do
+              run [opt_bin/"lore", "daemon", "start", "--foreground"]
+              keep_alive true
+              log_path var/"log/lore.log"
+              error_log_path var/"log/lore.log"
+              working_dir HOMEBREW_PREFIX
+            end
 
-  def caveats
-    <<~EOS
-      Run this first to configure lore:
-        lore init
+            def caveats
+              <<~EOS
+                Run this first to configure lore:
+                  lore init
 
-      The background service will not work until lore init has been run.
-    EOS
-  end
+                The background service will not work until lore init has been run.
+              EOS
+            end
 
-  test do
-    assert_match "lore", shell_output("#{bin}/lore --version")
-  end
-end
-FORMULA
+            test do
+              assert_match "lore", shell_output("#{bin}/lore --version")
+            end
+          end
+          FORMULA
+
+          # Remove leading spaces from heredoc (caused by YAML indentation)
+          sed -i 's/^          //' lore.rb
 
           # Replace placeholders
           sed -i "s/VERSION_PLACEHOLDER/${VERSION_NUM}/g" lore.rb
