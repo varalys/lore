@@ -149,10 +149,8 @@ jobs:
 
             def caveats
               <<~EOS
-                Run this first to configure lore:
+                To get started, run:
                   lore init
-
-                The background service will not work until lore init has been run.
               EOS
             end
 

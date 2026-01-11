@@ -32,6 +32,8 @@ use tokio::signal;
 use tokio::sync::{oneshot, RwLock};
 use tracing_appender::non_blocking::WorkerGuard;
 
+use crate::config::Config;
+
 pub use server::{send_command_sync, DaemonCommand, DaemonResponse};
 pub use state::{DaemonState, DaemonStats};
 pub use watcher::SessionWatcher;
@@ -60,6 +62,19 @@ pub async fn run_daemon() -> Result<()> {
         anyhow::bail!(
             "Daemon is already running (PID {})",
             state.get_pid().unwrap_or(0)
+        );
+    }
+
+    // Check if lore has been initialized
+    let config_path = Config::config_path()?;
+    if !config_path.exists() {
+        anyhow::bail!(
+            "Lore has not been initialized.\n\n\
+            Run 'lore init' first to:\n  \
+            - Select which AI tools to watch\n  \
+            - Configure your machine identity\n  \
+            - Import existing sessions\n\n\
+            Then start the daemon with 'lore daemon start' or let init do it for you."
         );
     }
 
