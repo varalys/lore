@@ -11,9 +11,12 @@ use serde::Serialize;
 use crate::capture::watchers::{default_registry, WatcherRegistry};
 use crate::cli::OutputFormat;
 use crate::config::Config;
-use crate::daemon::DaemonState;
+use crate::daemon::{send_command_sync, DaemonCommand, DaemonResponse, DaemonState};
 use crate::git;
 use crate::storage::Database;
+
+/// The current CLI version.
+const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Arguments for the status command.
 #[derive(clap::Args)]
@@ -258,6 +261,7 @@ fn run_text(db: &Database, registry: &WatcherRegistry, config: &Config) -> Resul
 /// Prints the daemon status section.
 ///
 /// Shows whether the daemon is currently running and its PID if available.
+/// Also checks if the daemon version matches the CLI version and warns if not.
 fn print_daemon_status() {
     println!("{}", "Daemon:".bold());
 
@@ -265,7 +269,35 @@ fn print_daemon_status() {
         Ok(state) => {
             if state.is_running() {
                 let pid = state.get_pid().unwrap_or(0);
-                println!("  {} (PID {})", "running".green(), pid);
+
+                // Try to get daemon version via IPC
+                match send_command_sync(&state.socket_path, DaemonCommand::Status) {
+                    Ok(DaemonResponse::Status { version, .. }) => {
+                        if version != CLI_VERSION {
+                            println!(
+                                "  {} (PID {}) {} {}",
+                                "running".green(),
+                                pid,
+                                format!("v{}", version).dimmed(),
+                                "(restart recommended)".yellow()
+                            );
+                            println!(
+                                "  {}",
+                                format!(
+                                    "Daemon is v{}, CLI is v{}. Run: lore daemon stop && lore daemon start",
+                                    version, CLI_VERSION
+                                )
+                                .yellow()
+                            );
+                        } else {
+                            println!("  {} (PID {})", "running".green(), pid);
+                        }
+                    }
+                    _ => {
+                        // Couldn't get version, just show running status
+                        println!("  {} (PID {})", "running".green(), pid);
+                    }
+                }
             } else {
                 println!("  {}", "not running".yellow());
             }

@@ -609,22 +609,21 @@ fn offer_macos_service() -> Result<()> {
                 }
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    println!(
-                        "{}: {}",
-                        "Warning".yellow(),
-                        "Failed to start service via brew".dimmed()
-                    );
-                    if !stderr.is_empty() {
-                        println!("  {}", stderr.trim().dimmed());
+                    // Check if it's just already running
+                    if stderr.contains("already started") {
+                        println!("{}", "Lore background service is already running.".green());
+                        println!("{}", "Sessions will now be captured in real-time.".dimmed());
+                    } else {
+                        println!(
+                            "{}: {}",
+                            "Warning".yellow(),
+                            "Failed to start service via brew".dimmed()
+                        );
+                        if !stderr.is_empty() {
+                            println!("  {}", stderr.trim().dimmed());
+                        }
+                        fallback_to_daemon_install()?;
                     }
-                    println!(
-                        "{}",
-                        "You may need to install lore via 'brew install lore' first.".dimmed()
-                    );
-                    println!(
-                        "{}",
-                        "Or run 'lore daemon start' manually to start the daemon.".dimmed()
-                    );
                 }
                 Err(e) => {
                     println!(
@@ -632,22 +631,57 @@ fn offer_macos_service() -> Result<()> {
                         "Warning".yellow(),
                         format!("Failed to run brew: {}", e).dimmed()
                     );
-                    println!(
-                        "{}",
-                        "You can run 'lore daemon start' manually instead.".dimmed()
-                    );
+                    fallback_to_daemon_install()?;
                 }
             }
         }
         _ => {
-            println!("{}: {}", "Note".yellow(), "Homebrew not found".dimmed());
+            // Homebrew not available, use native daemon install
+            fallback_to_daemon_install()?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Falls back to native daemon install when brew is not available.
+fn fallback_to_daemon_install() -> Result<()> {
+    println!(
+        "{}",
+        "Falling back to native service installation...".dimmed()
+    );
+
+    let lore_exe = std::env::current_exe().context("Could not determine lore binary path")?;
+
+    let result = std::process::Command::new(&lore_exe)
+        .args(["daemon", "install"])
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => {
+            println!("{}", "Lore background service installed!".green());
+            println!("{}", "Sessions will now be captured in real-time.".dimmed());
+        }
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("already installed") {
+                println!("{}", "Lore service is already installed.".green());
+            } else {
+                println!(
+                    "{}",
+                    "You can run 'lore daemon start' manually instead.".dimmed()
+                );
+            }
+        }
+        Err(e) => {
             println!(
-                "{}",
-                "To use brew services, install lore via: brew install lore".dimmed()
+                "{}: {}",
+                "Warning".yellow(),
+                format!("Failed to install service: {}", e).dimmed()
             );
             println!(
                 "{}",
-                "Or run 'lore daemon start' manually to start the daemon.".dimmed()
+                "You can run 'lore daemon start' manually instead.".dimmed()
             );
         }
     }
