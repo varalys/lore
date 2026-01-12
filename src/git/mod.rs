@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Retrieves information about a git repository.
@@ -133,9 +134,11 @@ pub fn calculate_link_confidence(
 
 /// Retrieves all commits in a repository made within a time range.
 ///
-/// Walks the commit history from HEAD and collects all commits whose
-/// timestamps fall between `after` and `before` (inclusive on both ends).
+/// Walks the commit history from all local branches and collects all commits
+/// whose timestamps fall between `after` and `before` (inclusive on both ends).
 /// Commits are returned in reverse chronological order (newest first).
+///
+/// This is equivalent to `git log --all --after=X --before=Y`.
 ///
 /// This is used for auto-linking sessions to commits made during the
 /// session's time window.
@@ -157,35 +160,45 @@ pub fn get_commits_in_time_range(
 ) -> Result<Vec<CommitInfo>> {
     let repo = git2::Repository::discover(repo_path).context("Not a git repository")?;
 
-    let head = repo.head().context("Could not get HEAD reference")?;
-    let head_commit = head.peel_to_commit().context("Could not get HEAD commit")?;
-
     let mut revwalk = repo.revwalk().context("Could not create revision walker")?;
-    revwalk.push(head_commit.id())?;
+
+    // Push all local branch refs to walk commits from all branches
+    for branch_result in repo.branches(Some(git2::BranchType::Local))? {
+        let (branch, _) = branch_result?;
+        if let Some(reference) = branch.get().target() {
+            revwalk.push(reference)?;
+        }
+    }
+
     revwalk.set_sorting(git2::Sort::TIME)?;
 
     let after_secs = after.timestamp();
     let before_secs = before.timestamp();
 
     let mut commits = Vec::new();
+    let mut seen_shas: HashSet<String> = HashSet::new();
 
     for oid_result in revwalk {
         let oid = oid_result.context("Error walking commits")?;
         let commit = repo.find_commit(oid).context("Could not find commit")?;
 
+        let sha = commit.id().to_string();
+
+        // Skip already-seen commits (same commit reachable from multiple branches)
+        if seen_shas.contains(&sha) {
+            continue;
+        }
+        seen_shas.insert(sha.clone());
+
         let commit_time = commit.time().seconds();
 
-        // Stop early if we've gone past the time window (commits are time-sorted)
-        if commit_time < after_secs {
-            break;
-        }
-
         // Skip commits outside the time window
-        if commit_time > before_secs {
+        // Note: we cannot do early exit because commits from different branches
+        // may interleave in the time-sorted order
+        if commit_time < after_secs || commit_time > before_secs {
             continue;
         }
 
-        let sha = commit.id().to_string();
         let timestamp = Utc
             .timestamp_opt(commit_time, 0)
             .single()
