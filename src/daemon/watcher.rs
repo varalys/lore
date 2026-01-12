@@ -482,10 +482,7 @@ impl SessionWatcher {
 
         // Check if working directory is a git repository
         if !working_dir.exists() {
-            tracing::debug!(
-                "Working directory does not exist: {}",
-                working_directory
-            );
+            tracing::debug!("Working directory does not exist: {}", working_directory);
             return Ok(0);
         }
 
@@ -495,11 +492,7 @@ impl SessionWatcher {
             Err(e) => {
                 // Not a git repository or other git error - this is expected
                 // for sessions outside git repos
-                tracing::debug!(
-                    "Could not get commits for {}: {}",
-                    working_directory,
-                    e
-                );
+                tracing::debug!("Could not get commits for {}: {}", working_directory, e);
                 return Ok(0);
             }
         };
@@ -573,6 +566,91 @@ impl SessionWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::models::Session;
+    use chrono::Duration;
+    use tempfile::tempdir;
+
+    /// Creates a test database in the given directory.
+    fn create_test_db(dir: &Path) -> Database {
+        let db_path = dir.join("test.db");
+        Database::open(&db_path).expect("Failed to open test database")
+    }
+
+    /// Creates a test session with specified time window.
+    fn create_test_session_with_times(
+        working_directory: &str,
+        started_at: chrono::DateTime<Utc>,
+        ended_at: chrono::DateTime<Utc>,
+    ) -> Session {
+        Session {
+            id: Uuid::new_v4(),
+            tool: "test-tool".to_string(),
+            tool_version: Some("1.0.0".to_string()),
+            started_at,
+            ended_at: Some(ended_at),
+            model: Some("test-model".to_string()),
+            working_directory: working_directory.to_string(),
+            git_branch: Some("main".to_string()),
+            source_path: None,
+            message_count: 0,
+            machine_id: Some("test-machine".to_string()),
+        }
+    }
+
+    /// Creates a test commit in the repository with a specific timestamp.
+    ///
+    /// Returns the full SHA of the created commit.
+    fn create_test_commit(
+        repo: &git2::Repository,
+        message: &str,
+        time: chrono::DateTime<Utc>,
+    ) -> String {
+        let sig = git2::Signature::new(
+            "Test User",
+            "test@example.com",
+            &git2::Time::new(time.timestamp(), 0),
+        )
+        .expect("Failed to create signature");
+
+        // Get current tree (or create empty tree for first commit)
+        let tree_id = {
+            let mut index = repo.index().expect("Failed to get index");
+
+            // Create a test file to have something to commit
+            let file_path = repo
+                .workdir()
+                .unwrap()
+                .join(format!("test_{}.txt", Uuid::new_v4()));
+            std::fs::write(&file_path, format!("Content for: {message}"))
+                .expect("Failed to write test file");
+
+            index
+                .add_path(file_path.strip_prefix(repo.workdir().unwrap()).unwrap())
+                .expect("Failed to add file to index");
+            index.write().expect("Failed to write index");
+            index.write_tree().expect("Failed to write tree")
+        };
+
+        let tree = repo.find_tree(tree_id).expect("Failed to find tree");
+
+        // Get parent commit if it exists
+        let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+
+        let commit_id = if let Some(parent) = parent {
+            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+                .expect("Failed to create commit")
+        } else {
+            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])
+                .expect("Failed to create commit")
+        };
+
+        commit_id.to_string()
+    }
+
+    /// Initializes a new git repository in the given directory.
+    fn init_test_repo(dir: &Path) -> git2::Repository {
+        git2::Repository::init(dir).expect("Failed to init test repo")
+    }
 
     #[test]
     fn test_session_watcher_creation() {
@@ -646,5 +724,396 @@ mod tests {
         assert_eq!(watcher.tracked_file_count(), 2);
         assert_eq!(watcher.file_positions.get(&path1), Some(&100));
         assert_eq!(watcher.file_positions.get(&path2), Some(&200));
+    }
+
+    // ==================== auto_link_session_commits Tests ====================
+
+    #[test]
+    fn test_auto_link_creates_links_for_commits_in_time_range() {
+        // Create temp directory for both git repo and database
+        let dir = tempdir().expect("Failed to create temp directory");
+        let repo_path = dir.path();
+
+        // Initialize git repo
+        let repo = init_test_repo(repo_path);
+
+        // Create database in the temp directory
+        let db = create_test_db(repo_path);
+
+        // Define time window for session: 1 hour ago to now
+        let now = Utc::now();
+        let session_start = now - Duration::hours(1);
+        let session_end = now;
+
+        // Create commits within the session's time window
+        let commit_time1 = session_start + Duration::minutes(10);
+        let commit_time2 = session_start + Duration::minutes(30);
+        let commit_time3 = session_start + Duration::minutes(50);
+
+        let sha1 = create_test_commit(&repo, "First commit in session", commit_time1);
+        let sha2 = create_test_commit(&repo, "Second commit in session", commit_time2);
+        let sha3 = create_test_commit(&repo, "Third commit in session", commit_time3);
+
+        // Create and insert session
+        let session = create_test_session_with_times(
+            &repo_path.to_string_lossy(),
+            session_start,
+            session_end,
+        );
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Create a minimal watcher for testing
+        let watcher = SessionWatcher {
+            file_positions: HashMap::new(),
+            watch_dirs: vec![],
+            db_config: DbConfig {
+                path: repo_path.join("test.db"),
+            },
+        };
+
+        // Call auto_link_session_commits
+        let linked_count = watcher
+            .auto_link_session_commits(
+                &db,
+                session.id,
+                &repo_path.to_string_lossy(),
+                session_start,
+                session_end,
+            )
+            .expect("auto_link_session_commits should succeed");
+
+        // Assert correct number of links created
+        assert_eq!(linked_count, 3, "Should have linked 3 commits");
+
+        // Verify each commit is linked
+        assert!(
+            db.link_exists(&session.id, &sha1)
+                .expect("link_exists should succeed"),
+            "First commit should be linked"
+        );
+        assert!(
+            db.link_exists(&session.id, &sha2)
+                .expect("link_exists should succeed"),
+            "Second commit should be linked"
+        );
+        assert!(
+            db.link_exists(&session.id, &sha3)
+                .expect("link_exists should succeed"),
+            "Third commit should be linked"
+        );
+    }
+
+    #[test]
+    fn test_auto_link_skips_commits_outside_time_range() {
+        // Create temp directory
+        let dir = tempdir().expect("Failed to create temp directory");
+        let repo_path = dir.path();
+
+        // Initialize git repo
+        let repo = init_test_repo(repo_path);
+
+        // Create database
+        let db = create_test_db(repo_path);
+
+        // Define a narrow time window: 30 minutes to 20 minutes ago
+        let now = Utc::now();
+        let session_start = now - Duration::minutes(30);
+        let session_end = now - Duration::minutes(20);
+
+        // Create commits BEFORE the session window (40 minutes ago)
+        let before_time = now - Duration::minutes(40);
+        let sha_before = create_test_commit(&repo, "Commit before session", before_time);
+
+        // Create commit INSIDE the session window (25 minutes ago)
+        let inside_time = now - Duration::minutes(25);
+        let sha_inside = create_test_commit(&repo, "Commit inside session", inside_time);
+
+        // Create commit AFTER the session window (10 minutes ago)
+        let after_time = now - Duration::minutes(10);
+        let sha_after = create_test_commit(&repo, "Commit after session", after_time);
+
+        // Create and insert session
+        let session = create_test_session_with_times(
+            &repo_path.to_string_lossy(),
+            session_start,
+            session_end,
+        );
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Create watcher and call auto_link
+        let watcher = SessionWatcher {
+            file_positions: HashMap::new(),
+            watch_dirs: vec![],
+            db_config: DbConfig {
+                path: repo_path.join("test.db"),
+            },
+        };
+
+        let linked_count = watcher
+            .auto_link_session_commits(
+                &db,
+                session.id,
+                &repo_path.to_string_lossy(),
+                session_start,
+                session_end,
+            )
+            .expect("auto_link_session_commits should succeed");
+
+        // Only the commit inside the window should be linked
+        assert_eq!(linked_count, 1, "Should have linked only 1 commit");
+
+        // Verify the commit before is NOT linked
+        assert!(
+            !db.link_exists(&session.id, &sha_before)
+                .expect("link_exists should succeed"),
+            "Commit before session should NOT be linked"
+        );
+
+        // Verify the commit inside IS linked
+        assert!(
+            db.link_exists(&session.id, &sha_inside)
+                .expect("link_exists should succeed"),
+            "Commit inside session should be linked"
+        );
+
+        // Verify the commit after is NOT linked
+        assert!(
+            !db.link_exists(&session.id, &sha_after)
+                .expect("link_exists should succeed"),
+            "Commit after session should NOT be linked"
+        );
+    }
+
+    #[test]
+    fn test_auto_link_skips_existing_links() {
+        // Create temp directory
+        let dir = tempdir().expect("Failed to create temp directory");
+        let repo_path = dir.path();
+
+        // Initialize git repo
+        let repo = init_test_repo(repo_path);
+
+        // Create database
+        let db = create_test_db(repo_path);
+
+        // Define time window
+        let now = Utc::now();
+        let session_start = now - Duration::hours(1);
+        let session_end = now;
+
+        // Create a commit in the time window
+        let commit_time = session_start + Duration::minutes(30);
+        let sha = create_test_commit(&repo, "Test commit", commit_time);
+
+        // Create and insert session
+        let session = create_test_session_with_times(
+            &repo_path.to_string_lossy(),
+            session_start,
+            session_end,
+        );
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Manually create a link for the commit
+        let existing_link = SessionLink {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            link_type: LinkType::Commit,
+            commit_sha: Some(sha.clone()),
+            branch: Some("main".to_string()),
+            remote: None,
+            created_at: Utc::now(),
+            created_by: LinkCreator::Auto,
+            confidence: Some(1.0),
+        };
+        db.insert_link(&existing_link)
+            .expect("Failed to insert existing link");
+
+        // Create watcher and call auto_link
+        let watcher = SessionWatcher {
+            file_positions: HashMap::new(),
+            watch_dirs: vec![],
+            db_config: DbConfig {
+                path: repo_path.join("test.db"),
+            },
+        };
+
+        let linked_count = watcher
+            .auto_link_session_commits(
+                &db,
+                session.id,
+                &repo_path.to_string_lossy(),
+                session_start,
+                session_end,
+            )
+            .expect("auto_link_session_commits should succeed");
+
+        // Should return 0 since the link already exists
+        assert_eq!(
+            linked_count, 0,
+            "Should not create any new links when link already exists"
+        );
+
+        // Verify the link still exists (and there is only one)
+        assert!(
+            db.link_exists(&session.id, &sha)
+                .expect("link_exists should succeed"),
+            "Link should still exist"
+        );
+    }
+
+    #[test]
+    fn test_auto_link_handles_non_git_directory() {
+        // Create temp directory that is NOT a git repo
+        let dir = tempdir().expect("Failed to create temp directory");
+        let non_repo_path = dir.path();
+
+        // Create database
+        let db = create_test_db(non_repo_path);
+
+        // Define time window
+        let now = Utc::now();
+        let session_start = now - Duration::hours(1);
+        let session_end = now;
+
+        // Create and insert session pointing to non-git directory
+        let session = create_test_session_with_times(
+            &non_repo_path.to_string_lossy(),
+            session_start,
+            session_end,
+        );
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Create watcher and call auto_link
+        let watcher = SessionWatcher {
+            file_positions: HashMap::new(),
+            watch_dirs: vec![],
+            db_config: DbConfig {
+                path: non_repo_path.join("test.db"),
+            },
+        };
+
+        let result = watcher.auto_link_session_commits(
+            &db,
+            session.id,
+            &non_repo_path.to_string_lossy(),
+            session_start,
+            session_end,
+        );
+
+        // Should return Ok(0), not an error
+        assert!(
+            result.is_ok(),
+            "Should handle non-git directory gracefully: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap(), 0, "Should return 0 for non-git directory");
+    }
+
+    #[test]
+    fn test_auto_link_finds_commits_on_multiple_branches() {
+        // Create temp directory
+        let dir = tempdir().expect("Failed to create temp directory");
+        let repo_path = dir.path();
+
+        // Initialize git repo
+        let repo = init_test_repo(repo_path);
+
+        // Create database
+        let db = create_test_db(repo_path);
+
+        // Define time window: 1 hour ago to now
+        let now = Utc::now();
+        let session_start = now - Duration::hours(1);
+        let session_end = now;
+
+        // Create initial commit on main branch (default)
+        let main_commit_time = session_start + Duration::minutes(10);
+        let sha_main = create_test_commit(&repo, "Commit on main", main_commit_time);
+
+        // Get the default branch name (could be master or main depending on git config)
+        let head_ref = repo.head().expect("Should have HEAD after commit");
+        let default_branch = head_ref
+            .shorthand()
+            .expect("HEAD should have a name")
+            .to_string();
+
+        // Create a feature branch and switch to it
+        let main_commit = head_ref.peel_to_commit().unwrap();
+        repo.branch("feature-branch", &main_commit, false)
+            .expect("Failed to create branch");
+        repo.set_head("refs/heads/feature-branch")
+            .expect("Failed to switch branch");
+
+        // Create commit on feature branch
+        let feature_commit_time = session_start + Duration::minutes(30);
+        let sha_feature = create_test_commit(&repo, "Commit on feature", feature_commit_time);
+
+        // Switch back to default branch and create another commit
+        repo.set_head(&format!("refs/heads/{}", default_branch))
+            .expect("Failed to switch to default branch");
+        // Need to reset the working directory to default branch
+        let main_obj = repo
+            .revparse_single(&default_branch)
+            .expect("Should find default branch");
+        repo.reset(&main_obj, git2::ResetType::Hard, None)
+            .expect("Failed to reset to default branch");
+
+        let main_commit_time2 = session_start + Duration::minutes(50);
+        let sha_main2 = create_test_commit(&repo, "Second commit on main", main_commit_time2);
+
+        // Create and insert session
+        let session = create_test_session_with_times(
+            &repo_path.to_string_lossy(),
+            session_start,
+            session_end,
+        );
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // Create watcher and call auto_link
+        let watcher = SessionWatcher {
+            file_positions: HashMap::new(),
+            watch_dirs: vec![],
+            db_config: DbConfig {
+                path: repo_path.join("test.db"),
+            },
+        };
+
+        let linked_count = watcher
+            .auto_link_session_commits(
+                &db,
+                session.id,
+                &repo_path.to_string_lossy(),
+                session_start,
+                session_end,
+            )
+            .expect("auto_link_session_commits should succeed");
+
+        // Should link all 3 commits from both branches
+        assert_eq!(
+            linked_count, 3,
+            "Should have linked commits from both branches"
+        );
+
+        // Verify each commit is linked
+        assert!(
+            db.link_exists(&session.id, &sha_main)
+                .expect("link_exists should succeed"),
+            "First main commit should be linked"
+        );
+        assert!(
+            db.link_exists(&session.id, &sha_feature)
+                .expect("link_exists should succeed"),
+            "Feature branch commit should be linked"
+        );
+        assert!(
+            db.link_exists(&session.id, &sha_main2)
+                .expect("link_exists should succeed"),
+            "Second main commit should be linked"
+        );
     }
 }

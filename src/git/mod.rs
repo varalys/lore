@@ -614,7 +614,10 @@ mod tests {
         assert!(result.is_ok(), "Should succeed even with future dates");
 
         let commits = result.unwrap();
-        assert!(commits.is_empty(), "Should find no commits in future time range");
+        assert!(
+            commits.is_empty(),
+            "Should find no commits in future time range"
+        );
     }
 
     #[test]
