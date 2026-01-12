@@ -28,6 +28,9 @@ pub mod cline;
 /// Codex CLI session parser for JSONL files.
 pub mod codex;
 
+/// Common utilities shared across watcher implementations.
+pub mod common;
+
 /// Continue.dev session parser for JSON session files.
 pub mod continue_dev;
 
@@ -42,6 +45,9 @@ pub mod opencode;
 
 /// Roo Code session parser for VS Code extension storage.
 pub mod roo_code;
+
+/// Generic VS Code extension watcher for Cline-style task storage.
+pub mod vscode_extension;
 
 /// Shared test utilities and macros for watcher implementations.
 #[cfg(test)]
@@ -210,13 +216,13 @@ pub fn default_registry() -> WatcherRegistry {
     registry.register(Box::new(aider::AiderWatcher));
     registry.register(Box::new(amp::AmpWatcher));
     registry.register(Box::new(claude_code::ClaudeCodeWatcher));
-    registry.register(Box::new(cline::ClineWatcher));
+    registry.register(Box::new(cline::new_watcher()));
     registry.register(Box::new(codex::CodexWatcher));
     registry.register(Box::new(continue_dev::ContinueDevWatcher));
     registry.register(Box::new(gemini::GeminiWatcher));
-    registry.register(Box::new(kilo_code::KiloCodeWatcher));
+    registry.register(Box::new(kilo_code::new_watcher()));
     registry.register(Box::new(opencode::OpenCodeWatcher));
-    registry.register(Box::new(roo_code::RooCodeWatcher));
+    registry.register(Box::new(roo_code::new_watcher()));
     registry
 }
 

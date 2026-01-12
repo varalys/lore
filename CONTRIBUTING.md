@@ -105,29 +105,54 @@ We can help build the watcher, or you can submit a PR yourself.
 
 ### For Contributors
 
-To add support for a new AI coding tool:
+There are two approaches depending on the tool type:
 
-1. Create a new file in `src/capture/watchers/`:
-   ```rust
-   // src/capture/watchers/newtool.rs
-   pub struct NewToolWatcher;
+#### Option 1: VS Code Extension (Cline-style)
 
-   impl Watcher for NewToolWatcher {
-       fn info(&self) -> WatcherInfo { ... }
-       fn is_available(&self) -> bool { ... }
-       fn find_sources(&self) -> Result<Vec<PathBuf>> { ... }
-       fn parse_source(&self, path: &Path) -> Result<Vec<(Session, Vec<Message>)>> { ... }
-       fn watch_paths(&self) -> Vec<PathBuf> { ... }
-   }
-   ```
+If the tool is a VS Code extension using Cline-style task storage (with `api_conversation_history.json` files), use the generic `VsCodeExtensionWatcher`:
 
-2. Add the module to `src/capture/watchers/mod.rs`
+```rust
+// src/capture/watchers/my_extension.rs
+use super::vscode_extension::{VsCodeExtensionConfig, VsCodeExtensionWatcher};
 
-3. Register it in `WatcherRegistry::default_registry()`
+pub const CONFIG: VsCodeExtensionConfig = VsCodeExtensionConfig {
+    name: "my-extension",
+    description: "My Extension VS Code sessions",
+    extension_id: "publisher.my-extension",
+};
 
-4. Add tests for your parser
+pub fn new_watcher() -> VsCodeExtensionWatcher {
+    VsCodeExtensionWatcher::new(CONFIG)
+}
+```
 
-5. Update README.md to list the new tool
+Then add to `mod.rs` and register with `registry.register(Box::new(my_extension::new_watcher()))`.
+
+#### Option 2: CLI Tool or Custom Format
+
+For tools with unique session formats, implement the `Watcher` trait:
+
+```rust
+// src/capture/watchers/newtool.rs
+pub struct NewToolWatcher;
+
+impl Watcher for NewToolWatcher {
+    fn info(&self) -> WatcherInfo { ... }
+    fn is_available(&self) -> bool { ... }
+    fn find_sources(&self) -> Result<Vec<PathBuf>> { ... }
+    fn parse_source(&self, path: &Path) -> Result<Vec<(Session, Vec<Message>)>> { ... }
+    fn watch_paths(&self) -> Vec<PathBuf> { ... }
+}
+```
+
+Use helpers from `common.rs`: `parse_role()`, `parse_timestamp_millis()`, `parse_uuid_or_generate()`.
+
+#### Final Steps
+
+1. Add the module to `src/capture/watchers/mod.rs`
+2. Register it in `default_registry()`
+3. Add tests for your parser
+4. Update README.md to list the new tool
 
 ## Reporting Issues
 
