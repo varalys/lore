@@ -31,7 +31,8 @@ const DEFAULT_WINDOW_MINUTES: i64 = 30;
     lore link abc123                    Link session to HEAD\n    \
     lore link abc123 def456             Link multiple sessions\n    \
     lore link abc123 --commit 1a2b3c    Link to specific commit\n    \
-    lore link abc123 --dry-run          Preview without linking")]
+    lore link abc123 --dry-run          Preview without linking\n    \
+    lore link --current                 Link active sessions in this repo")]
 pub struct Args {
     /// Session ID prefixes to link (can specify multiple)
     #[arg(value_name = "SESSION")]
@@ -48,6 +49,15 @@ pub struct Args {
         SHA, HEAD, HEAD~1, branch name, tag, etc. Defaults to HEAD."
     )]
     pub commit: String,
+
+    /// Link currently active sessions in this repository
+    #[arg(long)]
+    #[arg(
+        long_help = "Automatically finds and links sessions that are currently active\n\
+        (or ended within the last 5 minutes) in this git repository. This is\n\
+        used by the post-commit hook for forward auto-linking."
+    )]
+    pub current: bool,
 
     // NOTE: Auto-linking is disabled pending further testing.
     // The heuristics need refinement to avoid incorrect links.
@@ -72,7 +82,9 @@ pub struct Args {
 /// Creates links between the specified sessions and a commit.
 /// Uses the current HEAD if no commit is specified.
 pub fn run(args: Args) -> Result<()> {
-    if args.auto {
+    if args.current {
+        run_current_link(args)
+    } else if args.auto {
         run_auto_link(args)
     } else {
         run_manual_link(args)
@@ -145,6 +157,104 @@ fn run_manual_link(args: Args) -> Result<()> {
             &session.id.to_string()[..8].cyan(),
             short_sha
         );
+    }
+
+    Ok(())
+}
+
+/// Links currently active sessions in this repository to a commit.
+///
+/// This is the forward auto-linking implementation. It finds sessions that:
+/// - Have a working_directory matching the current repository root
+/// - Are currently active (no ended_at) OR ended within the last 5 minutes
+///
+/// Unlike retroactive auto-linking, no confidence scoring is needed because
+/// if a session is active in this repo at commit time, it is the right session.
+fn run_current_link(args: Args) -> Result<()> {
+    let db = Database::open_default()?;
+
+    // Get repository root
+    let cwd = std::env::current_dir()?;
+    let repo_path = get_repo_root(&cwd)?;
+
+    // Resolve commit
+    let commit_sha = resolve_commit(&args.commit)?;
+    let short_sha = &commit_sha[..8.min(commit_sha.len())];
+
+    // Find active sessions for this directory
+    let sessions = db.find_active_sessions_for_directory(&repo_path, None)?;
+
+    if sessions.is_empty() {
+        // Silent exit - this is expected when no AI session is active
+        // The post-commit hook calls this on every commit
+        return Ok(());
+    }
+
+    println!("Linking active sessions to commit {}", short_sha.yellow());
+
+    let mut linked_count = 0;
+    let mut skipped_existing = 0;
+
+    for session in &sessions {
+        // Check if already linked to avoid duplicates
+        if db.link_exists(&session.id, &commit_sha)? {
+            skipped_existing += 1;
+            continue;
+        }
+
+        let session_short_id = &session.id.to_string()[..8];
+
+        if args.dry_run {
+            println!(
+                "  {} Would link session {} -> commit {}",
+                "[dry-run]".cyan(),
+                session_short_id.cyan(),
+                short_sha
+            );
+            linked_count += 1;
+            continue;
+        }
+
+        let link = SessionLink {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            link_type: LinkType::Commit,
+            commit_sha: Some(commit_sha.clone()),
+            branch: session.git_branch.clone(),
+            remote: None,
+            created_at: Utc::now(),
+            created_by: LinkCreator::Auto,
+            confidence: None, // Forward linking does not need confidence
+        };
+
+        db.insert_link(&link)?;
+
+        println!(
+            "  {} session {} -> commit {}",
+            "Linked".green(),
+            session_short_id.cyan(),
+            short_sha
+        );
+        linked_count += 1;
+    }
+
+    if linked_count > 0 || skipped_existing > 0 {
+        println!();
+        if args.dry_run {
+            println!(
+                "Dry run complete: would link {} session(s)",
+                linked_count.to_string().green()
+            );
+        } else if linked_count > 0 {
+            println!("Linked {} session(s)", linked_count.to_string().green());
+        }
+
+        if skipped_existing > 0 {
+            println!(
+                "Skipped {} already-linked session(s)",
+                skipped_existing.to_string().yellow()
+            );
+        }
     }
 
     Ok(())
@@ -311,7 +421,6 @@ fn resolve_commit(commit_ref: &str) -> Result<String> {
 }
 
 /// Gets the root path of the git repository.
-#[allow(dead_code)]
 fn get_repo_root(path: &Path) -> Result<String> {
     let repo = git2::Repository::discover(path).context("Not a git repository")?;
 
