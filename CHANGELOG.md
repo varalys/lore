@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-01-12
+
+### Added
+
+- Forward auto-linking: daemon automatically links sessions to commits when sessions end
+  - No git hooks or per-repo setup required
+  - Finds commits across all branches made during session time window
+- `lore link --current` flag to manually link active sessions to HEAD
+- `get_commits_in_time_range()` for multi-branch commit discovery
+
+### Fixed
+
+- Daemon now re-imports updated sessions and triggers auto-linking on updates
+- Fixed incorrect watcher dispatch that caused Claude JSONL files to be parsed as aider sessions
+  - Now uses path-based dispatch to match files to their owning watcher
+- Fixed daemon logging - logs are now written to `~/.lore/daemon.log`
+  - Previously, console logging initialization prevented file logging from initializing
+
 ## [0.1.7] - 2026-01-10
 
 ### Added
