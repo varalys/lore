@@ -1305,6 +1305,51 @@ impl Database {
         Ok(count > 0)
     }
 
+    /// Finds sessions that are currently active or recently ended for a directory.
+    ///
+    /// This is used by forward auto-linking to find sessions to link when a commit
+    /// is made. A session is considered "active" if:
+    /// - It has no ended_at timestamp (still ongoing), OR
+    /// - It ended within the last `recent_minutes` (default 5 minutes)
+    ///
+    /// The directory filter uses a prefix match, so sessions in subdirectories
+    /// of the given path will also be included.
+    ///
+    /// # Arguments
+    ///
+    /// * `directory` - The repository root path to filter sessions by
+    /// * `recent_minutes` - How many minutes back to consider "recent" (default 5)
+    ///
+    /// # Returns
+    ///
+    /// Sessions that are active or recently ended in the given directory.
+    pub fn find_active_sessions_for_directory(
+        &self,
+        directory: &str,
+        recent_minutes: Option<i64>,
+    ) -> Result<Vec<Session>> {
+        let minutes = recent_minutes.unwrap_or(5);
+        let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
+
+        let sql = r#"
+            SELECT id, tool, tool_version, started_at, ended_at, model,
+                   working_directory, git_branch, source_path, message_count, machine_id
+            FROM sessions
+            WHERE working_directory LIKE ?1
+              AND (ended_at IS NULL OR ended_at >= ?2)
+            ORDER BY started_at DESC
+        "#;
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(
+            params![format!("{directory}%"), cutoff],
+            Self::row_to_session,
+        )?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to find active sessions for directory")
+    }
+
     // ==================== Session Deletion ====================
 
     /// Deletes a session and all its associated data.
@@ -3252,6 +3297,142 @@ mod tests {
             !db.link_exists(&session2.id, "abc123").expect("check"),
             "Should not find link for session2"
         );
+    }
+
+    // ==================== Forward Auto-linking Tests ====================
+
+    #[test]
+    fn test_find_active_sessions_for_directory_ongoing() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create an ongoing session (no ended_at)
+        let session = create_test_session(
+            "claude-code",
+            "/home/user/project",
+            now - Duration::minutes(30),
+            None,
+        );
+        // ended_at is None by default (ongoing)
+
+        db.insert_session(&session).expect("insert session");
+
+        // Find active sessions
+        let found = db
+            .find_active_sessions_for_directory("/home/user/project", None)
+            .expect("find active sessions");
+
+        assert_eq!(found.len(), 1, "Should find ongoing session");
+        assert_eq!(found[0].id, session.id);
+    }
+
+    #[test]
+    fn test_find_active_sessions_for_directory_recently_ended() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create a session that ended 2 minutes ago (within default 5 minute window)
+        let mut session = create_test_session(
+            "claude-code",
+            "/home/user/project",
+            now - Duration::minutes(30),
+            None,
+        );
+        session.ended_at = Some(now - Duration::minutes(2));
+
+        db.insert_session(&session).expect("insert session");
+
+        // Find active sessions
+        let found = db
+            .find_active_sessions_for_directory("/home/user/project", None)
+            .expect("find active sessions");
+
+        assert_eq!(found.len(), 1, "Should find recently ended session");
+        assert_eq!(found[0].id, session.id);
+    }
+
+    #[test]
+    fn test_find_active_sessions_for_directory_old_session() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create a session that ended 10 minutes ago (outside default 5 minute window)
+        let mut session = create_test_session(
+            "claude-code",
+            "/home/user/project",
+            now - Duration::minutes(60),
+            None,
+        );
+        session.ended_at = Some(now - Duration::minutes(10));
+
+        db.insert_session(&session).expect("insert session");
+
+        // Find active sessions
+        let found = db
+            .find_active_sessions_for_directory("/home/user/project", None)
+            .expect("find active sessions");
+
+        assert!(found.is_empty(), "Should not find old session");
+    }
+
+    #[test]
+    fn test_find_active_sessions_for_directory_filters_by_path() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create sessions in different directories
+        let session1 = create_test_session(
+            "claude-code",
+            "/home/user/project-a",
+            now - Duration::minutes(10),
+            None,
+        );
+        let session2 = create_test_session(
+            "claude-code",
+            "/home/user/project-b",
+            now - Duration::minutes(10),
+            None,
+        );
+
+        db.insert_session(&session1).expect("insert session1");
+        db.insert_session(&session2).expect("insert session2");
+
+        // Find active sessions for project-a only
+        let found = db
+            .find_active_sessions_for_directory("/home/user/project-a", None)
+            .expect("find active sessions");
+
+        assert_eq!(found.len(), 1, "Should find only session in project-a");
+        assert_eq!(found[0].id, session1.id);
+    }
+
+    #[test]
+    fn test_find_active_sessions_for_directory_custom_window() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Create a session that ended 8 minutes ago
+        let mut session = create_test_session(
+            "claude-code",
+            "/home/user/project",
+            now - Duration::minutes(30),
+            None,
+        );
+        session.ended_at = Some(now - Duration::minutes(8));
+
+        db.insert_session(&session).expect("insert session");
+
+        // Should not find with default 5 minute window
+        let found = db
+            .find_active_sessions_for_directory("/home/user/project", None)
+            .expect("find with default window");
+        assert!(found.is_empty(), "Should not find with 5 minute window");
+
+        // Should find with 10 minute window
+        let found = db
+            .find_active_sessions_for_directory("/home/user/project", Some(10))
+            .expect("find with 10 minute window");
+        assert_eq!(found.len(), 1, "Should find with 10 minute window");
     }
 
     // ==================== Enhanced Search Tests ====================

@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Retrieves information about a git repository.
@@ -129,6 +130,109 @@ pub fn calculate_link_confidence(
     }
 
     score.min(1.0)
+}
+
+/// Retrieves all commits in a repository made within a time range.
+///
+/// Walks the commit history from all local branches and collects all commits
+/// whose timestamps fall between `after` and `before` (inclusive on both ends).
+/// Commits are returned in reverse chronological order (newest first).
+///
+/// This is equivalent to `git log --all --after=X --before=Y`.
+///
+/// This is used for auto-linking sessions to commits made during the
+/// session's time window.
+///
+/// # Arguments
+///
+/// * `repo_path` - A path inside the git repository
+/// * `after` - Only include commits at or after this time
+/// * `before` - Only include commits at or before this time
+///
+/// # Errors
+///
+/// Returns an error if the repository cannot be found or the commit
+/// history cannot be walked.
+pub fn get_commits_in_time_range(
+    repo_path: &Path,
+    after: DateTime<Utc>,
+    before: DateTime<Utc>,
+) -> Result<Vec<CommitInfo>> {
+    let repo = git2::Repository::discover(repo_path).context("Not a git repository")?;
+
+    let mut revwalk = repo.revwalk().context("Could not create revision walker")?;
+
+    // Push all local branch refs to walk commits from all branches
+    for branch_result in repo.branches(Some(git2::BranchType::Local))? {
+        let (branch, _) = branch_result?;
+        if let Some(reference) = branch.get().target() {
+            revwalk.push(reference)?;
+        }
+    }
+
+    // Also push HEAD to handle detached HEAD state (common in CI environments).
+    // This is idempotent - if HEAD points to a branch we already pushed, the
+    // seen_shas HashSet will deduplicate commits.
+    if let Ok(head) = repo.head() {
+        if let Ok(commit) = head.peel_to_commit() {
+            revwalk.push(commit.id())?;
+        }
+    }
+
+    revwalk.set_sorting(git2::Sort::TIME)?;
+
+    let after_secs = after.timestamp();
+    let before_secs = before.timestamp();
+
+    let mut commits = Vec::new();
+    let mut seen_shas: HashSet<String> = HashSet::new();
+
+    for oid_result in revwalk {
+        let oid = oid_result.context("Error walking commits")?;
+        let commit = repo.find_commit(oid).context("Could not find commit")?;
+
+        let sha = commit.id().to_string();
+
+        // Skip already-seen commits (same commit reachable from multiple branches)
+        if seen_shas.contains(&sha) {
+            continue;
+        }
+        seen_shas.insert(sha.clone());
+
+        let commit_time = commit.time().seconds();
+
+        // Skip commits outside the time window
+        // Note: we cannot do early exit because commits from different branches
+        // may interleave in the time-sorted order
+        if commit_time < after_secs || commit_time > before_secs {
+            continue;
+        }
+
+        let timestamp = Utc
+            .timestamp_opt(commit_time, 0)
+            .single()
+            .unwrap_or_else(Utc::now);
+
+        // Try to determine branch name by checking if HEAD points to this commit
+        let branch = repo.head().ok().and_then(|h| {
+            if h.peel_to_commit().ok()?.id() == commit.id() {
+                h.shorthand().map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+
+        let summary = commit.summary().unwrap_or("").to_string();
+
+        commits.push(CommitInfo {
+            sha,
+            timestamp,
+            branch,
+            summary,
+        });
+    }
+
+    Ok(commits)
 }
 
 /// Retrieves information about a specific commit.
@@ -472,5 +576,148 @@ mod tests {
         // /tmp should not be a git repository
         let result = resolve_commit_ref(std::path::Path::new("/tmp"), "HEAD");
         assert!(result.is_err(), "Non-repo path should fail");
+    }
+
+    // ==================== get_commits_in_time_range Tests ====================
+
+    #[test]
+    fn test_get_commits_in_time_range_returns_recent_commits() {
+        // This test runs in the lore repository itself
+        let repo_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Get HEAD commit info to know when it was made
+        let head_info = get_commit_info(repo_path, "HEAD").expect("Should get HEAD commit info");
+
+        // Create a time range that includes HEAD commit (from 1 hour before to 1 hour after)
+        let after = head_info.timestamp - chrono::Duration::hours(1);
+        let before = head_info.timestamp + chrono::Duration::hours(1);
+
+        let result = get_commits_in_time_range(repo_path, after, before);
+        assert!(
+            result.is_ok(),
+            "Should get commits in time range: {:?}",
+            result.err()
+        );
+
+        let commits = result.unwrap();
+        assert!(
+            !commits.is_empty(),
+            "Should find at least HEAD commit in time range"
+        );
+
+        // HEAD commit should be in the results
+        let has_head = commits.iter().any(|c| c.sha == head_info.sha);
+        assert!(has_head, "HEAD commit should be in results");
+    }
+
+    #[test]
+    fn test_get_commits_in_time_range_empty_for_future() {
+        let repo_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Create a time range entirely in the future
+        let now = Utc::now();
+        let after = now + chrono::Duration::days(365);
+        let before = now + chrono::Duration::days(366);
+
+        let result = get_commits_in_time_range(repo_path, after, before);
+        assert!(result.is_ok(), "Should succeed even with future dates");
+
+        let commits = result.unwrap();
+        assert!(
+            commits.is_empty(),
+            "Should find no commits in future time range"
+        );
+    }
+
+    #[test]
+    fn test_get_commits_in_time_range_empty_for_distant_past() {
+        let repo_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Create a time range before git was invented
+        let after = Utc.with_ymd_and_hms(1990, 1, 1, 0, 0, 0).unwrap();
+        let before = Utc.with_ymd_and_hms(1990, 1, 2, 0, 0, 0).unwrap();
+
+        let result = get_commits_in_time_range(repo_path, after, before);
+        assert!(result.is_ok(), "Should succeed even with past dates");
+
+        let commits = result.unwrap();
+        assert!(
+            commits.is_empty(),
+            "Should find no commits in distant past time range"
+        );
+    }
+
+    #[test]
+    fn test_get_commits_in_time_range_not_a_repo() {
+        // /tmp should not be a git repository
+        let after = Utc::now() - chrono::Duration::hours(1);
+        let before = Utc::now();
+
+        let result = get_commits_in_time_range(std::path::Path::new("/tmp"), after, before);
+        assert!(result.is_err(), "Non-repo path should fail");
+    }
+
+    #[test]
+    fn test_get_commits_in_time_range_commit_info_complete() {
+        let repo_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Get HEAD commit to determine time range
+        let head_info = get_commit_info(repo_path, "HEAD").expect("Should get HEAD commit info");
+
+        let after = head_info.timestamp - chrono::Duration::seconds(1);
+        let before = head_info.timestamp + chrono::Duration::seconds(1);
+
+        let commits =
+            get_commits_in_time_range(repo_path, after, before).expect("Should get commits");
+
+        // Find HEAD commit in results
+        let head_commit = commits.iter().find(|c| c.sha == head_info.sha);
+        assert!(head_commit.is_some(), "HEAD commit should be in results");
+
+        let head_commit = head_commit.unwrap();
+
+        // Verify commit info is complete
+        assert_eq!(head_commit.sha.len(), 40, "SHA should be 40 characters");
+        assert!(
+            head_commit.sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "SHA should be hex"
+        );
+        assert_eq!(
+            head_commit.timestamp, head_info.timestamp,
+            "Timestamp should match"
+        );
+        // Summary should be non-empty for most commits
+        // (we don't strictly require this as some commits may have empty messages)
+    }
+
+    #[test]
+    fn test_get_commits_in_time_range_sorted_by_time() {
+        let repo_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Wide time range to get multiple commits
+        let before = Utc::now();
+        let after = before - chrono::Duration::days(30);
+
+        let result = get_commits_in_time_range(repo_path, after, before);
+        if result.is_err() {
+            // Skip test if repo access fails
+            return;
+        }
+
+        let commits = result.unwrap();
+        if commits.len() < 2 {
+            // Not enough commits to test sorting
+            return;
+        }
+
+        // Verify commits are sorted newest first (descending by time)
+        for window in commits.windows(2) {
+            assert!(
+                window[0].timestamp >= window[1].timestamp,
+                "Commits should be sorted newest first: {} >= {}",
+                window[0].timestamp,
+                window[1].timestamp
+            );
+        }
     }
 }

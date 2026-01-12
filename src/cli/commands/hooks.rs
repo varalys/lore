@@ -19,17 +19,17 @@ const LORE_HOOK_MARKER: &str = "# Lore hook - managed by lore hooks install";
 
 /// Post-commit hook script content.
 ///
-/// Note: Auto-linking is not yet implemented. This hook is a placeholder
-/// that will be updated when auto-linking functionality is available.
-/// For now, users should manually link sessions using `lore link <session> --commit HEAD`.
+/// This hook runs after each commit and links any currently active AI
+/// development sessions to the commit. This enables forward auto-linking
+/// where sessions are linked as commits happen, rather than retroactively.
 const POST_COMMIT_HOOK: &str = r#"#!/bin/sh
 # Lore post-commit hook
 # Lore hook - managed by lore hooks install
-#
-# NOTE: Auto-linking is not yet available.
-# This hook is a placeholder for future functionality.
-# To manually link a session to a commit, run:
-#   lore link <session-id> --commit HEAD
+
+# Link any active sessions to this commit
+if command -v lore >/dev/null 2>&1; then
+    lore link --current --commit HEAD 2>/dev/null || true
+fi
 "#;
 
 /// Prepare-commit-msg hook script content.
@@ -456,6 +456,15 @@ mod tests {
                 hook_type.filename()
             );
         }
+    }
+
+    #[test]
+    fn test_post_commit_hook_calls_link_current() {
+        let content = HookType::PostCommit.content();
+        assert!(
+            content.contains("lore link --current --commit HEAD"),
+            "Post-commit hook should call 'lore link --current --commit HEAD'"
+        );
     }
 
     #[test]
