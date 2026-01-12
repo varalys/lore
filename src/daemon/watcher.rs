@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
-use crate::capture::watchers::default_registry;
+use crate::capture::watchers::{default_registry, Watcher};
 use crate::git::get_commits_in_time_range;
 use crate::storage::models::{LinkCreator, LinkType, SessionLink};
 use crate::storage::Database;
@@ -200,6 +200,27 @@ impl SessionWatcher {
         self.db_config.open()
     }
 
+    /// Finds the watcher that owns a given file path.
+    ///
+    /// A watcher "owns" a path if one of its `watch_paths()` is an ancestor
+    /// of the given path. This ensures files are parsed by the correct watcher
+    /// rather than trying all watchers in arbitrary order.
+    ///
+    /// Returns `None` if no watcher claims the path.
+    fn find_owning_watcher<'a>(
+        path: &Path,
+        watchers: &'a [&'a dyn Watcher],
+    ) -> Option<&'a dyn Watcher> {
+        for watcher in watchers {
+            for watch_path in watcher.watch_paths() {
+                if path.starts_with(&watch_path) {
+                    return Some(*watcher);
+                }
+            }
+        }
+        None
+    }
+
     /// Performs an initial scan of existing session files.
     ///
     /// Called when the watcher starts to import any sessions that were
@@ -356,6 +377,8 @@ impl SessionWatcher {
     /// handles deduplication automatically. After updating, triggers auto-linking
     /// if the session has an ended_at timestamp.
     ///
+    /// Uses path-based dispatch to find the correct watcher for the file.
+    ///
     /// Returns (0, new_messages_imported) since the session already exists.
     fn update_existing_session(
         &self,
@@ -367,30 +390,37 @@ impl SessionWatcher {
 
         let path_buf = path.to_path_buf();
         let registry = default_registry();
+        let available = registry.available_watchers();
 
-        // Try to parse with each watcher until one succeeds
-        let mut parsed_sessions = Vec::new();
-
-        for watcher in registry.available_watchers() {
-            match watcher.parse_source(&path_buf) {
-                Ok(sessions) if !sessions.is_empty() => {
-                    parsed_sessions = sessions;
-                    break;
-                }
-                Ok(_) => continue,
-                Err(e) => {
-                    tracing::debug!(
-                        "Watcher {} could not parse {:?}: {}",
-                        watcher.info().name,
-                        path,
-                        e
-                    );
-                }
+        // Find the watcher that owns this path
+        let owning_watcher = match Self::find_owning_watcher(path, &available) {
+            Some(w) => w,
+            None => {
+                tracing::debug!("No watcher owns path {:?}", path);
+                return Ok((0, 0));
             }
-        }
+        };
+
+        // Parse with the owning watcher
+        let parsed_sessions = match owning_watcher.parse_source(&path_buf) {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                tracing::debug!(
+                    "Watcher {} could not parse {:?}: {}",
+                    owning_watcher.info().name,
+                    path,
+                    e
+                );
+                return Ok((0, 0));
+            }
+        };
 
         if parsed_sessions.is_empty() {
-            tracing::debug!("No watcher could parse {:?}", path);
+            tracing::debug!(
+                "Watcher {} returned no sessions for {:?}",
+                owning_watcher.info().name,
+                path
+            );
             return Ok((0, 0));
         }
 
@@ -481,36 +511,45 @@ impl SessionWatcher {
     /// Imports a complete session file synchronously.
     /// Returns (sessions_imported, messages_imported) counts.
     ///
-    /// Uses the watcher registry to find the appropriate parser for the file type.
+    /// Uses path-based dispatch to find the correct watcher for the file.
+    /// Files are parsed only by the watcher that owns their parent directory,
+    /// preventing incorrect parsing by unrelated watchers.
     fn import_file_sync(&mut self, path: &Path, db: &Database) -> Result<(u64, u64)> {
         tracing::debug!("Importing session file: {:?}", path);
 
         let path_buf = path.to_path_buf();
         let registry = default_registry();
+        let available = registry.available_watchers();
 
-        // Try to parse with each watcher until one succeeds
-        let mut parsed_sessions = Vec::new();
-
-        for watcher in registry.available_watchers() {
-            match watcher.parse_source(&path_buf) {
-                Ok(sessions) if !sessions.is_empty() => {
-                    parsed_sessions = sessions;
-                    break;
-                }
-                Ok(_) => continue,
-                Err(e) => {
-                    tracing::debug!(
-                        "Watcher {} could not parse {:?}: {}",
-                        watcher.info().name,
-                        path,
-                        e
-                    );
-                }
+        // Find the watcher that owns this path
+        let owning_watcher = match Self::find_owning_watcher(path, &available) {
+            Some(w) => w,
+            None => {
+                tracing::debug!("No watcher owns path {:?}", path);
+                return Ok((0, 0));
             }
-        }
+        };
+
+        // Parse with the owning watcher
+        let parsed_sessions = match owning_watcher.parse_source(&path_buf) {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                tracing::debug!(
+                    "Watcher {} could not parse {:?}: {}",
+                    owning_watcher.info().name,
+                    path,
+                    e
+                );
+                return Ok((0, 0));
+            }
+        };
 
         if parsed_sessions.is_empty() {
-            tracing::debug!("No watcher could parse {:?}", path);
+            tracing::debug!(
+                "Watcher {} returned no sessions for {:?}",
+                owning_watcher.info().name,
+                path
+            );
             return Ok((0, 0));
         }
 
@@ -866,6 +905,69 @@ mod tests {
         assert_eq!(watcher.tracked_file_count(), 2);
         assert_eq!(watcher.file_positions.get(&path1), Some(&100));
         assert_eq!(watcher.file_positions.get(&path2), Some(&200));
+    }
+
+    // ==================== find_owning_watcher Tests ====================
+
+    #[test]
+    fn test_find_owning_watcher_matches_path_under_watch_dir() {
+        use crate::capture::watchers::{Watcher, WatcherInfo};
+        use crate::storage::models::{Message, Session};
+
+        struct TestWatcher {
+            name: &'static str,
+            watch_path: PathBuf,
+        }
+
+        impl Watcher for TestWatcher {
+            fn info(&self) -> WatcherInfo {
+                WatcherInfo {
+                    name: self.name,
+                    description: "Test",
+                    default_paths: vec![],
+                }
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn find_sources(&self) -> Result<Vec<PathBuf>> {
+                Ok(vec![])
+            }
+            fn parse_source(&self, _: &Path) -> Result<Vec<(Session, Vec<Message>)>> {
+                Ok(vec![])
+            }
+            fn watch_paths(&self) -> Vec<PathBuf> {
+                vec![self.watch_path.clone()]
+            }
+        }
+
+        let watcher1 = TestWatcher {
+            name: "watcher-a",
+            watch_path: PathBuf::from("/home/user/.claude/projects"),
+        };
+        let watcher2 = TestWatcher {
+            name: "watcher-b",
+            watch_path: PathBuf::from("/home/user/.aider"),
+        };
+
+        let watchers: Vec<&dyn Watcher> = vec![&watcher1, &watcher2];
+
+        // File under watcher1's path
+        let claude_file = Path::new("/home/user/.claude/projects/myproject/session.jsonl");
+        let result = SessionWatcher::find_owning_watcher(claude_file, &watchers);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().info().name, "watcher-a");
+
+        // File under watcher2's path
+        let aider_file = Path::new("/home/user/.aider/history.md");
+        let result = SessionWatcher::find_owning_watcher(aider_file, &watchers);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().info().name, "watcher-b");
+
+        // File not under any watch path
+        let other_file = Path::new("/home/user/projects/random.txt");
+        let result = SessionWatcher::find_owning_watcher(other_file, &watchers);
+        assert!(result.is_none());
     }
 
     // ==================== auto_link_session_commits Tests ====================
