@@ -267,20 +267,6 @@ pub fn parse_vscode_task(
         })
         .unwrap_or_else(|| ".".to_string());
 
-    let session = Session {
-        id: session_id,
-        tool: tool_name.to_string(),
-        tool_version: None,
-        started_at,
-        ended_at,
-        model: None,
-        working_directory,
-        git_branch: None,
-        source_path: Some(history_path.to_string_lossy().to_string()),
-        message_count: raw_messages.len() as i32,
-        machine_id: crate::storage::get_machine_id(),
-    };
-
     // Convert messages
     let mut messages = Vec::new();
     let time_per_message = chrono::Duration::seconds(30);
@@ -312,7 +298,7 @@ pub fn parse_vscode_task(
             content: MessageContent::Text(content_text),
             model: None,
             git_branch: None,
-            cwd: Some(session.working_directory.clone()),
+            cwd: Some(working_directory.clone()),
         });
 
         current_time += time_per_message;
@@ -321,6 +307,20 @@ pub fn parse_vscode_task(
     if messages.is_empty() {
         return Ok(None);
     }
+
+    let session = Session {
+        id: session_id,
+        tool: tool_name.to_string(),
+        tool_version: None,
+        started_at,
+        ended_at,
+        model: None,
+        working_directory,
+        git_branch: None,
+        source_path: Some(history_path.to_string_lossy().to_string()),
+        message_count: messages.len() as i32,
+        machine_id: crate::storage::get_machine_id(),
+    };
 
     Ok(Some((session, messages)))
 }
