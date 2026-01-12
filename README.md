@@ -117,7 +117,7 @@ Full documentation at **[lore.varalys.com](https://lore.varalys.com)**:
 ~/.lore/
 ├── lore.db       # SQLite database
 ├── config.yaml   # Configuration
-└── logs/         # Daemon logs
+└── daemon.log    # Daemon logs
 ```
 
 All data stays on your machine.
