@@ -127,34 +127,64 @@ fn run_start(foreground: bool) -> Result<()> {
 
         rt.block_on(crate::daemon::run_daemon())?;
     } else {
-        // Start the daemon as a background process
-        println!("{}", "Starting daemon in background...".green());
+        // On macOS, check if running as a managed service (launchd manages it)
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(started) = try_start_macos_service()? {
+                if started {
+                    return Ok(());
+                }
+                // If try_start_macos_service returns Some(false), fall through to direct spawn
+            }
+        }
 
-        let current_exe =
-            std::env::current_exe().context("Failed to get current executable path")?;
+        // On Linux, check if running as a systemd service
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(started) = try_start_linux_service()? {
+                if started {
+                    return Ok(());
+                }
+                // If try_start_linux_service returns Some(false), fall through to direct spawn
+            }
+        }
 
-        // Spawn the daemon process with foreground flag
-        // The child process will handle daemonization
-        let child = Command::new(&current_exe)
-            .arg("daemon")
-            .arg("start")
-            .arg("--foreground")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .context("Failed to spawn daemon process")?;
-
-        println!(
-            "{} Daemon started with PID {}",
-            "Success:".green(),
-            child.id()
-        );
-        println!(
-            "{}",
-            format!("Logs available at: {:?}", state.log_file).dimmed()
-        );
+        // Fall back to spawning the daemon as a background process
+        start_daemon_directly(&state)?;
     }
+
+    Ok(())
+}
+
+/// Starts the daemon by spawning a background process directly.
+///
+/// This is the fallback method when the daemon is not configured as a managed service.
+fn start_daemon_directly(state: &DaemonState) -> Result<()> {
+    println!("{}", "Starting daemon in background...".green());
+
+    let current_exe = std::env::current_exe().context("Failed to get current executable path")?;
+
+    // Spawn the daemon process with foreground flag
+    // The child process will handle daemonization
+    let child = Command::new(&current_exe)
+        .arg("daemon")
+        .arg("start")
+        .arg("--foreground")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("Failed to spawn daemon process")?;
+
+    println!(
+        "{} Daemon started with PID {}",
+        "Success:".green(),
+        child.id()
+    );
+    println!(
+        "{}",
+        format!("Logs available at: {:?}", state.log_file).dimmed()
+    );
 
     Ok(())
 }
@@ -272,6 +302,84 @@ fn try_stop_macos_service() -> Result<Option<bool>> {
     Ok(None)
 }
 
+/// Attempts to start a macOS service-managed daemon.
+///
+/// Returns:
+/// - Ok(Some(true)) if the service was started successfully
+/// - Ok(Some(false)) if service exists but start failed (should fall back to direct spawn)
+/// - Ok(None) if no service is installed (should spawn directly)
+#[cfg(target_os = "macos")]
+fn try_start_macos_service() -> Result<Option<bool>> {
+    let brew_plist = get_homebrew_plist_path()?;
+    let native_plist = get_launchd_plist_path()?;
+
+    // Check for Homebrew-managed service first
+    if brew_plist.exists() {
+        println!("{}", "Starting Homebrew-managed service...".green());
+
+        let output = Command::new("brew")
+            .args(["services", "start", "lore"])
+            .output();
+
+        match output {
+            Ok(result) => {
+                if result.status.success() {
+                    println!("{} Homebrew service started", "Success:".green());
+                    return Ok(Some(true));
+                } else {
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    println!(
+                        "{} brew services start failed: {}",
+                        "Warning:".yellow(),
+                        stderr.trim()
+                    );
+                    // Fall through to direct spawn
+                    return Ok(Some(false));
+                }
+            }
+            Err(e) => {
+                println!(
+                    "{} Could not run 'brew services start': {}",
+                    "Warning:".yellow(),
+                    e
+                );
+                // Fall through to direct spawn
+                return Ok(Some(false));
+            }
+        }
+    }
+
+    // Check for native launchd service
+    if native_plist.exists() {
+        println!("{}", "Starting native launchd service...".green());
+
+        let output = Command::new("launchctl")
+            .args(["load", "-w"])
+            .arg(&native_plist)
+            .output()
+            .context("Failed to run launchctl load")?;
+
+        if output.status.success() {
+            println!("{} Launchd service started", "Success:".green());
+            return Ok(Some(true));
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("service already loaded") {
+                println!(
+                    "{} launchctl load failed: {}",
+                    "Warning:".yellow(),
+                    stderr.trim()
+                );
+            }
+            // Fall through to direct spawn
+            return Ok(Some(false));
+        }
+    }
+
+    // No service installed, spawn directly
+    Ok(None)
+}
+
 /// Attempts to stop a Linux systemd-managed daemon.
 ///
 /// Returns:
@@ -306,6 +414,59 @@ fn try_stop_linux_service() -> Result<Option<bool>> {
     }
 
     // No service installed, use IPC/SIGTERM
+    Ok(None)
+}
+
+/// Attempts to start a Linux systemd-managed daemon.
+///
+/// Returns:
+/// - Ok(Some(true)) if the service was started successfully
+/// - Ok(Some(false)) if service exists but start failed (should fall back to direct spawn)
+/// - Ok(None) if no service is installed (should spawn directly)
+#[cfg(target_os = "linux")]
+fn try_start_linux_service() -> Result<Option<bool>> {
+    let unit_path = get_systemd_unit_path()?;
+
+    if unit_path.exists() {
+        println!("{}", "Starting systemd user service...".green());
+
+        let output = Command::new("systemctl")
+            .args(["--user", "start", SYSTEMD_SERVICE_NAME])
+            .output()
+            .context("Failed to run systemctl start")?;
+
+        if output.status.success() {
+            println!("{} Systemd service started", "Success:".green());
+
+            // Get the PID from systemctl
+            if let Ok(show_output) = Command::new("systemctl")
+                .args(["--user", "show", SYSTEMD_SERVICE_NAME, "--property=MainPID"])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&show_output.stdout);
+                if let Some(pid_str) = stdout.trim().strip_prefix("MainPID=") {
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        if pid > 0 {
+                            println!("{}", format!("Daemon running with PID {}", pid).dimmed());
+                        }
+                    }
+                }
+            }
+
+            return Ok(Some(true));
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!(
+                "{} systemctl start failed: {}",
+                "Warning:".yellow(),
+                stderr.trim()
+            );
+            // Fall through to direct spawn
+            return Ok(Some(false));
+        }
+    }
+
+    // No service installed, spawn directly
     Ok(None)
 }
 
