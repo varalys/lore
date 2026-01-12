@@ -8,6 +8,7 @@
 //! - Claude Code JSONL files in `~/.claude/projects/`
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEvent};
 use std::collections::HashMap;
@@ -15,8 +16,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
+use uuid::Uuid;
 
 use crate::capture::watchers::default_registry;
+use crate::git::get_commits_in_time_range;
+use crate::storage::models::{LinkCreator, LinkType, SessionLink};
 use crate::storage::Database;
 
 use super::state::DaemonStats;
@@ -418,6 +422,24 @@ impl SessionWatcher {
                 path.file_name().unwrap_or_default()
             );
 
+            // Auto-link commits if session has ended
+            if let Some(ended_at) = session.ended_at {
+                let linked = self.auto_link_session_commits(
+                    db,
+                    session.id,
+                    &session.working_directory,
+                    session.started_at,
+                    ended_at,
+                );
+                if let Err(e) = linked {
+                    tracing::warn!(
+                        "Failed to auto-link commits for session {}: {}",
+                        &session.id.to_string()[..8],
+                        e
+                    );
+                }
+            }
+
             total_sessions += 1;
             total_messages += message_count as u64;
         }
@@ -429,6 +451,113 @@ impl SessionWatcher {
         }
 
         Ok((total_sessions, total_messages))
+    }
+
+    /// Auto-links commits made during a session's time window.
+    ///
+    /// Finds all commits in the session's working directory that were made
+    /// between the session's start and end time, then creates links for any
+    /// commits that are not already linked to this session.
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - Database connection for storing links
+    /// * `session_id` - The session to link commits to
+    /// * `working_directory` - Path to the repository working directory
+    /// * `started_at` - Session start time
+    /// * `ended_at` - Session end time
+    ///
+    /// # Returns
+    ///
+    /// The number of commits that were linked.
+    fn auto_link_session_commits(
+        &self,
+        db: &Database,
+        session_id: Uuid,
+        working_directory: &str,
+        started_at: chrono::DateTime<Utc>,
+        ended_at: chrono::DateTime<Utc>,
+    ) -> Result<usize> {
+        let working_dir = Path::new(working_directory);
+
+        // Check if working directory is a git repository
+        if !working_dir.exists() {
+            tracing::debug!(
+                "Working directory does not exist: {}",
+                working_directory
+            );
+            return Ok(0);
+        }
+
+        // Get commits in the session's time range
+        let commits = match get_commits_in_time_range(working_dir, started_at, ended_at) {
+            Ok(commits) => commits,
+            Err(e) => {
+                // Not a git repository or other git error - this is expected
+                // for sessions outside git repos
+                tracing::debug!(
+                    "Could not get commits for {}: {}",
+                    working_directory,
+                    e
+                );
+                return Ok(0);
+            }
+        };
+
+        if commits.is_empty() {
+            tracing::debug!(
+                "No commits found in time range for session {}",
+                &session_id.to_string()[..8]
+            );
+            return Ok(0);
+        }
+
+        let mut linked_count = 0;
+
+        for commit in commits {
+            // Skip if link already exists
+            if db.link_exists(&session_id, &commit.sha)? {
+                tracing::debug!(
+                    "Link already exists for session {} and commit {}",
+                    &session_id.to_string()[..8],
+                    &commit.sha[..8]
+                );
+                continue;
+            }
+
+            // Create the link
+            let link = SessionLink {
+                id: Uuid::new_v4(),
+                session_id,
+                link_type: LinkType::Commit,
+                commit_sha: Some(commit.sha.clone()),
+                branch: commit.branch.clone(),
+                remote: None,
+                created_at: Utc::now(),
+                created_by: LinkCreator::Auto,
+                confidence: Some(1.0), // Direct time match is high confidence
+            };
+
+            db.insert_link(&link)?;
+            linked_count += 1;
+
+            tracing::info!(
+                "Auto-linked commit {} to session {} ({})",
+                &commit.sha[..8],
+                &session_id.to_string()[..8],
+                commit.summary.chars().take(50).collect::<String>()
+            );
+        }
+
+        if linked_count > 0 {
+            tracing::info!(
+                "Auto-linked {} commits to session {}",
+                linked_count,
+                &session_id.to_string()[..8]
+            );
+        }
+
+        Ok(linked_count)
     }
 
     /// Returns the number of files currently being tracked.
