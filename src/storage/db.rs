@@ -392,6 +392,21 @@ impl Database {
         Ok(count > 0)
     }
 
+    /// Retrieves a session by its source path.
+    ///
+    /// Returns `None` if no session with the given source path exists.
+    /// Used by the daemon to find existing sessions when updating them.
+    pub fn get_session_by_source(&self, source_path: &str) -> Result<Option<Session>> {
+        self.conn
+            .query_row(
+                "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id FROM sessions WHERE source_path = ?1",
+                params![source_path],
+                Self::row_to_session,
+            )
+            .optional()
+            .context("Failed to get session by source path")
+    }
+
     /// Finds a session by ID prefix, searching all sessions in the database.
     ///
     /// This method uses SQL LIKE to efficiently search by prefix without
@@ -2191,6 +2206,46 @@ mod tests {
             !db.session_exists_by_source("/other/path.jsonl")
                 .expect("Failed to check existence"),
             "Different source path should not exist"
+        );
+    }
+
+    #[test]
+    fn test_get_session_by_source() {
+        let (db, _dir) = create_test_db();
+        let source_path = "/path/to/session.jsonl";
+
+        let session = create_test_session("claude-code", "/project", Utc::now(), Some(source_path));
+
+        // Before insert, should return None
+        assert!(
+            db.get_session_by_source(source_path)
+                .expect("Failed to get session")
+                .is_none(),
+            "Session should not exist before insert"
+        );
+
+        db.insert_session(&session)
+            .expect("Failed to insert session");
+
+        // After insert, should return the session
+        let retrieved = db
+            .get_session_by_source(source_path)
+            .expect("Failed to get session")
+            .expect("Session should exist after insert");
+
+        assert_eq!(retrieved.id, session.id, "Session ID should match");
+        assert_eq!(
+            retrieved.source_path,
+            Some(source_path.to_string()),
+            "Source path should match"
+        );
+
+        // Different path should return None
+        assert!(
+            db.get_session_by_source("/other/path.jsonl")
+                .expect("Failed to get session")
+                .is_none(),
+            "Different source path should return None"
         );
     }
 

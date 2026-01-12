@@ -285,6 +285,19 @@ fn should_skip_first_run_prompt(command: &Commands) -> bool {
     )
 }
 
+/// Checks if this is a daemon foreground run.
+///
+/// The daemon sets up its own file-based logging, so we skip the default
+/// console logging initialization to allow the daemon's logging to succeed.
+fn is_daemon_foreground(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Daemon(commands::daemon::Args {
+            command: commands::daemon::DaemonSubcommand::Start { foreground: true }
+        })
+    )
+}
+
 /// Checks if stdin is connected to a terminal (interactive mode).
 fn is_interactive() -> bool {
     io::stdin().is_terminal()
@@ -397,19 +410,22 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Initialize logging
-    let filter = if cli.verbose {
-        "lore=debug"
-    } else {
-        "lore=info"
-    };
+    // Initialize logging (skip for daemon foreground mode - it sets up file logging)
+    if !is_daemon_foreground(&cli.command) {
+        let filter = if cli.verbose {
+            "lore=debug"
+        } else {
+            "lore=info"
+        };
 
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()),
-        )
-        .with(tracing_subscriber::fmt::layer().without_time())
-        .init();
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| filter.into()),
+            )
+            .with(tracing_subscriber::fmt::layer().without_time())
+            .init();
+    }
 
     // First-run detection: prompt to run init if not configured
     // Skip if --no-init flag is set (useful for scripting)
