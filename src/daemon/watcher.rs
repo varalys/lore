@@ -302,6 +302,12 @@ impl SessionWatcher {
     ///
     /// Returns `Ok(Some((sessions, messages)))` if data was imported,
     /// `Ok(None)` if the file was already processed, or an error.
+    ///
+    /// When a session file already exists in the database but has grown (new messages
+    /// added), this function re-imports the entire file. The database layer handles
+    /// deduplication: `insert_session` uses ON CONFLICT to update metadata, and
+    /// `insert_message` uses ON CONFLICT DO NOTHING to skip duplicates.
+    /// After re-import, auto-linking is triggered if the session has ended.
     fn process_file_sync(&mut self, path: &Path) -> Result<Option<(u64, u64)>> {
         let db = self.open_db()?;
         let path_str = path.to_string_lossy();
@@ -320,20 +326,156 @@ impl SessionWatcher {
             return Ok(None);
         }
 
-        // Check if this is a new file we haven't seen
-        if db.session_exists_by_source(&path_str)? {
-            // Already imported, just update position
+        // Check if session already exists in the database
+        let existing_session = db.get_session_by_source(&path_str)?;
+
+        if let Some(existing) = existing_session {
+            // Session exists but file has grown - re-import to get new messages
+            // and updated metadata, then run auto-linking
+            tracing::debug!(
+                "Session {} exists but file has grown, re-importing for updates",
+                &existing.id.to_string()[..8]
+            );
+            let result = self.update_existing_session(path, &db, &existing)?;
             self.file_positions.insert(path.to_path_buf(), current_size);
-            return Ok(None);
+            return Ok(Some(result));
         }
 
-        // Import the file
+        // New session file - import it
         let result = self.import_file_sync(path, &db)?;
 
         // Update tracked position
         self.file_positions.insert(path.to_path_buf(), current_size);
 
         Ok(Some(result))
+    }
+
+    /// Updates an existing session by re-importing the file.
+    ///
+    /// Re-parses the session file and updates the database. The database layer
+    /// handles deduplication automatically. After updating, triggers auto-linking
+    /// if the session has an ended_at timestamp.
+    ///
+    /// Returns (0, new_messages_imported) since the session already exists.
+    fn update_existing_session(
+        &self,
+        path: &Path,
+        db: &Database,
+        existing_session: &crate::storage::models::Session,
+    ) -> Result<(u64, u64)> {
+        tracing::debug!("Updating existing session from: {:?}", path);
+
+        let path_buf = path.to_path_buf();
+        let registry = default_registry();
+
+        // Try to parse with each watcher until one succeeds
+        let mut parsed_sessions = Vec::new();
+
+        for watcher in registry.available_watchers() {
+            match watcher.parse_source(&path_buf) {
+                Ok(sessions) if !sessions.is_empty() => {
+                    parsed_sessions = sessions;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::debug!(
+                        "Watcher {} could not parse {:?}: {}",
+                        watcher.info().name,
+                        path,
+                        e
+                    );
+                }
+            }
+        }
+
+        if parsed_sessions.is_empty() {
+            tracing::debug!("No watcher could parse {:?}", path);
+            return Ok((0, 0));
+        }
+
+        let mut total_messages = 0u64;
+        let mut updated_session: Option<crate::storage::models::Session> = None;
+
+        for (session, messages) in parsed_sessions {
+            if messages.is_empty() {
+                continue;
+            }
+
+            // Update session metadata (ended_at, message_count, git_branch)
+            // insert_session uses ON CONFLICT to update these fields
+            db.insert_session(&session)?;
+
+            // Track the most recent branch from messages
+            let mut latest_branch: Option<String> = None;
+            let mut new_message_count = 0u64;
+
+            for msg in &messages {
+                // insert_message uses ON CONFLICT DO NOTHING, so duplicates are skipped
+                // We don't have a reliable way to count only new messages, but we track
+                // the total for logging purposes
+                db.insert_message(msg)?;
+                new_message_count += 1;
+
+                if msg.git_branch.is_some() {
+                    latest_branch = msg.git_branch.clone();
+                }
+            }
+
+            // Update session branch if messages show a different branch
+            if let Some(ref new_branch) = latest_branch {
+                if session.git_branch.as_ref() != Some(new_branch) {
+                    if let Err(e) = db.update_session_branch(session.id, new_branch) {
+                        tracing::warn!(
+                            "Failed to update session branch for {}: {}",
+                            &session.id.to_string()[..8],
+                            e
+                        );
+                    } else {
+                        tracing::debug!(
+                            "Updated session {} branch to {}",
+                            &session.id.to_string()[..8],
+                            new_branch
+                        );
+                    }
+                }
+            }
+
+            total_messages += new_message_count;
+            updated_session = Some(session);
+        }
+
+        // Run auto-linking if the session has ended
+        // This is the key fix: we now run auto-linking for updated sessions
+        if let Some(session) = updated_session {
+            if let Some(ended_at) = session.ended_at {
+                // Only log if session was previously ongoing
+                if existing_session.ended_at.is_none() {
+                    tracing::info!(
+                        "Session {} has ended, running auto-link",
+                        &session.id.to_string()[..8]
+                    );
+                }
+
+                let linked = self.auto_link_session_commits(
+                    db,
+                    session.id,
+                    &session.working_directory,
+                    session.started_at,
+                    ended_at,
+                );
+                if let Err(e) = linked {
+                    tracing::warn!(
+                        "Failed to auto-link commits for session {}: {}",
+                        &session.id.to_string()[..8],
+                        e
+                    );
+                }
+            }
+        }
+
+        // Return 0 sessions since we updated an existing one, not imported new
+        Ok((0, total_messages))
     }
 
     /// Imports a complete session file synchronously.
@@ -1114,6 +1256,103 @@ mod tests {
             db.link_exists(&session.id, &sha_main2)
                 .expect("link_exists should succeed"),
             "Second main commit should be linked"
+        );
+    }
+
+    #[test]
+    fn test_update_existing_session_triggers_auto_link() {
+        // This test verifies that when a session already exists in the database
+        // and the file grows (new messages), re-importing triggers auto-linking.
+
+        // Create temp directory
+        let dir = tempdir().expect("Failed to create temp directory");
+        let repo_path = dir.path();
+
+        // Initialize git repo and create database
+        let repo = init_test_repo(repo_path);
+        let db = create_test_db(repo_path);
+
+        // Define time window
+        let now = Utc::now();
+        let session_start = now - Duration::hours(1);
+        let session_end = now;
+
+        // Create a commit during the session
+        let commit_time = session_start + Duration::minutes(30);
+        let sha = create_test_commit(&repo, "Commit during session", commit_time);
+
+        // Create a session WITHOUT ended_at (simulating ongoing session from CLI import)
+        let session_id = Uuid::new_v4();
+        let ongoing_session = Session {
+            id: session_id,
+            tool: "test-tool".to_string(),
+            tool_version: Some("1.0.0".to_string()),
+            started_at: session_start,
+            ended_at: None, // Not ended yet
+            model: Some("test-model".to_string()),
+            working_directory: repo_path.to_string_lossy().to_string(),
+            git_branch: Some("main".to_string()),
+            source_path: Some("/test/session.jsonl".to_string()),
+            message_count: 5,
+            machine_id: Some("test-machine".to_string()),
+        };
+
+        db.insert_session(&ongoing_session)
+            .expect("Failed to insert session");
+
+        // Verify commit is NOT linked yet (since session has not ended)
+        assert!(
+            !db.link_exists(&session_id, &sha)
+                .expect("link_exists should succeed"),
+            "Commit should NOT be linked to ongoing session"
+        );
+
+        // Now create an updated session with ended_at set
+        let ended_session = Session {
+            id: session_id,
+            tool: "test-tool".to_string(),
+            tool_version: Some("1.0.0".to_string()),
+            started_at: session_start,
+            ended_at: Some(session_end), // Now ended
+            model: Some("test-model".to_string()),
+            working_directory: repo_path.to_string_lossy().to_string(),
+            git_branch: Some("main".to_string()),
+            source_path: Some("/test/session.jsonl".to_string()),
+            message_count: 10,
+            machine_id: Some("test-machine".to_string()),
+        };
+
+        // Create watcher
+        let watcher = SessionWatcher {
+            file_positions: HashMap::new(),
+            watch_dirs: vec![],
+            db_config: DbConfig {
+                path: repo_path.join("test.db"),
+            },
+        };
+
+        // Simulate what update_existing_session does:
+        // 1. Update session in DB
+        db.insert_session(&ended_session)
+            .expect("Failed to update session");
+
+        // 2. Run auto-linking (this is what the fix enables)
+        let linked_count = watcher
+            .auto_link_session_commits(
+                &db,
+                session_id,
+                &repo_path.to_string_lossy(),
+                session_start,
+                session_end,
+            )
+            .expect("auto_link_session_commits should succeed");
+
+        // Verify the commit is now linked
+        assert_eq!(linked_count, 1, "Should have linked 1 commit");
+        assert!(
+            db.link_exists(&session_id, &sha)
+                .expect("link_exists should succeed"),
+            "Commit should be linked after session ended"
         );
     }
 }
