@@ -170,6 +170,15 @@ pub fn get_commits_in_time_range(
         }
     }
 
+    // Also push HEAD to handle detached HEAD state (common in CI environments).
+    // This is idempotent - if HEAD points to a branch we already pushed, the
+    // seen_shas HashSet will deduplicate commits.
+    if let Ok(head) = repo.head() {
+        if let Ok(commit) = head.peel_to_commit() {
+            revwalk.push(commit.id())?;
+        }
+    }
+
     revwalk.set_sorting(git2::Sort::TIME)?;
 
     let after_secs = after.timestamp();
