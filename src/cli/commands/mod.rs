@@ -27,6 +27,9 @@ pub mod daemon;
 /// Database management (vacuum, prune, stats).
 pub mod db;
 
+/// Diagnose Lore installation and configuration issues.
+pub mod doctor;
+
 /// Permanently delete a session and its data.
 pub mod delete;
 
