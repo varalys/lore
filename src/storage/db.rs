@@ -380,6 +380,43 @@ impl Database {
             .context("Failed to list sessions")
     }
 
+    /// Lists ended sessions ordered by start time (most recent first).
+    ///
+    /// Optionally filters by working directory prefix.
+    pub fn list_ended_sessions(
+        &self,
+        limit: usize,
+        working_dir: Option<&str>,
+    ) -> Result<Vec<Session>> {
+        let mut stmt = if working_dir.is_some() {
+            self.conn.prepare(
+                "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
+                 FROM sessions
+                 WHERE ended_at IS NOT NULL
+                   AND working_directory LIKE ?1
+                 ORDER BY started_at DESC
+                 LIMIT ?2",
+            )?
+        } else {
+            self.conn.prepare(
+                "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
+                 FROM sessions
+                 WHERE ended_at IS NOT NULL
+                 ORDER BY started_at DESC
+                 LIMIT ?1",
+            )?
+        };
+
+        let rows = if let Some(wd) = working_dir {
+            stmt.query_map(params![format!("{}%", wd), limit], Self::row_to_session)?
+        } else {
+            stmt.query_map(params![limit], Self::row_to_session)?
+        };
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list ended sessions")
+    }
+
     /// Checks if a session with the given source path already exists.
     ///
     /// Used to detect already-imported sessions during import operations.
@@ -1359,7 +1396,9 @@ impl Database {
         let minutes = recent_minutes.unwrap_or(5);
         let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
         let separator = std::path::MAIN_SEPARATOR.to_string();
-        let mut normalized = directory.trim_end_matches(std::path::MAIN_SEPARATOR).to_string();
+        let mut normalized = directory
+            .trim_end_matches(std::path::MAIN_SEPARATOR)
+            .to_string();
         if normalized.is_empty() {
             normalized = separator.clone();
         }
@@ -2162,6 +2201,37 @@ mod tests {
             "Second most recent session should be second"
         );
         assert_eq!(sessions[2].id, session1.id, "Oldest session should be last");
+    }
+
+    #[test]
+    fn test_list_ended_sessions() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let mut ended = create_test_session(
+            "claude-code",
+            "/home/user/project",
+            now - Duration::minutes(60),
+            None,
+        );
+        ended.ended_at = Some(now - Duration::minutes(30));
+
+        let ongoing = create_test_session(
+            "claude-code",
+            "/home/user/project",
+            now - Duration::minutes(10),
+            None,
+        );
+
+        db.insert_session(&ended).expect("insert ended session");
+        db.insert_session(&ongoing).expect("insert ongoing session");
+
+        let sessions = db
+            .list_ended_sessions(100, None)
+            .expect("Failed to list ended sessions");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, ended.id);
     }
 
     #[test]

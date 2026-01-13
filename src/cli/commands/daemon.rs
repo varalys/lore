@@ -365,10 +365,7 @@ fn try_start_macos_service() -> Result<Option<bool>> {
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("service already loaded") {
-                println!(
-                    "{} Launchd service already loaded",
-                    "Success:".green()
-                );
+                println!("{} Launchd service already loaded", "Success:".green());
                 return Ok(Some(true));
             }
             println!(

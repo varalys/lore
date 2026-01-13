@@ -12,17 +12,13 @@ use uuid::Uuid;
 
 use crate::storage::{Database, LinkCreator, LinkType, SessionLink};
 
-// NOTE: These imports are used by the auto-linking feature which is currently disabled.
-// Keeping them for when auto-linking is re-enabled after further testing.
-#[allow(unused_imports)]
 use crate::config::Config;
-#[allow(unused_imports)]
-use crate::git::{calculate_link_confidence, get_commit_files, get_commit_info};
-#[allow(unused_imports)]
+use crate::git::{
+    calculate_link_confidence, get_commit_files, get_commit_info, get_commits_in_time_range,
+};
 use crate::storage::extract_session_files;
 
 /// Default time window in minutes for finding sessions near a commit.
-#[allow(dead_code)]
 const DEFAULT_WINDOW_MINUTES: i64 = 30;
 
 /// Arguments for the link command.
@@ -32,6 +28,10 @@ const DEFAULT_WINDOW_MINUTES: i64 = 30;
     lore link abc123 def456             Link multiple sessions\n    \
     lore link abc123 --commit 1a2b3c    Link to specific commit\n    \
     lore link abc123 --dry-run          Preview without linking\n    \
+    lore link --auto                    Preview auto-link suggestions\n    \
+    lore link --auto --yes              Apply auto-link suggestions\n    \
+    lore link --auto --backfill         Preview backfill suggestions\n    \
+    lore link --auto --backfill --yes   Apply backfill suggestions\n    \
     lore link --current                 Link active sessions in this repo")]
 pub struct Args {
     /// Session ID prefixes to link (can specify multiple)
@@ -59,14 +59,21 @@ pub struct Args {
     )]
     pub current: bool,
 
-    // NOTE: Auto-linking is disabled pending further testing.
-    // The heuristics need refinement to avoid incorrect links.
-    // See git history for the implementation.
-    #[arg(skip)]
+    /// Auto-link sessions to a commit based on heuristics
+    #[arg(long)]
     pub auto: bool,
 
-    #[arg(skip)]
+    /// Backfill session-to-commit links using session time windows
+    #[arg(long)]
+    pub backfill: bool,
+
+    /// Auto-link confidence threshold (0.0 - 1.0)
+    #[arg(long)]
     pub threshold: Option<f64>,
+
+    /// Apply auto-linking without prompting
+    #[arg(long)]
+    pub yes: bool,
 
     /// Preview what would be linked without making changes
     #[arg(long)]
@@ -85,7 +92,11 @@ pub fn run(args: Args) -> Result<()> {
     if args.current {
         run_current_link(args)
     } else if args.auto {
-        run_auto_link(args)
+        if args.backfill {
+            run_backfill_auto_link(args)
+        } else {
+            run_auto_link(args)
+        }
     } else {
         run_manual_link(args)
     }
@@ -262,9 +273,8 @@ fn run_current_link(args: Args) -> Result<()> {
 
 /// Runs automatic linking based on heuristics.
 ///
-/// NOTE: This feature is currently disabled pending further testing.
-/// The heuristics need refinement to avoid creating incorrect links.
-#[allow(dead_code)]
+/// Finds sessions active near a commit and scores them by time proximity,
+/// file overlap, and branch matching. Shows a preview and requires --yes to apply.
 fn run_auto_link(args: Args) -> Result<()> {
     let db = Database::open_default()?;
     let config = Config::load()?;
@@ -310,8 +320,8 @@ fn run_auto_link(args: Args) -> Result<()> {
     println!("Found {} candidate session(s)", candidates.len());
 
     // Score and filter sessions
-    let mut linked_count = 0;
     let mut skipped_existing = 0;
+    let mut proposed: Vec<(String, Uuid, f64)> = Vec::new();
 
     for session in &candidates {
         // Check if already linked
@@ -341,38 +351,7 @@ fn run_auto_link(args: Args) -> Result<()> {
         let session_short_id = &session.id.to_string()[..8];
 
         if confidence >= threshold {
-            if args.dry_run {
-                println!(
-                    "  {} Would link {} (confidence: {:.0}%)",
-                    "[dry-run]".cyan(),
-                    session_short_id.cyan(),
-                    confidence * 100.0
-                );
-            } else {
-                // Create the link
-                let link = SessionLink {
-                    id: Uuid::new_v4(),
-                    session_id: session.id,
-                    link_type: LinkType::Commit,
-                    commit_sha: Some(commit_info.sha.clone()),
-                    branch: commit_info.branch.clone(),
-                    remote: None,
-                    created_at: Utc::now(),
-                    created_by: LinkCreator::Auto,
-                    confidence: Some(confidence),
-                };
-
-                db.insert_link(&link)?;
-
-                println!(
-                    "  {} {} -> {} (confidence: {:.0}%)",
-                    "Linked".green(),
-                    session_short_id.cyan(),
-                    short_sha,
-                    confidence * 100.0
-                );
-            }
-            linked_count += 1;
+            proposed.push((session_short_id.to_string(), session.id, confidence));
         } else {
             println!(
                 "  {} {} (confidence: {:.0}% < {:.0}%)",
@@ -385,13 +364,22 @@ fn run_auto_link(args: Args) -> Result<()> {
     }
 
     println!();
-    if args.dry_run {
-        println!(
-            "Dry run complete: would link {} session(s)",
-            linked_count.to_string().green()
-        );
+    if proposed.is_empty() {
+        println!("{}", "No sessions met the confidence threshold.".yellow());
     } else {
-        println!("Linked {} session(s)", linked_count.to_string().green());
+        println!(
+            "{} session(s) meet the confidence threshold:",
+            proposed.len().to_string().green()
+        );
+        for (session_short_id, _session_id, confidence) in &proposed {
+            println!(
+                "  {} Would link {} -> {} (confidence: {:.0}%)",
+                "[dry-run]".cyan(),
+                session_short_id.cyan(),
+                short_sha,
+                confidence * 100.0
+            );
+        }
     }
 
     if skipped_existing > 0 {
@@ -400,6 +388,193 @@ fn run_auto_link(args: Args) -> Result<()> {
             skipped_existing.to_string().yellow()
         );
     }
+
+    if args.dry_run || proposed.is_empty() {
+        return Ok(());
+    }
+
+    if !args.yes {
+        let mut input = String::new();
+        print!("Apply these links? (y/N): ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        std::io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim().to_lowercase();
+        if trimmed != "y" && trimmed != "yes" {
+            println!("{}", "Aborted; no links created.".yellow());
+            return Ok(());
+        }
+    }
+
+    let mut linked_count = 0;
+    for (_session_short_id, session_id, confidence) in proposed {
+        let link = SessionLink {
+            id: Uuid::new_v4(),
+            session_id,
+            link_type: LinkType::Commit,
+            commit_sha: Some(commit_info.sha.clone()),
+            branch: commit_info.branch.clone(),
+            remote: None,
+            created_at: Utc::now(),
+            created_by: LinkCreator::Auto,
+            confidence: Some(confidence),
+        };
+
+        db.insert_link(&link)?;
+        linked_count += 1;
+    }
+
+    println!("Linked {} session(s)", linked_count.to_string().green());
+
+    Ok(())
+}
+
+/// Runs automatic backfill linking based on session time windows.
+///
+/// This scans ended sessions and links commits that fall between
+/// started_at and ended_at for each session.
+fn run_backfill_auto_link(args: Args) -> Result<()> {
+    let db = Database::open_default()?;
+    // Use a high limit to effectively scan all sessions
+    let sessions = db.list_ended_sessions(1_000_000, None)?;
+    let total_sessions = sessions.len();
+
+    if sessions.is_empty() {
+        println!("{}", "No ended sessions found.".yellow());
+        return Ok(());
+    }
+
+    let mut proposed: Vec<(Uuid, String, String, String)> = Vec::new();
+    let mut skipped_existing = 0usize;
+    let mut skipped_missing_dir = 0usize;
+    let mut skipped_non_git = 0usize;
+    let mut sessions_with_existing_dir = 0usize;
+    let mut sessions_in_git_repo = 0usize;
+
+    for session in sessions {
+        let ended_at = match session.ended_at {
+            Some(ended_at) => ended_at,
+            None => continue,
+        };
+
+        let working_dir = Path::new(&session.working_directory);
+        if !working_dir.exists() {
+            skipped_missing_dir += 1;
+            continue;
+        }
+        sessions_with_existing_dir += 1;
+
+        let commits = match get_commits_in_time_range(working_dir, session.started_at, ended_at) {
+            Ok(commits) => commits,
+            Err(_) => {
+                skipped_non_git += 1;
+                continue;
+            }
+        };
+        sessions_in_git_repo += 1;
+
+        if commits.is_empty() {
+            continue;
+        }
+
+        let session_short_id = session.id.to_string();
+        let session_short_id = &session_short_id[..8.min(session_short_id.len())];
+
+        for commit in commits {
+            if db.link_exists(&session.id, &commit.sha)? {
+                skipped_existing += 1;
+                continue;
+            }
+
+            let commit_short = &commit.sha[..8.min(commit.sha.len())];
+            proposed.push((
+                session.id,
+                session_short_id.to_string(),
+                commit.sha.clone(),
+                format!(
+                    "{} {}",
+                    commit_short,
+                    commit.summary.chars().take(60).collect::<String>()
+                ),
+            ));
+        }
+    }
+
+    if proposed.is_empty() {
+        println!("{}", "No backfill links found.".yellow());
+    } else {
+        println!(
+            "{} session-to-commit link(s) found:",
+            proposed.len().to_string().green()
+        );
+        for (_session_id, session_short_id, _commit_sha, commit_label) in &proposed {
+            println!(
+                "  {} Would link {} -> {}",
+                "[dry-run]".cyan(),
+                session_short_id.cyan(),
+                commit_label
+            );
+        }
+    }
+
+    println!(
+        "Scanned {} ended session(s); {} with existing directories; {} in git repos",
+        total_sessions, sessions_with_existing_dir, sessions_in_git_repo
+    );
+
+    if skipped_existing > 0 {
+        println!(
+            "Skipped {} already-linked commit(s)",
+            skipped_existing.to_string().yellow()
+        );
+    }
+    if skipped_missing_dir > 0 {
+        println!(
+            "Skipped {} session(s) with missing directories",
+            skipped_missing_dir.to_string().yellow()
+        );
+    }
+    if skipped_non_git > 0 {
+        println!(
+            "Skipped {} session(s) in non-git directories",
+            skipped_non_git.to_string().yellow()
+        );
+    }
+
+    if args.dry_run || proposed.is_empty() {
+        return Ok(());
+    }
+
+    if !args.yes {
+        let mut input = String::new();
+        print!("Apply these links? (y/N): ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        std::io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim().to_lowercase();
+        if trimmed != "y" && trimmed != "yes" {
+            println!("{}", "Aborted; no links created.".yellow());
+            return Ok(());
+        }
+    }
+
+    let mut linked_count = 0usize;
+    for (session_id, _session_short_id, commit_sha, _commit_label) in proposed {
+        let link = SessionLink {
+            id: Uuid::new_v4(),
+            session_id,
+            link_type: LinkType::Commit,
+            commit_sha: Some(commit_sha),
+            branch: None,
+            remote: None,
+            created_at: Utc::now(),
+            created_by: LinkCreator::Auto,
+            confidence: Some(1.0),
+        };
+
+        db.insert_link(&link)?;
+        linked_count += 1;
+    }
+
+    println!("Linked {} session(s)", linked_count.to_string().green());
 
     Ok(())
 }
