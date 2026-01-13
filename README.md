@@ -62,6 +62,9 @@ lore show abc123
 # Link to current commit
 lore link abc123
 
+# Link active sessions in this repo to HEAD
+lore link --current
+
 # Find sessions for a commit
 lore show --commit HEAD
 

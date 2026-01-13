@@ -364,13 +364,18 @@ fn try_start_macos_service() -> Result<Option<bool>> {
             return Ok(Some(true));
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.contains("service already loaded") {
+            if stderr.contains("service already loaded") {
                 println!(
-                    "{} launchctl load failed: {}",
-                    "Warning:".yellow(),
-                    stderr.trim()
+                    "{} Launchd service already loaded",
+                    "Success:".green()
                 );
+                return Ok(Some(true));
             }
+            println!(
+                "{} launchctl load failed: {}",
+                "Warning:".yellow(),
+                stderr.trim()
+            );
             // Fall through to direct spawn
             return Ok(Some(false));
         }

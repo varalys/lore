@@ -1343,21 +1343,47 @@ impl Database {
         directory: &str,
         recent_minutes: Option<i64>,
     ) -> Result<Vec<Session>> {
+        fn escape_like(input: &str) -> String {
+            let mut escaped = String::with_capacity(input.len());
+            for ch in input.chars() {
+                match ch {
+                    '|' => escaped.push_str("||"),
+                    '%' => escaped.push_str("|%"),
+                    '_' => escaped.push_str("|_"),
+                    _ => escaped.push(ch),
+                }
+            }
+            escaped
+        }
+
         let minutes = recent_minutes.unwrap_or(5);
         let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
+        let separator = std::path::MAIN_SEPARATOR.to_string();
+        let mut normalized = directory.trim_end_matches(std::path::MAIN_SEPARATOR).to_string();
+        if normalized.is_empty() {
+            normalized = separator.clone();
+        }
+        let trailing = if normalized == separator {
+            normalized.clone()
+        } else {
+            format!("{normalized}{separator}")
+        };
+        let like_pattern = format!("{}%", escape_like(&trailing));
 
         let sql = r#"
             SELECT id, tool, tool_version, started_at, ended_at, model,
                    working_directory, git_branch, source_path, message_count, machine_id
             FROM sessions
-            WHERE working_directory LIKE ?1
-              AND (ended_at IS NULL OR ended_at >= ?2)
+            WHERE (working_directory = ?1
+               OR working_directory = ?2
+               OR working_directory LIKE ?3 ESCAPE '|')
+              AND (ended_at IS NULL OR ended_at >= ?4)
             ORDER BY started_at DESC
         "#;
 
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(
-            params![format!("{directory}%"), cutoff],
+            params![normalized, trailing, like_pattern, cutoff],
             Self::row_to_session,
         )?;
 
@@ -3459,6 +3485,69 @@ mod tests {
 
         assert_eq!(found.len(), 1, "Should find only session in project-a");
         assert_eq!(found[0].id, session1.id);
+    }
+
+    #[test]
+    fn test_find_active_sessions_for_directory_trailing_slash_matches() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let session = create_test_session(
+            "claude-code",
+            "/home/user/project",
+            now - Duration::minutes(10),
+            None,
+        );
+        db.insert_session(&session).expect("insert session");
+
+        let found = db
+            .find_active_sessions_for_directory("/home/user/project/", None)
+            .expect("find active sessions");
+
+        assert_eq!(found.len(), 1, "Should match even with trailing slash");
+        assert_eq!(found[0].id, session.id);
+    }
+
+    #[test]
+    fn test_find_active_sessions_for_directory_does_not_match_prefix_siblings() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let session_root = create_test_session(
+            "claude-code",
+            "/home/user/project",
+            now - Duration::minutes(10),
+            None,
+        );
+        let session_subdir = create_test_session(
+            "claude-code",
+            "/home/user/project/src",
+            now - Duration::minutes(10),
+            None,
+        );
+        let session_sibling = create_test_session(
+            "claude-code",
+            "/home/user/project-old",
+            now - Duration::minutes(10),
+            None,
+        );
+
+        db.insert_session(&session_root)
+            .expect("insert session_root");
+        db.insert_session(&session_subdir)
+            .expect("insert session_subdir");
+        db.insert_session(&session_sibling)
+            .expect("insert session_sibling");
+
+        let found = db
+            .find_active_sessions_for_directory("/home/user/project", None)
+            .expect("find active sessions");
+
+        let found_ids: std::collections::HashSet<Uuid> =
+            found.iter().map(|session| session.id).collect();
+        assert!(found_ids.contains(&session_root.id));
+        assert!(found_ids.contains(&session_subdir.id));
+        assert!(!found_ids.contains(&session_sibling.id));
     }
 
     #[test]
