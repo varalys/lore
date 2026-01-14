@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-01-13
+
+### Added
+
+- `lore doctor` command for diagnosing installation and configuration issues
+  - Checks config, database, daemon, watchers, and MCP server
+  - Supports text and JSON output formats
+  - Exit codes: 0 (OK), 1 (warnings), 2 (errors)
+- `lore link --auto` re-enabled with preview-first UX
+  - Shows proposed links and requires `--yes` to apply
+  - Uses heuristics: time proximity, file overlap, branch matching
+- `lore link --auto --backfill` for bulk retroactive linking
+  - Scans all ended sessions and links commits from their time windows
+  - One-time migration tool for existing session history
+
+### Fixed
+
+- Path matching in `find_active_sessions_for_directory` now avoids prefix collisions
+  - `/project` no longer incorrectly matches `/project-old`
+- macOS launchd now treats "service already loaded" as success
+  - Prevents duplicate daemon spawns when service is already running
+
 ## [0.1.9] - 2026-01-12
 
 ### Fixed
@@ -166,7 +188,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON and Markdown output formats
 - GitHub Actions CI and release workflows
 
-[Unreleased]: https://github.com/varalys/lore/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/varalys/lore/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/varalys/lore/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/varalys/lore/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/varalys/lore/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/varalys/lore/compare/v0.1.6...v0.1.7
