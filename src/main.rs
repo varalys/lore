@@ -248,6 +248,14 @@ enum Commands {
     )]
     Db(commands::db::Args),
 
+    /// Diagnose Lore installation and configuration issues
+    #[command(
+        long_about = "Performs comprehensive health checks on the Lore installation.\n\
+        Checks configuration, database, daemon status, watchers, and MCP server.\n\
+        Returns exit code 0 for OK, 1 for warnings, 2 for errors."
+    )]
+    Doctor(commands::doctor::Args),
+
     /// Run the MCP server for AI tool integration
     #[command(
         long_about = "Runs the MCP (Model Context Protocol) server on stdio.\n\
@@ -277,11 +285,16 @@ fn is_configured() -> bool {
 /// - `init` (the setup command itself)
 /// - `config` (should work without init for debugging)
 /// - `completions` (should work without init for shell setup)
+/// - `doctor` (diagnostic command should work without init)
 /// - `mcp` (MCP server should work without init for tool integration)
 fn should_skip_first_run_prompt(command: &Commands) -> bool {
     matches!(
         command,
-        Commands::Init(_) | Commands::Config(_) | Commands::Completions(_) | Commands::Mcp(_)
+        Commands::Init(_)
+            | Commands::Config(_)
+            | Commands::Completions(_)
+            | Commands::Doctor(_)
+            | Commands::Mcp(_)
     )
 }
 
@@ -399,6 +412,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Hooks(_) => "hooks",
         Commands::Daemon(_) => "daemon",
         Commands::Db(_) => "db",
+        Commands::Doctor(_) => "doctor",
         Commands::Mcp(_) => "mcp",
         Commands::Completions(_) => "completions",
     }
@@ -481,6 +495,7 @@ fn main() -> Result<()> {
         Commands::Hooks(args) => commands::hooks::run(args),
         Commands::Daemon(args) => commands::daemon::run(args),
         Commands::Db(args) => commands::db::run(args),
+        Commands::Doctor(args) => commands::doctor::run(args),
         Commands::Mcp(args) => commands::mcp::run(args),
         Commands::Completions(args) => {
             let mut cmd = Cli::command();
