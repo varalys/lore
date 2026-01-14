@@ -47,11 +47,8 @@ Download from [GitHub Releases](https://github.com/varalys/lore/releases).
 ## Quick Start
 
 ```bash
-# Initial setup
+# Initial setup (detects tools, imports sessions)
 lore init
-
-# Import existing sessions
-lore import
 
 # List sessions
 lore sessions
