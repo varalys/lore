@@ -72,6 +72,27 @@ lore blame src/main.rs:42
 lore search "authentication"
 ```
 
+### Example: ```lore blame```
+
+```
+$ lore blame src/auth.rs:42
+
+Commit:
+  a1b2c3d4  <username> 2025-12-15 14:30
+  feat: add rate limiting to login endpoint
+
+Line content:
+      if attempts > 5 { return Err(RateLimitExceeded) }
+
+Linked sessions (1):
+
+  f8e7d6c5  claude-code (127 messages)
+    Started: 2025-12-15 13:45
+    Relevant context:
+      ...decided on 5 attempts as the threshold based on industry standards...
+      Let me add rate limiting to prevent brute force attacks.
+```
+
 ## Key Features
 
 | Feature | Description |
