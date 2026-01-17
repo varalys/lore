@@ -51,6 +51,16 @@ regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Cloud sync
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
+aes-gcm = "0.10"
+argon2 = "0.5"
+keyring = { version = "3", features = ["apple-native", "sync-secret-service", "windows-native"] }
+base64 = "0.22"
+webbrowser = "1"
+rpassword = "7"
+rand = "0.8"
+
 # MCP (Model Context Protocol)
 rmcp = { version = "0.12", features = ["server", "transport-io"] }
 schemars = "1.0"

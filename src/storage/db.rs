@@ -233,6 +233,9 @@ impl Database {
         // This handles upgrades from databases created before machine_id was added.
         self.migrate_add_machine_id()?;
 
+        // Migration: Add synced_at column for cloud sync tracking.
+        self.migrate_add_synced_at()?;
+
         Ok(())
     }
 
@@ -273,6 +276,25 @@ impl Database {
                     [&machine_uuid, &hostname],
                 )?;
             }
+        }
+
+        Ok(())
+    }
+
+    /// Adds the synced_at column to the sessions table if it does not exist.
+    ///
+    /// This column tracks when each session was last synced to the cloud.
+    /// A NULL value indicates the session has never been synced.
+    fn migrate_add_synced_at(&self) -> Result<()> {
+        let columns: Vec<String> = self
+            .conn
+            .prepare("PRAGMA table_info(sessions)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if !columns.iter().any(|c| c == "synced_at") {
+            self.conn
+                .execute("ALTER TABLE sessions ADD COLUMN synced_at TEXT", [])?;
         }
 
         Ok(())
@@ -1227,6 +1249,94 @@ impl Database {
         // Rebuild needed if we have messages/sessions but either FTS index is empty
         Ok((message_count > 0 && msg_fts_count == 0)
             || (session_count > 0 && session_fts_count == 0))
+    }
+
+    // ==================== Cloud Sync ====================
+
+    /// Returns sessions that have not been synced to the cloud.
+    ///
+    /// Unsynced sessions are those where `synced_at` is NULL. Returns sessions
+    /// ordered by start time (oldest first) to sync in chronological order.
+    pub fn get_unsynced_sessions(&self) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
+             FROM sessions
+             WHERE synced_at IS NULL
+             ORDER BY started_at ASC"
+        )?;
+
+        let rows = stmt.query_map([], Self::row_to_session)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to get unsynced sessions")
+    }
+
+    /// Returns the count of sessions that have not been synced.
+    pub fn unsynced_session_count(&self) -> Result<i32> {
+        let count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE synced_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Marks sessions as synced with the given timestamp.
+    ///
+    /// Updates the `synced_at` column for all specified session IDs.
+    pub fn mark_sessions_synced(
+        &self,
+        session_ids: &[Uuid],
+        synced_at: DateTime<Utc>,
+    ) -> Result<usize> {
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let synced_at_str = synced_at.to_rfc3339();
+        let mut total_updated = 0;
+
+        for id in session_ids {
+            let updated = self.conn.execute(
+                "UPDATE sessions SET synced_at = ?1 WHERE id = ?2",
+                params![synced_at_str, id.to_string()],
+            )?;
+            total_updated += updated;
+        }
+
+        Ok(total_updated)
+    }
+
+    /// Returns the most recent sync timestamp across all sessions.
+    ///
+    /// Returns None if no sessions have been synced yet.
+    pub fn last_sync_time(&self) -> Result<Option<DateTime<Utc>>> {
+        let result: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT MAX(synced_at) FROM sessions WHERE synced_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        match result {
+            Some(s) => Ok(Some(parse_datetime(&s)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Clears the synced_at timestamp for all sessions.
+    ///
+    /// This effectively marks all sessions as unsynced and is useful
+    /// for resetting sync state or testing.
+    #[allow(dead_code)]
+    pub fn clear_sync_status(&self) -> Result<usize> {
+        let updated = self
+            .conn
+            .execute("UPDATE sessions SET synced_at = NULL", [])?;
+        Ok(updated)
     }
 
     // ==================== Stats ====================

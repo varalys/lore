@@ -41,6 +41,20 @@ pub struct Config {
     /// Defaults to hostname if not set. Can be customized by the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_name: Option<String>,
+
+    /// Cloud service URL for sync operations.
+    ///
+    /// Defaults to the official Lore cloud service. Can be customized for
+    /// self-hosted deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_url: Option<String>,
+
+    /// Salt for encryption key derivation (base64-encoded).
+    ///
+    /// Generated on first cloud push and stored for consistent key derivation.
+    /// This is NOT secret - only the passphrase needs to be kept private.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_salt: Option<String>,
 }
 
 impl Default for Config {
@@ -52,6 +66,8 @@ impl Default for Config {
             commit_footer: false,
             machine_id: None,
             machine_name: None,
+            cloud_url: None,
+            encryption_salt: None,
         }
     }
 }
@@ -153,6 +169,45 @@ impl Config {
         self.save()
     }
 
+    /// Returns the cloud service URL.
+    ///
+    /// If a custom cloud_url is set, returns that. Otherwise returns
+    /// the default Lore cloud service URL.
+    pub fn get_cloud_url(&self) -> String {
+        self.cloud_url
+            .clone()
+            .unwrap_or_else(|| "https://app.lore.varalys.com".to_string())
+    }
+
+    /// Sets the cloud service URL and saves the configuration.
+    #[allow(dead_code)]
+    pub fn set_cloud_url(&mut self, url: &str) -> Result<()> {
+        self.cloud_url = Some(url.to_string());
+        self.save()
+    }
+
+    /// Returns the encryption salt (base64-encoded), generating one if needed.
+    ///
+    /// The salt is stored in the config file and used for deriving the
+    /// encryption key from the user's passphrase.
+    pub fn get_or_create_encryption_salt(&mut self) -> Result<String> {
+        if let Some(ref salt) = self.encryption_salt {
+            return Ok(salt.clone());
+        }
+
+        // Generate a new random salt
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use rand::RngCore;
+
+        let mut salt_bytes = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut salt_bytes);
+        let salt_b64 = BASE64.encode(salt_bytes);
+
+        self.encryption_salt = Some(salt_b64.clone());
+        self.save()?;
+        Ok(salt_b64)
+    }
+
     /// Gets a configuration value by key.
     ///
     /// Supported keys:
@@ -162,6 +217,8 @@ impl Config {
     /// - `commit_footer` - "true" or "false"
     /// - `machine_id` - the machine UUID (read-only, auto-generated)
     /// - `machine_name` - human-readable machine name
+    /// - `cloud_url` - cloud service URL
+    /// - `encryption_salt` - salt for encryption key derivation (read-only)
     ///
     /// Returns `None` if the key is not recognized.
     pub fn get(&self, key: &str) -> Option<String> {
@@ -172,6 +229,8 @@ impl Config {
             "commit_footer" => Some(self.commit_footer.to_string()),
             "machine_id" => self.machine_id.clone(),
             "machine_name" => Some(self.get_machine_name()),
+            "cloud_url" => Some(self.get_cloud_url()),
+            "encryption_salt" => self.encryption_salt.clone(),
             _ => None,
         }
     }
@@ -184,8 +243,9 @@ impl Config {
     /// - `auto_link_threshold` - float between 0.0 and 1.0 (inclusive)
     /// - `commit_footer` - "true" or "false"
     /// - `machine_name` - human-readable machine name
+    /// - `cloud_url` - cloud service URL
     ///
-    /// Note: `machine_id` cannot be set manually; it is auto-generated.
+    /// Note: `machine_id` and `encryption_salt` cannot be set manually.
     ///
     /// Returns an error if the key is not recognized or the value is invalid.
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
@@ -217,8 +277,14 @@ impl Config {
             "machine_name" => {
                 self.machine_name = Some(value.to_string());
             }
+            "cloud_url" => {
+                self.cloud_url = Some(value.to_string());
+            }
             "machine_id" => {
                 bail!("machine_id cannot be set manually; it is auto-generated");
+            }
+            "encryption_salt" => {
+                bail!("encryption_salt cannot be set manually; it is auto-generated");
             }
             _ => {
                 bail!("Unknown configuration key: '{key}'");
@@ -247,6 +313,8 @@ impl Config {
             "commit_footer",
             "machine_id",
             "machine_name",
+            "cloud_url",
+            "encryption_salt",
         ]
     }
 }
@@ -337,6 +405,8 @@ mod tests {
             commit_footer: true,
             machine_id: Some("test-uuid".to_string()),
             machine_name: Some("test-machine".to_string()),
+            cloud_url: None,
+            encryption_salt: None,
         };
 
         assert_eq!(

@@ -9,6 +9,7 @@
 //! # Modules
 //!
 //! - [`capture`] - Session capture from AI coding tools
+//! - [`cloud`] - Cloud sync for cross-machine session access
 //! - [`config`] - Configuration management
 //! - [`daemon`] - Background daemon for automatic session capture
 //! - [`git`] - Git repository integration and auto-linking
@@ -17,6 +18,9 @@
 
 /// Session capture from AI coding tools like Claude Code and Copilot.
 pub mod capture;
+
+/// Cloud sync for cross-machine session access.
+pub mod cloud;
 
 /// Configuration management for Lore settings.
 pub mod config;

@@ -9,6 +9,9 @@ pub mod annotate;
 /// Show which AI session led to a specific line of code.
 pub mod blame;
 
+/// Cloud sync operations (status, push, pull).
+pub mod cloud;
+
 /// Shell completion script generation.
 pub mod completions;
 
@@ -47,6 +50,12 @@ pub mod init;
 
 /// Link sessions to git commits.
 pub mod link;
+
+/// Authenticate with the cloud service.
+pub mod login;
+
+/// Log out from the cloud service.
+pub mod logout;
 
 /// MCP (Model Context Protocol) server.
 pub mod mcp;
