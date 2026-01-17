@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use crate::cloud::credentials::CredentialsStore;
+use crate::config::Config;
 
 /// Arguments for the logout command.
 #[derive(clap::Args)]
@@ -18,7 +19,8 @@ pub struct Args {}
 ///
 /// Removes all stored credentials and encryption keys.
 pub fn run(_args: Args) -> Result<()> {
-    let store = CredentialsStore::new();
+    let config = Config::load()?;
+    let store = CredentialsStore::with_keychain(config.use_keychain);
 
     // Check if logged in
     match store.load().context("Failed to check login status")? {

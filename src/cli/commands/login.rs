@@ -5,13 +5,25 @@
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use crate::cloud::credentials::{Credentials, CredentialsStore};
 use crate::cloud::DEFAULT_CLOUD_URL;
 use crate::config::Config;
+
+/// Message shown when keychain is enabled.
+const KEYCHAIN_INFO: &str = "\
+Note: Credentials will be stored in your OS keychain.
+      You may be prompted for permission on first access.
+      Select 'Always Allow' to avoid repeated prompts.";
+
+/// Message shown on Linux when secret service is not available.
+#[cfg(target_os = "linux")]
+const LINUX_SECRET_SERVICE_WARNING: &str = "\
+Note: OS keychain requires gnome-keyring or kwallet to be running.
+      Using file storage instead.";
 
 /// Arguments for the login command.
 #[derive(clap::Args)]
@@ -31,8 +43,21 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(120);
 /// Opens a browser to the cloud service OAuth page, waits for the callback
 /// with credentials, and stores them securely.
 pub fn run(args: Args) -> Result<()> {
+    // Load config to get use_keychain setting
+    let mut config = Config::load()?;
+
+    // Check if use_keychain has been explicitly configured
+    let is_configured = Config::is_use_keychain_configured()?;
+
+    // If not configured, prompt user for storage preference on first login
+    if !is_configured {
+        config.use_keychain = prompt_storage_preference()?;
+        config.save()?;
+    }
+
+    let store = CredentialsStore::with_keychain(config.use_keychain);
+
     // Check if already logged in
-    let store = CredentialsStore::new();
     if let Ok(Some(creds)) = store.load() {
         println!(
             "Already logged in as {} ({} plan)",
@@ -43,8 +68,11 @@ pub fn run(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    // Determine cloud URL
-    let config = Config::load()?;
+    // Show keychain info if enabled
+    if config.use_keychain {
+        println!("{}", KEYCHAIN_INFO.dimmed());
+        println!();
+    }
     let cloud_url = args
         .url
         .as_deref()
@@ -123,6 +151,87 @@ pub fn run(args: Args) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Prompts the user to choose their credential storage preference.
+///
+/// Returns true if the user selects keychain storage, false for file storage.
+/// On Linux, checks if a secret service is available before offering keychain.
+fn prompt_storage_preference() -> Result<bool> {
+    println!("How would you like to store credentials?");
+    println!();
+
+    // Check if keychain is available on this system
+    let keychain_available = is_keychain_option_available();
+
+    println!("  {} File storage (recommended) - Simple, works everywhere", "1.".bold());
+
+    if keychain_available {
+        println!("  {} OS Keychain - More secure, may prompt for access", "2.".bold());
+    } else {
+        #[cfg(target_os = "linux")]
+        {
+            println!("  {} OS Keychain - {} (requires gnome-keyring or kwallet)",
+                "2.".dimmed(),
+                "not available".dimmed()
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            println!("  {} OS Keychain - {}", "2.".dimmed(), "not available".dimmed());
+        }
+    }
+
+    println!();
+    print!("Enter choice [1]: ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let choice = input.trim();
+
+    // Default to option 1 (file storage) if empty or invalid
+    if choice.is_empty() || choice == "1" {
+        println!();
+        println!("Using file storage for credentials.");
+        return Ok(false);
+    }
+
+    if choice == "2" {
+        if !keychain_available {
+            #[cfg(target_os = "linux")]
+            {
+                println!();
+                println!("{}", LINUX_SECRET_SERVICE_WARNING.yellow());
+                println!();
+                println!("Using file storage for credentials.");
+                return Ok(false);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                println!();
+                println!("{}", "OS keychain is not available. Using file storage.".yellow());
+                return Ok(false);
+            }
+        }
+
+        println!();
+        println!("{}", KEYCHAIN_INFO.dimmed());
+        return Ok(true);
+    }
+
+    // Invalid input, default to file storage
+    println!();
+    println!("Invalid choice. Using file storage for credentials.");
+    Ok(false)
+}
+
+/// Checks if the keychain option should be offered to the user.
+///
+/// On Linux, this checks if a secret service (gnome-keyring, kwallet) is available.
+/// On macOS and Windows, the keychain is always available.
+fn is_keychain_option_available() -> bool {
+    CredentialsStore::is_secret_service_available()
 }
 
 /// Generates a random state string for CSRF protection.
@@ -337,5 +446,12 @@ mod tests {
         assert_eq!(urlencoding_decode("test%40example.com"), "test@example.com");
         assert_eq!(urlencoding_decode("hello+world"), "hello world");
         assert_eq!(urlencoding_decode("no%encoding"), "no%encoding"); // Invalid escape
+    }
+
+    #[test]
+    fn test_is_keychain_option_available_returns_bool() {
+        // This test verifies the function exists and returns a boolean.
+        // The actual result depends on the system's keychain support.
+        let _result: bool = is_keychain_option_available();
     }
 }

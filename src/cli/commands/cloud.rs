@@ -109,7 +109,8 @@ pub fn run(args: Args) -> Result<()> {
 /// Shows cloud sync status.
 fn run_status(format: OutputFormat) -> Result<()> {
     let db = Database::open_default()?;
-    let store = CredentialsStore::new();
+    let config = Config::load()?;
+    let store = CredentialsStore::with_keychain(config.use_keychain);
     let creds = store.load().context("Failed to check login status")?;
 
     let total_sessions = db.session_count()?;
@@ -200,6 +201,10 @@ fn run_status(format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
+/// Number of sessions to include in each batch when pushing to the cloud.
+/// Kept small to avoid 413 errors from large sessions with many messages.
+const PUSH_BATCH_SIZE: usize = 3;
+
 /// Pushes local sessions to the cloud.
 fn run_push(dry_run: bool) -> Result<()> {
     let creds = require_login()?;
@@ -230,7 +235,7 @@ fn run_push(dry_run: bool) -> Result<()> {
     }
 
     // Get or create encryption key
-    let store = CredentialsStore::new();
+    let store = CredentialsStore::with_keychain(config.use_keychain);
     let encryption_key = match store.load_encryption_key()? {
         Some(key_hex) => decode_key_hex(&key_hex)?,
         None => {
@@ -281,21 +286,130 @@ fn run_push(dry_run: bool) -> Result<()> {
         });
     }
 
-    // Push to cloud
+    // Push to cloud in batches
     let client = CloudClient::with_url(&creds.cloud_url).with_api_key(&creds.api_key);
 
-    let response = client.push(push_sessions)?;
+    let batches: Vec<_> = push_sessions.chunks(PUSH_BATCH_SIZE).collect();
+    let total_batches = batches.len();
+    let mut total_synced: i64 = 0;
+    let mut batch_errors: Vec<(usize, String)> = Vec::new();
+    let mut too_large_sessions: Vec<String> = Vec::new();
 
-    // Mark sessions as synced
-    let session_ids: Vec<_> = sessions.iter().map(|s| s.id).collect();
-    db.mark_sessions_synced(&session_ids, response.server_time)?;
+    for (batch_idx, batch) in batches.into_iter().enumerate() {
+        let batch_num = batch_idx + 1;
+        print!("  Uploading batch {}/{}... ", batch_num, total_batches);
+        io::stdout().flush()?;
+
+        match client.push(batch.to_vec()) {
+            Ok(response) => {
+                println!("done");
+
+                // Mark sessions in this batch as synced immediately
+                let batch_session_ids: Vec<_> = batch
+                    .iter()
+                    .filter_map(|ps| uuid::Uuid::parse_str(&ps.id).ok())
+                    .collect();
+                db.mark_sessions_synced(&batch_session_ids, response.server_time)?;
+
+                total_synced += response.synced_count;
+            }
+            Err(e) => {
+                let error_str = e.to_string();
+
+                // Check if this is a size-related error (413 or "Too Large")
+                if is_size_error(&error_str) {
+                    println!("{}", "failed (retrying individually)".yellow());
+
+                    // Retry each session in the batch individually
+                    for session in batch {
+                        let session_short_id = &session.id[..8];
+                        print!("    Session {}... ", session_short_id);
+                        io::stdout().flush()?;
+
+                        match client.push(vec![session.clone()]) {
+                            Ok(response) => {
+                                println!("done");
+                                if let Ok(session_id) = uuid::Uuid::parse_str(&session.id) {
+                                    db.mark_sessions_synced(&[session_id], response.server_time)?;
+                                }
+                                total_synced += response.synced_count;
+                            }
+                            Err(individual_err) => {
+                                let individual_error_str = individual_err.to_string();
+                                if is_size_error(&individual_error_str) {
+                                    println!("{}", "too large, skipping".yellow());
+                                    too_large_sessions.push(session.id.clone());
+                                } else {
+                                    println!("{}", "failed".red());
+                                    batch_errors.push((batch_num, format!(
+                                        "Session {}: {}",
+                                        session_short_id, individual_error_str
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    println!("{}", "failed".red());
+                    batch_errors.push((batch_num, error_str));
+                }
+            }
+        }
+    }
 
     println!();
-    println!(
-        "{} Synced {} sessions to the cloud.",
-        "Success!".green().bold(),
-        response.synced_count
-    );
+
+    // Report results
+    if batch_errors.is_empty() && too_large_sessions.is_empty() {
+        println!(
+            "{} Synced {} sessions to the cloud.",
+            "Success!".green().bold(),
+            total_synced
+        );
+    } else if batch_errors.is_empty() {
+        // Only size issues, no other errors
+        println!(
+            "{} Synced {} sessions to the cloud.",
+            "Success!".green().bold(),
+            total_synced
+        );
+        println!(
+            "{} {} session(s) were too large to sync:",
+            "Note:".yellow(),
+            too_large_sessions.len()
+        );
+        for session_id in &too_large_sessions {
+            println!("  {}", &session_id[..8]);
+        }
+    } else {
+        // Some batches failed with non-size errors
+        if total_synced > 0 {
+            println!(
+                "{} Synced {} sessions, but {} error(s) occurred:",
+                "Partial success.".yellow().bold(),
+                total_synced,
+                batch_errors.len()
+            );
+        } else {
+            println!(
+                "{} All batches failed:",
+                "Error!".red().bold()
+            );
+        }
+        for (batch_num, error) in &batch_errors {
+            println!("  Batch {}: {}", batch_num, error);
+        }
+        if !too_large_sessions.is_empty() {
+            println!(
+                "{} {} session(s) were too large to sync:",
+                "Note:".yellow(),
+                too_large_sessions.len()
+            );
+            for session_id in &too_large_sessions {
+                println!("  {}", &session_id[..8]);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -309,7 +423,8 @@ fn run_pull(all: bool) -> Result<()> {
     let since = if all { None } else { db.last_sync_time()? };
 
     // Get encryption key
-    let store = CredentialsStore::new();
+    let config = Config::load()?;
+    let store = CredentialsStore::with_keychain(config.use_keychain);
     let encryption_key = match store.load_encryption_key()? {
         Some(key_hex) => decode_key_hex(&key_hex)?,
         None => {
@@ -485,6 +600,13 @@ fn format_bytes(bytes: i64) -> String {
     }
 }
 
+/// Checks if an error message indicates a payload size issue (413 or "Too Large").
+fn is_size_error(error_msg: &str) -> bool {
+    error_msg.contains("413")
+        || error_msg.to_lowercase().contains("too large")
+        || error_msg.to_lowercase().contains("payload")
+}
+
 /// Formats a timestamp as relative time.
 fn format_relative_time(time: chrono::DateTime<chrono::Utc>) -> String {
     let now = Utc::now();
@@ -517,6 +639,27 @@ mod tests {
         assert_eq!(format_bytes(1024), "1.0 KB");
         assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+    }
+
+    #[test]
+    fn test_is_size_error() {
+        // Should detect 413 status code
+        assert!(is_size_error("HTTP error: 413 Payload Too Large"));
+        assert!(is_size_error("Server returned 413"));
+
+        // Should detect "too large" text (case insensitive)
+        assert!(is_size_error("Request body too large"));
+        assert!(is_size_error("Session Too Large to upload"));
+
+        // Should detect payload-related errors
+        assert!(is_size_error("Payload size exceeded"));
+        assert!(is_size_error("Request payload too big"));
+
+        // Should not match unrelated errors
+        assert!(!is_size_error("Connection refused"));
+        assert!(!is_size_error("HTTP error: 500 Internal Server Error"));
+        assert!(!is_size_error("Authentication failed"));
+        assert!(!is_size_error("Network timeout"));
     }
 
     #[test]

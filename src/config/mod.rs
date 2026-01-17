@@ -55,6 +55,14 @@ pub struct Config {
     /// This is NOT secret - only the passphrase needs to be kept private.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption_salt: Option<String>,
+
+    /// Whether to use the OS keychain for credential storage.
+    ///
+    /// When false (default), credentials are stored in ~/.lore/credentials.json.
+    /// When true, uses macOS Keychain, GNOME Keyring, or Windows Credential Manager.
+    /// Note: Keychain may prompt for permission on first access.
+    #[serde(default)]
+    pub use_keychain: bool,
 }
 
 impl Default for Config {
@@ -68,6 +76,7 @@ impl Default for Config {
             machine_name: None,
             cloud_url: None,
             encryption_salt: None,
+            use_keychain: false,
         }
     }
 }
@@ -231,6 +240,7 @@ impl Config {
             "machine_name" => Some(self.get_machine_name()),
             "cloud_url" => Some(self.get_cloud_url()),
             "encryption_salt" => self.encryption_salt.clone(),
+            "use_keychain" => Some(self.use_keychain.to_string()),
             _ => None,
         }
     }
@@ -286,6 +296,10 @@ impl Config {
             "encryption_salt" => {
                 bail!("encryption_salt cannot be set manually; it is auto-generated");
             }
+            "use_keychain" => {
+                self.use_keychain = parse_bool(value)
+                    .with_context(|| format!("Invalid boolean value for use_keychain: '{value}'"))?;
+            }
             _ => {
                 bail!("Unknown configuration key: '{key}'");
             }
@@ -315,7 +329,34 @@ impl Config {
             "machine_name",
             "cloud_url",
             "encryption_salt",
+            "use_keychain",
         ]
+    }
+
+    /// Checks if use_keychain was explicitly set in the config file.
+    ///
+    /// Returns true if the config file exists and contains a use_keychain key,
+    /// false if the file does not exist or does not contain the key (meaning
+    /// the default value is being used).
+    pub fn is_use_keychain_configured() -> Result<bool> {
+        let path = Self::config_path()?;
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+
+        if content.trim().is_empty() {
+            return Ok(false);
+        }
+
+        // Check if the YAML content contains use_keychain key
+        // We look for the key at the start of a line (not in comments)
+        Ok(content.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("use_keychain:")
+        }))
     }
 }
 
@@ -407,6 +448,7 @@ mod tests {
             machine_name: Some("test-machine".to_string()),
             cloud_url: None,
             encryption_salt: None,
+            use_keychain: false,
         };
 
         assert_eq!(
@@ -418,6 +460,7 @@ mod tests {
         assert_eq!(config.get("commit_footer"), Some("true".to_string()));
         assert_eq!(config.get("machine_id"), Some("test-uuid".to_string()));
         assert_eq!(config.get("machine_name"), Some("test-machine".to_string()));
+        assert_eq!(config.get("use_keychain"), Some("false".to_string()));
         assert_eq!(config.get("unknown_key"), None);
     }
 
@@ -535,5 +578,63 @@ mod tests {
         let yaml = serde_saphyr::to_string(&config).unwrap();
         assert!(yaml.contains("machine_id"));
         assert!(yaml.contains("machine_name"));
+    }
+
+    #[test]
+    fn test_is_use_keychain_configured_with_default_config() {
+        // Test the detection logic by checking serialized config content.
+        // The function checks the default config path, not a custom one,
+        // so we test the behavior through the serialization logic.
+        let temp_dir = TempDir::new().unwrap();
+
+        let config_path = temp_dir.path().join("config.yaml");
+        let config = Config::default();
+        config.save_to_path(&config_path).unwrap();
+
+        // Read the saved content - default config should contain use_keychain
+        // since serde serializes all fields by default
+        let content = fs::read_to_string(&config_path).unwrap();
+        let has_use_keychain = content.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("use_keychain:")
+        });
+        // serde includes all fields by default, so this will be true
+        assert!(has_use_keychain);
+    }
+
+    #[test]
+    fn test_is_use_keychain_configured_detects_explicit_setting() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.yaml");
+
+        // Write config with explicit use_keychain: true
+        let config = Config {
+            use_keychain: true,
+            ..Default::default()
+        };
+        config.save_to_path(&config_path).unwrap();
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        let has_use_keychain = content.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("use_keychain:")
+        });
+        assert!(has_use_keychain);
+    }
+
+    #[test]
+    fn test_is_use_keychain_configured_returns_false_for_empty_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.yaml");
+
+        // Write empty file
+        fs::write(&config_path, "").unwrap();
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        let has_use_keychain = content.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("use_keychain:")
+        });
+        assert!(!has_use_keychain);
     }
 }

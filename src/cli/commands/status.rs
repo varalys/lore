@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::capture::watchers::{default_registry, WatcherRegistry};
 use crate::cli::OutputFormat;
+use crate::cloud::CredentialsStore;
 use crate::config::Config;
 use crate::daemon::{send_command_sync, DaemonCommand, DaemonResponse, DaemonState};
 use crate::git;
@@ -234,6 +235,9 @@ fn run_text(db: &Database, registry: &WatcherRegistry, config: &Config) -> Resul
     // Database statistics
     print_database_stats(db)?;
 
+    // Cloud account status
+    let is_logged_in = print_cloud_status(db, config);
+
     // Current commit section (if in a git repo)
     print_current_commit_links(db)?;
 
@@ -254,6 +258,11 @@ fn run_text(db: &Database, registry: &WatcherRegistry, config: &Config) -> Resul
 
     // Show recent sessions if any
     print_recent_sessions(db)?;
+
+    // Show login tip only if not logged in
+    if !is_logged_in {
+        print_login_tip();
+    }
 
     Ok(())
 }
@@ -357,6 +366,41 @@ fn print_watchers_status(registry: &WatcherRegistry, config: &Config) {
     println!();
 }
 
+/// Prints the cloud account status section.
+///
+/// Shows whether the user is logged in, their account info, and last sync time.
+/// Returns true if logged in, false otherwise.
+fn print_cloud_status(db: &Database, config: &Config) -> bool {
+    let store = CredentialsStore::with_keychain(config.use_keychain);
+
+    match store.load() {
+        Ok(Some(creds)) => {
+            println!();
+            println!("{}", "Cloud:".bold());
+            println!(
+                "  Logged in as {} ({} plan)",
+                creds.email.cyan(),
+                creds.plan
+            );
+
+            // Show last sync time
+            match db.last_sync_time() {
+                Ok(Some(last_sync)) => {
+                    println!("  Last sync: {}", format_relative_time(last_sync));
+                }
+                Ok(None) => {
+                    println!("  Last sync: {}", "never".dimmed());
+                }
+                Err(_) => {
+                    // Silently skip if we cannot read sync time
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Prints enhanced database statistics.
 ///
 /// Shows total sessions, messages, links, and database file size.
@@ -396,6 +440,35 @@ fn format_file_size(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{bytes} bytes")
+    }
+}
+
+/// Formats a timestamp as relative time (e.g., "2 hours ago", "3 days ago").
+fn format_relative_time(time: chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(time);
+
+    let hours = duration.num_hours();
+    if hours < 1 {
+        let minutes = duration.num_minutes();
+        if minutes < 1 {
+            "just now".to_string()
+        } else if minutes == 1 {
+            "1 minute ago".to_string()
+        } else {
+            format!("{} minutes ago", minutes)
+        }
+    } else if hours == 1 {
+        "1 hour ago".to_string()
+    } else if hours < 24 {
+        format!("{} hours ago", hours)
+    } else {
+        let days = duration.num_days();
+        if days == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{} days ago", days)
+        }
     }
 }
 
@@ -498,6 +571,17 @@ fn print_recent_sessions(db: &Database) -> Result<()> {
     Ok(())
 }
 
+/// Prints a tip about logging in.
+///
+/// This helps users discover the cloud sync feature.
+fn print_login_tip() {
+    println!();
+    println!(
+        "{}",
+        "Tip: Run 'lore login' to sync sessions across machines".dimmed()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +611,56 @@ mod tests {
     fn test_format_file_size_gigabytes() {
         assert_eq!(format_file_size(1024 * 1024 * 1024), "1.0 GB");
         assert_eq!(format_file_size(1024 * 1024 * 1024 * 2), "2.0 GB");
+    }
+
+    #[test]
+    fn test_format_relative_time_just_now() {
+        let now = chrono::Utc::now();
+        assert_eq!(format_relative_time(now), "just now");
+
+        let seconds_ago = now - chrono::Duration::seconds(30);
+        assert_eq!(format_relative_time(seconds_ago), "just now");
+    }
+
+    #[test]
+    fn test_format_relative_time_minutes() {
+        let now = chrono::Utc::now();
+
+        let one_min = now - chrono::Duration::minutes(1);
+        assert_eq!(format_relative_time(one_min), "1 minute ago");
+
+        let five_mins = now - chrono::Duration::minutes(5);
+        assert_eq!(format_relative_time(five_mins), "5 minutes ago");
+
+        let fifty_nine_mins = now - chrono::Duration::minutes(59);
+        assert_eq!(format_relative_time(fifty_nine_mins), "59 minutes ago");
+    }
+
+    #[test]
+    fn test_format_relative_time_hours() {
+        let now = chrono::Utc::now();
+
+        let one_hour = now - chrono::Duration::hours(1);
+        assert_eq!(format_relative_time(one_hour), "1 hour ago");
+
+        let two_hours = now - chrono::Duration::hours(2);
+        assert_eq!(format_relative_time(two_hours), "2 hours ago");
+
+        let twenty_three_hours = now - chrono::Duration::hours(23);
+        assert_eq!(format_relative_time(twenty_three_hours), "23 hours ago");
+    }
+
+    #[test]
+    fn test_format_relative_time_days() {
+        let now = chrono::Utc::now();
+
+        let one_day = now - chrono::Duration::days(1);
+        assert_eq!(format_relative_time(one_day), "1 day ago");
+
+        let three_days = now - chrono::Duration::days(3);
+        assert_eq!(format_relative_time(three_days), "3 days ago");
+
+        let thirty_days = now - chrono::Duration::days(30);
+        assert_eq!(format_relative_time(thirty_days), "30 days ago");
     }
 }
