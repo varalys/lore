@@ -134,6 +134,59 @@ impl CloudClient {
         let body: ApiResponse<PullResponse> = response.json()?;
         Ok(body.data)
     }
+
+    /// Gets the encryption salt from the cloud service.
+    ///
+    /// Returns the base64-encoded salt if set, or None if not yet configured.
+    pub fn get_salt(&self) -> Result<Option<String>, CloudError> {
+        let api_key = self.api_key.as_ref().ok_or(CloudError::NotLoggedIn)?;
+
+        let url = format!("{}/api/sync/salt", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .send()?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let message = response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(CloudError::ServerError { status, message });
+        }
+
+        let body: ApiResponse<SaltResponse> = response.json()?;
+        Ok(body.data.salt)
+    }
+
+    /// Sets the encryption salt on the cloud service.
+    ///
+    /// This should only be called once during initial setup. The server will
+    /// reject attempts to overwrite an existing salt.
+    pub fn set_salt(&self, salt: &str) -> Result<(), CloudError> {
+        let api_key = self.api_key.as_ref().ok_or(CloudError::NotLoggedIn)?;
+
+        let url = format!("{}/api/sync/salt", self.base_url);
+        let response = self
+            .client
+            .put(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .json(&SaltRequest {
+                salt: salt.to_string(),
+            })
+            .send()?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let message = response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(CloudError::ServerError { status, message });
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for CloudClient {
@@ -221,6 +274,20 @@ pub struct PushResponse {
 
     /// Server timestamp for recording sync time.
     pub server_time: DateTime<Utc>,
+}
+
+/// Response from getting the encryption salt.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SaltResponse {
+    /// The base64-encoded encryption salt, or None if not set.
+    pub salt: Option<String>,
+}
+
+/// Request for setting the encryption salt.
+#[derive(Debug, Clone, Serialize)]
+pub struct SaltRequest {
+    /// The base64-encoded encryption salt.
+    pub salt: String,
 }
 
 /// Response from pulling sessions.

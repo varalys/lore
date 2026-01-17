@@ -236,6 +236,7 @@ fn run_push(dry_run: bool) -> Result<()> {
 
     // Get or create encryption key
     let store = CredentialsStore::with_keychain(config.use_keychain);
+    let client = CloudClient::with_url(&creds.cloud_url).with_api_key(&creds.api_key);
     let encryption_key = match store.load_encryption_key()? {
         Some(key_hex) => decode_key_hex(&key_hex)?,
         None => {
@@ -255,6 +256,12 @@ fn run_push(dry_run: bool) -> Result<()> {
 
             // Store the derived key (not the passphrase)
             store.store_encryption_key(&encode_key_hex(&key))?;
+
+            // Sync salt to cloud for other machines
+            if let Err(e) = client.set_salt(&salt_b64) {
+                tracing::debug!("Could not sync salt to cloud (may already exist): {e}");
+            }
+
             key
         }
     };
@@ -287,8 +294,6 @@ fn run_push(dry_run: bool) -> Result<()> {
     }
 
     // Push to cloud in batches
-    let client = CloudClient::with_url(&creds.cloud_url).with_api_key(&creds.api_key);
-
     let batches: Vec<_> = push_sessions.chunks(PUSH_BATCH_SIZE).collect();
     let total_batches = batches.len();
     let mut total_synced: i64 = 0;
@@ -422,8 +427,11 @@ fn run_pull(all: bool) -> Result<()> {
     // Determine since time
     let since = if all { None } else { db.last_sync_time()? };
 
+    // Create client early so we can fetch salt if needed
+    let client = CloudClient::with_url(&creds.cloud_url).with_api_key(&creds.api_key);
+
     // Get encryption key
-    let config = Config::load()?;
+    let mut config = Config::load()?;
     let store = CredentialsStore::with_keychain(config.use_keychain);
     let encryption_key = match store.load_encryption_key()? {
         Some(key_hex) => decode_key_hex(&key_hex)?,
@@ -432,12 +440,22 @@ fn run_pull(all: bool) -> Result<()> {
             println!("Enter your encryption passphrase to decrypt sessions:");
             let passphrase = prompt_passphrase()?;
 
-            let config = Config::load()?;
-            let salt_b64 = config.encryption_salt.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No encryption salt found. Run 'lore cloud push' first to set up encryption."
-                )
-            })?;
+            // Try to get salt from local config first, then from cloud
+            let salt_b64 = match &config.encryption_salt {
+                Some(salt) => salt.clone(),
+                None => {
+                    // Fetch salt from cloud
+                    let cloud_salt = client.get_salt()?.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "No encryption salt found locally or on cloud. Run 'lore cloud push' on a machine with existing sessions first."
+                        )
+                    })?;
+                    // Save salt locally for future use
+                    config.encryption_salt = Some(cloud_salt.clone());
+                    config.save()?;
+                    cloud_salt
+                }
+            };
             let salt = BASE64.decode(&salt_b64)?;
             let key = derive_key(&passphrase, &salt)?;
 
@@ -446,9 +464,6 @@ fn run_pull(all: bool) -> Result<()> {
             key
         }
     };
-
-    // Pull from cloud
-    let client = CloudClient::with_url(&creds.cloud_url).with_api_key(&creds.api_key);
 
     println!("Downloading sessions from cloud...");
     let response = client.pull(since)?;
