@@ -9,6 +9,8 @@ use chrono::Utc;
 use colored::Colorize;
 use serde::Serialize;
 use std::io::{self, Write};
+use std::sync::mpsc;
+use std::thread;
 
 use crate::cli::OutputFormat;
 use crate::cloud::client::{CloudClient, PushSession, SessionMetadata};
@@ -290,42 +292,71 @@ fn run_push(dry_run: bool) -> Result<()> {
     // Get machine ID
     let machine_id = config.get_or_create_machine_id()?;
 
-    // Prepare sessions for push
+    // Pre-read all messages (fast - just SELECT queries)
     println!();
-    let total_sessions = sessions.len();
-    let mut push_sessions = Vec::new();
-    for (idx, session) in sessions.iter().enumerate() {
-        eprint!("\r  Encrypting sessions... {}/{}", idx + 1, total_sessions);
-        let messages = db.get_messages(&session.id)?;
-        let encrypted = encrypt_session_messages(&messages, &encryption_key)?;
+    print!("  Reading sessions...");
+    io::stdout().flush()?;
+    let session_data: Vec<_> = sessions
+        .iter()
+        .map(|session| {
+            let messages = db.get_messages(&session.id)?;
+            Ok((session.clone(), messages))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    println!(" done");
 
-        push_sessions.push(PushSession {
-            id: session.id.to_string(),
-            machine_id: machine_id.clone(),
-            encrypted_data: encrypted,
-            metadata: SessionMetadata {
-                tool_name: session.tool.clone(),
-                project_path: session.working_directory.clone(),
-                started_at: session.started_at,
-                ended_at: session.ended_at,
-                message_count: session.message_count,
-            },
-            updated_at: session.ended_at.unwrap_or_else(Utc::now),
-        });
-    }
-    eprintln!(); // Clear the encryption progress line
-
-    // Push to cloud in batches
-    println!("Uploading to cloud...");
-    let batches: Vec<_> = push_sessions.chunks(PUSH_BATCH_SIZE).collect();
+    // Split into batches for processing
+    let batches: Vec<Vec<_>> = session_data
+        .chunks(PUSH_BATCH_SIZE)
+        .map(|chunk| chunk.to_vec())
+        .collect();
     let total_batches = batches.len();
+
+    // Channel for encrypted batches (bounded to 2 for backpressure)
+    let (tx, rx) = mpsc::sync_channel::<Result<(usize, Vec<PushSession>)>>(2);
+
+    // Spawn encryption thread
+    let encrypt_handle = thread::spawn(move || {
+        for (batch_idx, batch) in batches.into_iter().enumerate() {
+            let mut push_sessions = Vec::new();
+            for (session, messages) in batch {
+                let encrypted = match encrypt_session_messages(&messages, &encryption_key) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                };
+                push_sessions.push(PushSession {
+                    id: session.id.to_string(),
+                    machine_id: machine_id.clone(),
+                    encrypted_data: encrypted,
+                    metadata: SessionMetadata {
+                        tool_name: session.tool.clone(),
+                        project_path: session.working_directory.clone(),
+                        started_at: session.started_at,
+                        ended_at: session.ended_at,
+                        message_count: session.message_count,
+                    },
+                    updated_at: session.ended_at.unwrap_or_else(Utc::now),
+                });
+            }
+            if tx.send(Ok((batch_idx, push_sessions))).is_err() {
+                return; // Receiver dropped, stop processing
+            }
+        }
+    });
+
+    // Main thread: receive encrypted batches and upload (pipelined)
+    println!("  Encrypting and uploading ({} batches)...", total_batches);
     let mut total_synced: i64 = 0;
     let mut batch_errors: Vec<(usize, String)> = Vec::new();
     let mut too_large_sessions: Vec<String> = Vec::new();
 
-    for (batch_idx, batch) in batches.into_iter().enumerate() {
+    for received in rx {
+        let (batch_idx, batch) = received?;
         let batch_num = batch_idx + 1;
-        print!("  Uploading batch {}/{}... ", batch_num, total_batches);
+        print!("    Batch {}/{}... ", batch_num, total_batches);
         io::stdout().flush()?;
 
         match client.push(batch.to_vec()) {
@@ -349,9 +380,9 @@ fn run_push(dry_run: bool) -> Result<()> {
                     println!("{}", "failed (retrying individually)".yellow());
 
                     // Retry each session in the batch individually
-                    for session in batch {
+                    for session in &batch {
                         let session_short_id = &session.id[..8];
-                        print!("    Session {}... ", session_short_id);
+                        print!("      Session {}... ", session_short_id);
                         io::stdout().flush()?;
 
                         match client.push(vec![session.clone()]) {
@@ -384,6 +415,11 @@ fn run_push(dry_run: bool) -> Result<()> {
             }
         }
     }
+
+    // Wait for encryption thread to finish
+    encrypt_handle
+        .join()
+        .expect("Encryption thread panicked");
 
     println!();
 
