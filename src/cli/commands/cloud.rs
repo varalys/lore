@@ -209,7 +209,28 @@ const PUSH_BATCH_SIZE: usize = 3;
 fn run_push(dry_run: bool) -> Result<()> {
     let creds = require_login()?;
     let db = Database::open_default()?;
-    let mut config = Config::load()?;
+    let config = Config::load()?;
+    let client = CloudClient::with_url(&creds.cloud_url).with_api_key(&creds.api_key);
+
+    // Ensure salt is synced to cloud (migration for existing users)
+    if let Some(ref local_salt) = config.encryption_salt {
+        match client.get_salt() {
+            Ok(None) => {
+                // Cloud doesn't have salt, upload it
+                if let Err(e) = client.set_salt(local_salt) {
+                    tracing::debug!("Could not sync salt to cloud: {e}");
+                } else {
+                    tracing::debug!("Synced encryption salt to cloud");
+                }
+            }
+            Ok(Some(_)) => {
+                // Cloud already has salt, nothing to do
+            }
+            Err(e) => {
+                tracing::debug!("Could not check cloud salt: {e}");
+            }
+        }
+    }
 
     // Get unsynced sessions
     let sessions = db.get_unsynced_sessions()?;
@@ -236,7 +257,7 @@ fn run_push(dry_run: bool) -> Result<()> {
 
     // Get or create encryption key
     let store = CredentialsStore::with_keychain(config.use_keychain);
-    let client = CloudClient::with_url(&creds.cloud_url).with_api_key(&creds.api_key);
+    let mut config = config; // Make mutable for potential salt creation
     let encryption_key = match store.load_encryption_key()? {
         Some(key_hex) => decode_key_hex(&key_hex)?,
         None => {
