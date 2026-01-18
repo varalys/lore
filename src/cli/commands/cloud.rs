@@ -292,10 +292,10 @@ fn run_push(dry_run: bool) -> Result<()> {
 
     // Prepare sessions for push
     println!();
-    println!("Encrypting and uploading sessions...");
-
+    let total_sessions = sessions.len();
     let mut push_sessions = Vec::new();
-    for session in &sessions {
+    for (idx, session) in sessions.iter().enumerate() {
+        eprint!("\r  Encrypting sessions... {}/{}", idx + 1, total_sessions);
         let messages = db.get_messages(&session.id)?;
         let encrypted = encrypt_session_messages(&messages, &encryption_key)?;
 
@@ -313,8 +313,10 @@ fn run_push(dry_run: bool) -> Result<()> {
             updated_at: session.ended_at.unwrap_or_else(Utc::now),
         });
     }
+    eprintln!(); // Clear the encryption progress line
 
     // Push to cloud in batches
+    println!("Uploading to cloud...");
     let batches: Vec<_> = push_sessions.chunks(PUSH_BATCH_SIZE).collect();
     let total_batches = batches.len();
     let mut total_synced: i64 = 0;
