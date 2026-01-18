@@ -499,10 +499,15 @@ fn run_pull(all: bool) -> Result<()> {
     // Import sessions
     let mut imported = 0;
     let mut skipped = 0;
+    let mut failed = 0;
+    let total = response.sessions.len();
     let config = Config::load()?;
     let local_machine_id = config.machine_id.clone();
 
-    for pull_session in response.sessions {
+    for (idx, pull_session) in response.sessions.into_iter().enumerate() {
+        // Progress indicator - use eprint to ensure immediate output
+        eprint!("\r  Importing sessions... {}/{}", idx + 1, total);
+
         // Skip sessions from this machine (we already have them)
         if Some(&pull_session.machine_id) == local_machine_id.as_ref() {
             skipped += 1;
@@ -520,9 +525,9 @@ fn run_pull(all: bool) -> Result<()> {
         {
             Ok(msgs) => msgs,
             Err(e) => {
-                eprintln!(
-                    "{}: Failed to decrypt session {}: {}",
-                    "Warning".yellow(),
+                failed += 1;
+                tracing::debug!(
+                    "Failed to decrypt session {}: {}",
                     &pull_session.id[..8],
                     e
                 );
@@ -560,13 +565,24 @@ fn run_pull(all: bool) -> Result<()> {
         imported += 1;
     }
 
-    println!();
-    println!(
-        "{} Imported {} sessions ({} skipped).",
-        "Success!".green().bold(),
-        imported,
-        skipped
-    );
+    // Clear the progress line and print summary
+    eprintln!();
+    if failed > 0 {
+        println!(
+            "{} Imported {} sessions ({} skipped, {} failed to decrypt).",
+            "Done.".yellow().bold(),
+            imported,
+            skipped,
+            failed
+        );
+    } else {
+        println!(
+            "{} Imported {} sessions ({} skipped).",
+            "Success!".green().bold(),
+            imported,
+            skipped
+        );
+    }
 
     Ok(())
 }
