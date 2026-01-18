@@ -611,6 +611,103 @@ impl Database {
         Ok(())
     }
 
+    /// Imports a session with all its messages in a single transaction.
+    ///
+    /// This is much faster than calling `insert_session` and `insert_message`
+    /// separately for each message, as it batches all operations into one
+    /// database transaction. Optionally marks the session as synced.
+    pub fn import_session_with_messages(
+        &mut self,
+        session: &Session,
+        messages: &[Message],
+        synced_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+
+        // Insert session
+        tx.execute(
+            r#"
+            INSERT INTO sessions (id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id, synced_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            ON CONFLICT(id) DO UPDATE SET
+                ended_at = ?5,
+                message_count = ?10,
+                synced_at = COALESCE(?12, synced_at)
+            "#,
+            params![
+                session.id.to_string(),
+                session.tool,
+                session.tool_version,
+                session.started_at.to_rfc3339(),
+                session.ended_at.map(|t| t.to_rfc3339()),
+                session.model,
+                session.working_directory,
+                session.git_branch,
+                session.source_path,
+                session.message_count,
+                session.machine_id,
+                synced_at.map(|t| t.to_rfc3339()),
+            ],
+        )?;
+
+        // Insert into sessions_fts for metadata search
+        let fts_count: i32 = tx.query_row(
+            "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+            params![session.id.to_string()],
+            |row| row.get(0),
+        )?;
+        if fts_count == 0 {
+            tx.execute(
+                "INSERT INTO sessions_fts (session_id, tool, working_directory, git_branch) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    session.id.to_string(),
+                    session.tool,
+                    session.working_directory,
+                    session.git_branch.as_deref().unwrap_or(""),
+                ],
+            )?;
+        }
+
+        // Insert all messages
+        for message in messages {
+            let content_json = serde_json::to_string(&message.content)?;
+
+            let rows_changed = tx.execute(
+                r#"
+                INSERT INTO messages (id, session_id, parent_id, idx, timestamp, role, content, model, git_branch, cwd)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                ON CONFLICT(id) DO NOTHING
+                "#,
+                params![
+                    message.id.to_string(),
+                    message.session_id.to_string(),
+                    message.parent_id.map(|u| u.to_string()),
+                    message.index,
+                    message.timestamp.to_rfc3339(),
+                    message.role.to_string(),
+                    content_json,
+                    message.model,
+                    message.git_branch,
+                    message.cwd,
+                ],
+            )?;
+
+            // Insert into FTS if the message was actually inserted
+            if rows_changed > 0 {
+                let text_content = message.content.text();
+                if !text_content.is_empty() {
+                    tx.execute(
+                        "INSERT INTO messages_fts (message_id, text_content) VALUES (?1, ?2)",
+                        params![message.id.to_string(), text_content],
+                    )?;
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Retrieves all messages for a session, ordered by index.
     ///
     /// Messages are returned in conversation order (by their `index` field).
@@ -5267,5 +5364,65 @@ mod tests {
             "Should find correct session among many"
         );
         assert_eq!(found.working_directory, "/project/150");
+    }
+
+    #[test]
+    fn test_import_session_with_messages() {
+        let (mut db, _dir) = create_test_db();
+
+        let session = create_test_session("claude-code", "/home/user/project", Utc::now(), None);
+        let messages = vec![
+            create_test_message(session.id, 0, MessageRole::User, "Hello"),
+            create_test_message(session.id, 1, MessageRole::Assistant, "Hi there!"),
+            create_test_message(session.id, 2, MessageRole::User, "How are you?"),
+        ];
+
+        let synced_at = Utc::now();
+        db.import_session_with_messages(&session, &messages, Some(synced_at))
+            .expect("Failed to import session with messages");
+
+        // Verify session was inserted
+        let retrieved_session = db.get_session(&session.id).expect("Failed to get session");
+        assert!(retrieved_session.is_some(), "Session should exist");
+        let retrieved_session = retrieved_session.unwrap();
+        assert_eq!(retrieved_session.tool, "claude-code");
+
+        // Verify messages were inserted
+        let retrieved_messages = db.get_messages(&session.id).expect("Failed to get messages");
+        assert_eq!(retrieved_messages.len(), 3, "Should have 3 messages");
+        assert_eq!(retrieved_messages[0].content.text(), "Hello");
+        assert_eq!(retrieved_messages[1].content.text(), "Hi there!");
+        assert_eq!(retrieved_messages[2].content.text(), "How are you?");
+
+        // Verify session is marked as synced
+        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
+        assert!(
+            !unsynced.iter().any(|s| s.id == session.id),
+            "Session should be marked as synced"
+        );
+    }
+
+    #[test]
+    fn test_import_session_with_messages_no_sync() {
+        let (mut db, _dir) = create_test_db();
+
+        let session = create_test_session("aider", "/tmp/test", Utc::now(), None);
+        let messages = vec![create_test_message(
+            session.id,
+            0,
+            MessageRole::User,
+            "Test message",
+        )];
+
+        // Import without marking as synced
+        db.import_session_with_messages(&session, &messages, None)
+            .expect("Failed to import session");
+
+        // Verify session is NOT synced
+        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
+        assert!(
+            unsynced.iter().any(|s| s.id == session.id),
+            "Session should NOT be marked as synced"
+        );
     }
 }

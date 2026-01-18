@@ -443,7 +443,7 @@ fn run_push(dry_run: bool) -> Result<()> {
 /// Pulls sessions from the cloud.
 fn run_pull(all: bool) -> Result<()> {
     let creds = require_login()?;
-    let db = Database::open_default()?;
+    let mut db = Database::open_default()?;
 
     // Determine since time
     let since = if all { None } else { db.last_sync_time()? };
@@ -553,14 +553,8 @@ fn run_pull(all: bool) -> Result<()> {
             machine_id: Some(pull_session.machine_id),
         };
 
-        db.insert_session(&session)?;
-
-        for message in messages {
-            db.insert_message(&message)?;
-        }
-
-        // Mark as synced immediately
-        db.mark_sessions_synced(&[session_id], response.server_time)?;
+        // Import session and all messages in a single transaction
+        db.import_session_with_messages(&session, &messages, Some(response.server_time))?;
 
         imported += 1;
     }
