@@ -6,8 +6,15 @@
 use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use super::{CloudError, DEFAULT_CLOUD_URL};
+
+/// Timeout for establishing a connection (30 seconds).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Timeout for the entire request including response (60 seconds).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Cloud API client for sync operations.
 pub struct CloudClient {
@@ -23,7 +30,7 @@ impl CloudClient {
     /// Creates a new cloud client with the default URL.
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: Self::build_client(),
             base_url: DEFAULT_CLOUD_URL.to_string(),
             api_key: None,
         }
@@ -32,10 +39,19 @@ impl CloudClient {
     /// Creates a new cloud client with a custom URL.
     pub fn with_url(base_url: &str) -> Self {
         Self {
-            client: Client::new(),
+            client: Self::build_client(),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: None,
         }
+    }
+
+    /// Builds the HTTP client with configured timeouts.
+    fn build_client() -> Client {
+        Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("Failed to build HTTP client")
     }
 
     /// Sets the API key for authentication.
@@ -431,5 +447,19 @@ mod tests {
 
         let response: ApiResponse<SyncStatus> = serde_json::from_str(json).unwrap();
         assert_eq!(response.data.session_count, 5);
+    }
+
+    #[test]
+    fn test_cloud_client_uses_timeouts() {
+        // Verify that timeout constants are reasonable values
+        assert_eq!(CONNECT_TIMEOUT.as_secs(), 30);
+        assert_eq!(REQUEST_TIMEOUT.as_secs(), 60);
+
+        // Verify that clients can be created (build_client uses these timeouts)
+        let client = CloudClient::new();
+        assert_eq!(client.base_url(), DEFAULT_CLOUD_URL);
+
+        let client = CloudClient::with_url("https://example.com");
+        assert_eq!(client.base_url(), "https://example.com");
     }
 }

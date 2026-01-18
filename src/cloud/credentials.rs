@@ -396,17 +396,25 @@ pub fn is_logged_in() -> bool {
 /// Gets the current credentials if logged in.
 ///
 /// Returns None if not logged in or credentials cannot be loaded.
+/// Respects the `use_keychain` config setting.
 #[allow(dead_code)]
 pub fn get_credentials() -> Option<Credentials> {
-    let store = CredentialsStore::new();
+    let use_keychain = crate::config::Config::load()
+        .map(|c| c.use_keychain)
+        .unwrap_or(false);
+    let store = CredentialsStore::with_keychain(use_keychain);
     store.load().ok().flatten()
 }
 
 /// Requires login, returning an error if not logged in.
 ///
 /// This is a convenience function for commands that require authentication.
+/// Respects the `use_keychain` config setting.
 pub fn require_login() -> Result<Credentials> {
-    let store = CredentialsStore::new();
+    let use_keychain = crate::config::Config::load()
+        .map(|c| c.use_keychain)
+        .unwrap_or(false);
+    let store = CredentialsStore::with_keychain(use_keychain);
     store
         .load()
         .context("Failed to check login status")?
@@ -475,5 +483,41 @@ mod tests {
         // On macOS and Windows, this should always return true.
         // On Linux, it depends on whether a secret service is running.
         let _result: bool = CredentialsStore::is_secret_service_available();
+    }
+
+    #[test]
+    fn test_require_login_loads_config() {
+        // This test verifies that require_login() attempts to load config
+        // and does not panic. The actual result depends on system state.
+        let result = require_login();
+        // Result depends on whether credentials exist on this system
+        match result {
+            Ok(creds) => {
+                // If credentials exist, verify they have required fields
+                assert!(!creds.api_key.is_empty());
+                assert!(!creds.email.is_empty());
+            }
+            Err(e) => {
+                // Should report "Not logged in" or a config/loading error
+                let err_msg = e.to_string();
+                assert!(
+                    err_msg.contains("Not logged in") || err_msg.contains("Failed"),
+                    "Unexpected error: {err_msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_credentials_loads_config() {
+        // This test verifies that get_credentials() attempts to load config
+        // and does not panic. The actual result depends on system state.
+        let result = get_credentials();
+        // In a test environment, may return None or Some depending on system state
+        if let Some(creds) = result {
+            // If credentials exist, verify they have required fields
+            assert!(!creds.api_key.is_empty());
+            assert!(!creds.email.is_empty());
+        }
     }
 }

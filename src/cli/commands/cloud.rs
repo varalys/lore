@@ -538,10 +538,11 @@ fn run_pull(all: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("Found {} sessions to import.", response.sessions.len());
+    println!("Found {} sessions to process.", response.sessions.len());
 
     // Import sessions
     let mut imported = 0;
+    let mut updated = 0;
     let mut skipped = 0;
     let mut failed = 0;
     let total = response.sessions.len();
@@ -550,7 +551,7 @@ fn run_pull(all: bool) -> Result<()> {
 
     for (idx, pull_session) in response.sessions.into_iter().enumerate() {
         // Progress indicator - use eprint to ensure immediate output
-        eprint!("\r  Importing sessions... {}/{}", idx + 1, total);
+        eprint!("\r  Processing sessions... {}/{}", idx + 1, total);
 
         // Skip sessions from this machine (we already have them)
         if Some(&pull_session.machine_id) == local_machine_id.as_ref() {
@@ -558,8 +559,28 @@ fn run_pull(all: bool) -> Result<()> {
             continue;
         }
 
-        // Check if session already exists
-        if let Ok(Some(_)) = db.find_session_by_id_prefix(&pull_session.id) {
+        // Check if session already exists and whether cloud version is newer
+        let existing_session = db
+            .find_session_by_id_prefix(&pull_session.id)
+            .ok()
+            .flatten();
+        let is_update = if let Some(ref existing) = existing_session {
+            // Cloud version is newer if it has more messages or a later ended_at
+            let cloud_has_more_messages =
+                pull_session.metadata.message_count > existing.message_count;
+            let cloud_has_later_ended_at = match (pull_session.metadata.ended_at, existing.ended_at)
+            {
+                (Some(cloud_end), Some(local_end)) => cloud_end > local_end,
+                (Some(_), None) => true, // Cloud has ended_at, local does not
+                _ => false,
+            };
+            cloud_has_more_messages || cloud_has_later_ended_at
+        } else {
+            false
+        };
+
+        // Skip if session exists and cloud version is not newer
+        if existing_session.is_some() && !is_update {
             skipped += 1;
             continue;
         }
@@ -594,20 +615,34 @@ fn run_pull(all: bool) -> Result<()> {
         };
 
         // Import session and all messages in a single transaction
+        // This handles both new inserts and updates via ON CONFLICT
         db.import_session_with_messages(&session, &messages, Some(response.server_time))?;
 
-        imported += 1;
+        if is_update {
+            updated += 1;
+        } else {
+            imported += 1;
+        }
     }
 
     // Clear the progress line and print summary
     eprintln!();
     if failed > 0 {
         println!(
-            "{} Imported {} sessions ({} skipped, {} failed to decrypt).",
+            "{} Imported {} sessions, updated {} ({} skipped, {} failed to decrypt).",
             "Done.".yellow().bold(),
             imported,
+            updated,
             skipped,
             failed
+        );
+    } else if updated > 0 {
+        println!(
+            "{} Imported {} sessions, updated {} ({} skipped).",
+            "Success!".green().bold(),
+            imported,
+            updated,
+            skipped
         );
     } else {
         println!(
