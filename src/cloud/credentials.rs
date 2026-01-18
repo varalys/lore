@@ -387,9 +387,13 @@ impl Default for CredentialsStore {
 /// Checks if the user is currently logged in.
 ///
 /// Returns true if valid credentials are stored, false otherwise.
+/// Respects the `use_keychain` config setting.
 #[allow(dead_code)]
 pub fn is_logged_in() -> bool {
-    let store = CredentialsStore::new();
+    let use_keychain = crate::config::Config::load()
+        .map(|c| c.use_keychain)
+        .unwrap_or(false);
+    let store = CredentialsStore::with_keychain(use_keychain);
     matches!(store.load(), Ok(Some(_)))
 }
 
