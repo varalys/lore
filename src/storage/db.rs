@@ -305,7 +305,9 @@ impl Database {
     /// Inserts a new session or updates an existing one.
     ///
     /// If a session with the same ID already exists, updates the `ended_at`
-    /// and `message_count` fields. Also updates the sessions_fts index for
+    /// and `message_count` fields, and resets `synced_at` to NULL to mark
+    /// the session as needing re-sync (e.g., when a session is continued
+    /// with new messages). Also updates the sessions_fts index for
     /// full-text search on session metadata.
     pub fn insert_session(&self, session: &Session) -> Result<()> {
         let rows_changed = self.conn.execute(
@@ -314,7 +316,8 @@ impl Database {
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             ON CONFLICT(id) DO UPDATE SET
                 ended_at = ?5,
-                message_count = ?10
+                message_count = ?10,
+                synced_at = NULL
             "#,
             params![
                 session.id.to_string(),
@@ -5423,6 +5426,50 @@ mod tests {
         assert!(
             unsynced.iter().any(|s| s.id == session.id),
             "Session should NOT be marked as synced"
+        );
+    }
+
+    #[test]
+    fn test_session_update_resets_sync_status() {
+        let (db, _dir) = create_test_db();
+
+        // Create and insert a session
+        let mut session =
+            create_test_session("claude-code", "/home/user/project", Utc::now(), None);
+        session.message_count = 5;
+        db.insert_session(&session).expect("Failed to insert session");
+
+        // Mark it as synced
+        db.mark_sessions_synced(&[session.id], Utc::now())
+            .expect("Failed to mark synced");
+
+        // Verify it's synced (not in unsynced list)
+        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
+        assert!(
+            !unsynced.iter().any(|s| s.id == session.id),
+            "Session should be synced initially"
+        );
+
+        // Simulate session being continued with new messages
+        session.message_count = 10;
+        session.ended_at = Some(Utc::now());
+        db.insert_session(&session).expect("Failed to update session");
+
+        // Verify it's now marked as unsynced (needs re-sync)
+        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
+        assert!(
+            unsynced.iter().any(|s| s.id == session.id),
+            "Session should be marked for re-sync after update"
+        );
+
+        // Verify the message count was updated
+        let retrieved = db
+            .get_session(&session.id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(
+            retrieved.message_count, 10,
+            "Message count should be updated"
         );
     }
 }
