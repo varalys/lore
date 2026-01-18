@@ -491,18 +491,13 @@ mod tests {
 
     #[test]
     fn test_require_login_loads_config() {
-        // This test verifies that require_login() attempts to load config
-        // and does not panic. The actual result depends on system state.
         let result = require_login();
-        // Result depends on whether credentials exist on this system
         match result {
             Ok(creds) => {
-                // If credentials exist, verify they have required fields
                 assert!(!creds.api_key.is_empty());
                 assert!(!creds.email.is_empty());
             }
             Err(e) => {
-                // Should report "Not logged in" or a config/loading error
                 let err_msg = e.to_string();
                 assert!(
                     err_msg.contains("Not logged in") || err_msg.contains("Failed"),
@@ -514,12 +509,8 @@ mod tests {
 
     #[test]
     fn test_get_credentials_loads_config() {
-        // This test verifies that get_credentials() attempts to load config
-        // and does not panic. The actual result depends on system state.
         let result = get_credentials();
-        // In a test environment, may return None or Some depending on system state
         if let Some(creds) = result {
-            // If credentials exist, verify they have required fields
             assert!(!creds.api_key.is_empty());
             assert!(!creds.email.is_empty());
         }

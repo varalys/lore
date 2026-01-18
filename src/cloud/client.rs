@@ -451,11 +451,9 @@ mod tests {
 
     #[test]
     fn test_cloud_client_uses_timeouts() {
-        // Verify that timeout constants are reasonable values
         assert_eq!(CONNECT_TIMEOUT.as_secs(), 30);
         assert_eq!(REQUEST_TIMEOUT.as_secs(), 60);
 
-        // Verify that clients can be created (build_client uses these timeouts)
         let client = CloudClient::new();
         assert_eq!(client.base_url(), DEFAULT_CLOUD_URL);
 

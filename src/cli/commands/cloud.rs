@@ -540,7 +540,6 @@ fn run_pull(all: bool) -> Result<()> {
 
     println!("Found {} sessions to process.", response.sessions.len());
 
-    // Import sessions
     let mut imported = 0;
     let mut updated = 0;
     let mut skipped = 0;
@@ -596,10 +595,8 @@ fn run_pull(all: bool) -> Result<()> {
             }
         };
 
-        // Parse session ID
         let session_id = uuid::Uuid::parse_str(&pull_session.id).context("Invalid session ID")?;
 
-        // Create session record
         let session = Session {
             id: session_id,
             tool: pull_session.metadata.tool_name,
