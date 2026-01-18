@@ -164,21 +164,32 @@ fn prompt_storage_preference() -> Result<bool> {
     // Check if keychain is available on this system
     let keychain_available = is_keychain_option_available();
 
-    println!("  {} File storage (recommended) - Simple, works everywhere", "1.".bold());
+    println!(
+        "  {} File storage (recommended) - Simple, works everywhere",
+        "1.".bold()
+    );
 
     if keychain_available {
-        println!("  {} OS Keychain - More secure, may prompt for access", "2.".bold());
+        println!(
+            "  {} OS Keychain - More secure, may prompt for access",
+            "2.".bold()
+        );
     } else {
         #[cfg(target_os = "linux")]
         {
-            println!("  {} OS Keychain - {} (requires gnome-keyring or kwallet)",
+            println!(
+                "  {} OS Keychain - {} (requires gnome-keyring or kwallet)",
                 "2.".dimmed(),
                 "not available".dimmed()
             );
         }
         #[cfg(not(target_os = "linux"))]
         {
-            println!("  {} OS Keychain - {}", "2.".dimmed(), "not available".dimmed());
+            println!(
+                "  {} OS Keychain - {}",
+                "2.".dimmed(),
+                "not available".dimmed()
+            );
         }
     }
 
@@ -210,7 +221,10 @@ fn prompt_storage_preference() -> Result<bool> {
             #[cfg(not(target_os = "linux"))]
             {
                 println!();
-                println!("{}", "OS keychain is not available. Using file storage.".yellow());
+                println!(
+                    "{}",
+                    "OS keychain is not available. Using file storage.".yellow()
+                );
                 return Ok(false);
             }
         }

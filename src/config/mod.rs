@@ -297,8 +297,9 @@ impl Config {
                 bail!("encryption_salt cannot be set manually; it is auto-generated");
             }
             "use_keychain" => {
-                self.use_keychain = parse_bool(value)
-                    .with_context(|| format!("Invalid boolean value for use_keychain: '{value}'"))?;
+                self.use_keychain = parse_bool(value).with_context(|| {
+                    format!("Invalid boolean value for use_keychain: '{value}'")
+                })?;
             }
             _ => {
                 bail!("Unknown configuration key: '{key}'");

@@ -76,11 +76,9 @@ pub enum CloudSubcommand {
     },
 
     /// Sync sessions with the cloud (pull then push)
-    #[command(
-        long_about = "Performs a full bidirectional sync with the cloud.\n\
+    #[command(long_about = "Performs a full bidirectional sync with the cloud.\n\
         First pulls any new sessions from other machines, then pushes\n\
-        local sessions that haven't been synced yet."
-    )]
+        local sessions that haven't been synced yet.")]
     Sync,
 }
 
@@ -410,10 +408,13 @@ fn run_push(dry_run: bool) -> Result<()> {
                                     too_large_sessions.push(session.id.clone());
                                 } else {
                                     println!("{}", "failed".red());
-                                    batch_errors.push((batch_num, format!(
-                                        "Session {}: {}",
-                                        session_short_id, individual_error_str
-                                    )));
+                                    batch_errors.push((
+                                        batch_num,
+                                        format!(
+                                            "Session {}: {}",
+                                            session_short_id, individual_error_str
+                                        ),
+                                    ));
                                 }
                             }
                         }
@@ -427,9 +428,7 @@ fn run_push(dry_run: bool) -> Result<()> {
     }
 
     // Wait for encryption thread to finish
-    encrypt_handle
-        .join()
-        .expect("Encryption thread panicked");
+    encrypt_handle.join().expect("Encryption thread panicked");
 
     println!();
 
@@ -465,10 +464,7 @@ fn run_push(dry_run: bool) -> Result<()> {
                 batch_errors.len()
             );
         } else {
-            println!(
-                "{} All batches failed:",
-                "Error!".red().bold()
-            );
+            println!("{} All batches failed:", "Error!".red().bold());
         }
         for (batch_num, error) in &batch_errors {
             println!("  Batch {}: {}", batch_num, error);
@@ -574,11 +570,7 @@ fn run_pull(all: bool) -> Result<()> {
             Ok(msgs) => msgs,
             Err(e) => {
                 failed += 1;
-                tracing::debug!(
-                    "Failed to decrypt session {}: {}",
-                    &pull_session.id[..8],
-                    e
-                );
+                tracing::debug!("Failed to decrypt session {}: {}", &pull_session.id[..8], e);
                 continue;
             }
         };

@@ -5391,7 +5391,9 @@ mod tests {
         assert_eq!(retrieved_session.tool, "claude-code");
 
         // Verify messages were inserted
-        let retrieved_messages = db.get_messages(&session.id).expect("Failed to get messages");
+        let retrieved_messages = db
+            .get_messages(&session.id)
+            .expect("Failed to get messages");
         assert_eq!(retrieved_messages.len(), 3, "Should have 3 messages");
         assert_eq!(retrieved_messages[0].content.text(), "Hello");
         assert_eq!(retrieved_messages[1].content.text(), "Hi there!");
@@ -5437,7 +5439,8 @@ mod tests {
         let mut session =
             create_test_session("claude-code", "/home/user/project", Utc::now(), None);
         session.message_count = 5;
-        db.insert_session(&session).expect("Failed to insert session");
+        db.insert_session(&session)
+            .expect("Failed to insert session");
 
         // Mark it as synced
         db.mark_sessions_synced(&[session.id], Utc::now())
@@ -5453,7 +5456,8 @@ mod tests {
         // Simulate session being continued with new messages
         session.message_count = 10;
         session.ended_at = Some(Utc::now());
-        db.insert_session(&session).expect("Failed to update session");
+        db.insert_session(&session)
+            .expect("Failed to update session");
 
         // Verify it's now marked as unsynced (needs re-sync)
         let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
