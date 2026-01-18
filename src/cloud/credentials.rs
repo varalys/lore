@@ -41,6 +41,8 @@ fn default_cloud_url() -> String {
 pub struct CredentialsStore {
     /// Whether to use keyring (enabled via config and available on system).
     use_keyring: bool,
+    /// Base directory for file-backed storage (defaults to ~/.lore).
+    base_dir: Option<PathBuf>,
 }
 
 impl CredentialsStore {
@@ -48,7 +50,10 @@ impl CredentialsStore {
     ///
     /// Credentials are stored in ~/.lore/credentials.json with restricted permissions.
     pub fn new() -> Self {
-        Self { use_keyring: false }
+        Self {
+            use_keyring: false,
+            base_dir: None,
+        }
     }
 
     /// Creates a credential store with optional keychain support.
@@ -63,7 +68,23 @@ impl CredentialsStore {
         } else {
             false
         };
-        Self { use_keyring }
+        Self {
+            use_keyring,
+            base_dir: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_base_dir(base_dir: PathBuf, use_keychain: bool) -> Self {
+        let use_keyring = if use_keychain {
+            Self::is_keyring_available()
+        } else {
+            false
+        };
+        Self {
+            use_keyring,
+            base_dir: Some(base_dir),
+        }
     }
 
     /// Tests whether the keyring is available by attempting a dummy operation.
@@ -176,7 +197,7 @@ impl CredentialsStore {
                 .map_err(|e| CloudError::KeyringError(e.to_string()))?;
         } else {
             // Use file storage
-            let path = Self::encryption_key_path()?;
+            let path = self.encryption_key_path()?;
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|e| CloudError::KeyringError(format!("Failed to create dir: {e}")))?;
@@ -212,7 +233,7 @@ impl CredentialsStore {
         }
 
         // Check file storage
-        let path = Self::encryption_key_path()?;
+        let path = self.encryption_key_path()?;
         if path.exists() {
             let key = fs::read_to_string(&path)
                 .map_err(|e| CloudError::KeyringError(format!("Failed to read key: {e}")))?;
@@ -238,7 +259,7 @@ impl CredentialsStore {
     /// Removes from both file and keyring to ensure complete cleanup.
     pub fn delete_encryption_key(&self) -> Result<(), CloudError> {
         // Delete from file
-        let path = Self::encryption_key_path()?;
+        let path = self.encryption_key_path()?;
         if path.exists() {
             fs::remove_file(&path)
                 .map_err(|e| CloudError::KeyringError(format!("Failed to delete key file: {e}")))?;
@@ -303,24 +324,34 @@ impl CredentialsStore {
 
     // ==================== File operations ====================
 
-    fn credentials_path() -> Result<PathBuf, CloudError> {
-        let config_dir = dirs::home_dir()
-            .ok_or_else(|| CloudError::KeyringError("Could not find home directory".to_string()))?
-            .join(".lore");
+    fn credentials_path(&self) -> Result<PathBuf, CloudError> {
+        let config_dir = match &self.base_dir {
+            Some(base_dir) => base_dir.clone(),
+            None => dirs::home_dir()
+                .ok_or_else(|| {
+                    CloudError::KeyringError("Could not find home directory".to_string())
+                })?
+                .join(".lore"),
+        };
 
         Ok(config_dir.join("credentials.json"))
     }
 
-    fn encryption_key_path() -> Result<PathBuf, CloudError> {
-        let config_dir = dirs::home_dir()
-            .ok_or_else(|| CloudError::KeyringError("Could not find home directory".to_string()))?
-            .join(".lore");
+    fn encryption_key_path(&self) -> Result<PathBuf, CloudError> {
+        let config_dir = match &self.base_dir {
+            Some(base_dir) => base_dir.clone(),
+            None => dirs::home_dir()
+                .ok_or_else(|| {
+                    CloudError::KeyringError("Could not find home directory".to_string())
+                })?
+                .join(".lore"),
+        };
 
         Ok(config_dir.join("encryption.key"))
     }
 
     fn store_to_file(&self, credentials: &Credentials) -> Result<(), CloudError> {
-        let path = Self::credentials_path()?;
+        let path = self.credentials_path()?;
 
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| {
@@ -349,7 +380,7 @@ impl CredentialsStore {
     }
 
     fn load_from_file(&self) -> Result<Option<Credentials>, CloudError> {
-        let path = Self::credentials_path()?;
+        let path = self.credentials_path()?;
 
         if !path.exists() {
             return Ok(None);
@@ -366,7 +397,7 @@ impl CredentialsStore {
     }
 
     fn delete_from_file(&self) -> Result<(), CloudError> {
-        let path = Self::credentials_path()?;
+        let path = self.credentials_path()?;
 
         if path.exists() {
             fs::remove_file(&path).map_err(|e| {
@@ -407,7 +438,7 @@ pub fn get_credentials() -> Option<Credentials> {
         .map(|c| c.use_keychain)
         .unwrap_or(false);
     let store = CredentialsStore::with_keychain(use_keychain);
-    store.load().ok().flatten()
+    get_credentials_with_store(&store)
 }
 
 /// Requires login, returning an error if not logged in.
@@ -419,6 +450,14 @@ pub fn require_login() -> Result<Credentials> {
         .map(|c| c.use_keychain)
         .unwrap_or(false);
     let store = CredentialsStore::with_keychain(use_keychain);
+    require_login_with_store(&store)
+}
+
+fn get_credentials_with_store(store: &CredentialsStore) -> Option<Credentials> {
+    store.load().ok().flatten()
+}
+
+fn require_login_with_store(store: &CredentialsStore) -> Result<Credentials> {
     store
         .load()
         .context("Failed to check login status")?
@@ -475,14 +514,14 @@ mod tests {
     }
 
     #[test]
-    fn test_is_keyring_available_returns_bool() {
+    fn test_is_keyring_available_smoke() {
         // This test verifies the function exists and returns a boolean.
         // The actual result depends on the system's keychain support.
         let _result: bool = CredentialsStore::is_keyring_available();
     }
 
     #[test]
-    fn test_is_secret_service_available_returns_bool() {
+    fn test_is_secret_service_available_smoke() {
         // This test verifies the function exists and returns a boolean.
         // On macOS and Windows, this should always return true.
         // On Linux, it depends on whether a secret service is running.
@@ -490,29 +529,38 @@ mod tests {
     }
 
     #[test]
-    fn test_require_login_loads_config() {
-        let result = require_login();
-        match result {
-            Ok(creds) => {
-                assert!(!creds.api_key.is_empty());
-                assert!(!creds.email.is_empty());
-            }
-            Err(e) => {
-                let err_msg = e.to_string();
-                assert!(
-                    err_msg.contains("Not logged in") || err_msg.contains("Failed"),
-                    "Unexpected error: {err_msg}"
-                );
-            }
-        }
+    fn test_require_login_with_store_deterministic() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = CredentialsStore::with_base_dir(temp_dir.path().to_path_buf(), false);
+
+        let creds = Credentials {
+            api_key: "test_key".to_string(),
+            email: "user@example.com".to_string(),
+            plan: "pro".to_string(),
+            cloud_url: default_cloud_url(),
+        };
+
+        store.store(&creds).unwrap();
+        let loaded = require_login_with_store(&store).unwrap();
+        assert_eq!(loaded.email, creds.email);
+        assert_eq!(loaded.api_key, creds.api_key);
     }
 
     #[test]
-    fn test_get_credentials_loads_config() {
-        let result = get_credentials();
-        if let Some(creds) = result {
-            assert!(!creds.api_key.is_empty());
-            assert!(!creds.email.is_empty());
-        }
+    fn test_get_credentials_with_store_deterministic() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = CredentialsStore::with_base_dir(temp_dir.path().to_path_buf(), false);
+
+        let creds = Credentials {
+            api_key: "test_key".to_string(),
+            email: "user@example.com".to_string(),
+            plan: "free".to_string(),
+            cloud_url: default_cloud_url(),
+        };
+
+        store.store(&creds).unwrap();
+        let loaded = get_credentials_with_store(&store).unwrap();
+        assert_eq!(loaded.email, creds.email);
+        assert_eq!(loaded.api_key, creds.api_key);
     }
 }
