@@ -28,7 +28,8 @@ use crate::storage::Database;
 #[command(after_help = "EXAMPLES:\n    \
     lore cloud status          Show cloud sync status\n    \
     lore cloud push            Push local sessions to cloud\n    \
-    lore cloud pull            Pull sessions from cloud")]
+    lore cloud pull            Pull sessions from cloud\n    \
+    lore cloud sync            Pull then push (bidirectional sync)")]
 pub struct Args {
     #[command(subcommand)]
     pub command: CloudSubcommand,
@@ -73,6 +74,14 @@ pub enum CloudSubcommand {
         #[arg(long)]
         all: bool,
     },
+
+    /// Sync sessions with the cloud (pull then push)
+    #[command(
+        long_about = "Performs a full bidirectional sync with the cloud.\n\
+        First pulls any new sessions from other machines, then pushes\n\
+        local sessions that haven't been synced yet."
+    )]
+    Sync,
 }
 
 /// JSON output for cloud status.
@@ -105,6 +114,7 @@ pub fn run(args: Args) -> Result<()> {
         CloudSubcommand::Status { format } => run_status(format),
         CloudSubcommand::Push { dry_run } => run_push(dry_run),
         CloudSubcommand::Pull { all } => run_pull(all),
+        CloudSubcommand::Sync => run_sync(),
     }
 }
 
@@ -615,6 +625,29 @@ fn run_pull(all: bool) -> Result<()> {
             skipped
         );
     }
+
+    Ok(())
+}
+
+/// Syncs sessions with the cloud (pull then push).
+fn run_sync() -> Result<()> {
+    println!("{}", "Cloud Sync".bold());
+    println!();
+
+    // Pull first to get any remote changes
+    println!("{}", "Step 1: Pull".bold());
+    if let Err(e) = run_pull(false) {
+        // Don't fail the whole sync if pull fails, but warn
+        println!("{} Pull failed: {}", "Warning:".yellow(), e);
+        println!("Continuing with push...");
+        println!();
+    }
+
+    println!();
+
+    // Then push local changes
+    println!("{}", "Step 2: Push".bold());
+    run_push(false)?;
 
     Ok(())
 }
