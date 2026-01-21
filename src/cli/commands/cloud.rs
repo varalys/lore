@@ -29,7 +29,8 @@ use crate::storage::Database;
     lore cloud status          Show cloud sync status\n    \
     lore cloud push            Push local sessions to cloud\n    \
     lore cloud pull            Pull sessions from cloud\n    \
-    lore cloud sync            Pull then push (bidirectional sync)")]
+    lore cloud sync            Pull then push (bidirectional sync)\n    \
+    lore cloud reset-sync      Reset sync status to re-upload all sessions")]
 pub struct Args {
     #[command(subcommand)]
     pub command: CloudSubcommand,
@@ -80,6 +81,23 @@ pub enum CloudSubcommand {
         First pulls any new sessions from other machines, then pushes\n\
         local sessions that haven't been synced yet.")]
     Sync,
+
+    /// Reset sync status to re-upload sessions
+    #[command(
+        name = "reset-sync",
+        long_about = "Resets the sync status of local sessions, marking them as unsynced.\n\
+        This is useful when switching cloud environments or fixing sync issues.\n\
+        After running this command, use 'lore cloud push' to re-upload sessions."
+    )]
+    ResetSync {
+        /// Reset specific session(s) by ID or prefix
+        #[arg(long, value_name = "ID")]
+        session: Option<Vec<String>>,
+
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// JSON output for cloud status.
@@ -113,6 +131,7 @@ pub fn run(args: Args) -> Result<()> {
         CloudSubcommand::Push { dry_run } => run_push(dry_run),
         CloudSubcommand::Pull { all } => run_pull(all),
         CloudSubcommand::Sync => run_sync(),
+        CloudSubcommand::ResetSync { session, force } => run_reset_sync(session, force),
     }
 }
 
@@ -360,6 +379,7 @@ fn run_push(dry_run: bool) -> Result<()> {
     let mut total_synced: i64 = 0;
     let mut batch_errors: Vec<(usize, String)> = Vec::new();
     let mut too_large_sessions: Vec<String> = Vec::new();
+    let mut quota_exceeded: Option<QuotaInfo> = None;
 
     for received in rx {
         let (batch_idx, batch) = received?;
@@ -383,8 +403,13 @@ fn run_push(dry_run: bool) -> Result<()> {
             Err(e) => {
                 let error_str = e.to_string();
 
-                // Check if this is a size-related error (413 or "Too Large")
-                if is_size_error(&error_str) {
+                // Check if this is a quota error - fail fast and stop processing
+                if is_quota_error(&error_str) {
+                    println!("{}", "quota limit reached".yellow());
+                    quota_exceeded = parse_quota_info(&error_str);
+                    break; // Stop processing remaining batches
+                } else if is_size_error(&error_str) {
+                    // Check if this is a size-related error (413 or "Too Large")
                     println!("{}", "failed (retrying individually)".yellow());
 
                     // Retry each session in the batch individually
@@ -403,7 +428,11 @@ fn run_push(dry_run: bool) -> Result<()> {
                             }
                             Err(individual_err) => {
                                 let individual_error_str = individual_err.to_string();
-                                if is_size_error(&individual_error_str) {
+                                if is_quota_error(&individual_error_str) {
+                                    println!("{}", "quota limit reached".yellow());
+                                    quota_exceeded = parse_quota_info(&individual_error_str);
+                                    break; // Stop processing remaining sessions
+                                } else if is_size_error(&individual_error_str) {
                                     println!("{}", "too large, skipping".yellow());
                                     too_large_sessions.push(session.id.clone());
                                 } else {
@@ -419,6 +448,10 @@ fn run_push(dry_run: bool) -> Result<()> {
                             }
                         }
                     }
+                    // If quota was exceeded during individual retries, stop batch processing
+                    if quota_exceeded.is_some() {
+                        break;
+                    }
                 } else {
                     println!("{}", "failed".red());
                     batch_errors.push((batch_num, error_str));
@@ -431,6 +464,39 @@ fn run_push(dry_run: bool) -> Result<()> {
     encrypt_handle.join().expect("Encryption thread panicked");
 
     println!();
+
+    // Handle quota exceeded case specially (takes precedence over other errors)
+    if let Some(quota) = quota_exceeded {
+        if total_synced > 0 {
+            println!(
+                "{} Synced {} sessions (reached {} plan limit of {}).",
+                "Done.".green().bold(),
+                total_synced,
+                quota.plan,
+                quota.limit
+            );
+        } else {
+            println!(
+                "{} Could not sync - {} plan limit of {} sessions reached ({}/{} used).",
+                "Limit reached.".yellow().bold(),
+                quota.plan,
+                quota.limit,
+                quota.current,
+                quota.limit
+            );
+        }
+
+        let remaining = sessions.len() as i64 - total_synced;
+        if remaining > 0 {
+            println!("{} sessions could not be synced.", remaining);
+        }
+        println!();
+        println!(
+            "Upgrade to Pro for unlimited sessions: {}",
+            "https://lore.varalys.com/pricing".cyan()
+        );
+        return Ok(());
+    }
 
     // Report results
     if batch_errors.is_empty() && too_large_sessions.is_empty() {
@@ -676,6 +742,103 @@ fn run_sync() -> Result<()> {
     Ok(())
 }
 
+/// Resets sync status for sessions so they can be re-uploaded.
+fn run_reset_sync(session_ids: Option<Vec<String>>, force: bool) -> Result<()> {
+    let db = Database::open_default()?;
+
+    match session_ids {
+        Some(ids) => {
+            // Reset specific sessions
+            let mut resolved_sessions = Vec::new();
+            for id_or_prefix in &ids {
+                match db.find_session_by_id_prefix(id_or_prefix) {
+                    Ok(Some(session)) => resolved_sessions.push(session),
+                    Ok(None) => {
+                        anyhow::bail!("Session not found: {}", id_or_prefix);
+                    }
+                    Err(e) => {
+                        anyhow::bail!("Error finding session '{}': {}", id_or_prefix, e);
+                    }
+                }
+            }
+
+            if resolved_sessions.is_empty() {
+                println!("{}", "No sessions to reset.".yellow());
+                return Ok(());
+            }
+
+            // Confirm unless --force
+            if !force {
+                println!(
+                    "This will mark {} session(s) as unsynced.",
+                    resolved_sessions.len()
+                );
+                println!("They will be re-uploaded on the next 'lore cloud push'.");
+                println!();
+                print!("Continue? [y/N] ");
+                io::stdout().flush()?;
+
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("{}", "Cancelled".dimmed());
+                    return Ok(());
+                }
+            }
+
+            let session_uuids: Vec<_> = resolved_sessions.iter().map(|s| s.id).collect();
+            let count = db.clear_sync_status_for_sessions(&session_uuids)?;
+
+            println!();
+            println!(
+                "{} Reset sync status for {} session(s).",
+                "Done.".green(),
+                count
+            );
+            println!("Run 'lore cloud push' to sync to cloud.");
+        }
+        None => {
+            // Reset all sessions
+            let total = db.session_count()?;
+
+            if total == 0 {
+                println!("{}", "No sessions to reset.".yellow());
+                return Ok(());
+            }
+
+            // Confirm unless --force
+            if !force {
+                println!("This will mark all {} sessions as unsynced.", total);
+                println!("They will be re-uploaded on the next 'lore cloud push'.");
+                println!();
+                print!("Continue? [y/N] ");
+                io::stdout().flush()?;
+
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("{}", "Cancelled".dimmed());
+                    return Ok(());
+                }
+            }
+
+            let count = db.clear_sync_status()?;
+
+            println!();
+            println!(
+                "{} Reset sync status for {} sessions.",
+                "Done.".green(),
+                count
+            );
+            println!("Run 'lore cloud push' to sync to cloud.");
+        }
+    }
+
+    Ok(())
+}
+
 /// Encrypts session messages for cloud storage.
 fn encrypt_session_messages(messages: &[Message], key: &[u8]) -> Result<String> {
     let json = serde_json::to_vec(messages)?;
@@ -748,6 +911,42 @@ fn is_size_error(error_msg: &str) -> bool {
         || error_msg.to_lowercase().contains("payload")
 }
 
+/// Checks if an error message indicates a quota/limit exceeded error.
+fn is_quota_error(error_msg: &str) -> bool {
+    error_msg.contains("Would exceed session limit")
+        || error_msg.contains("quota")
+        || (error_msg.contains("403") && error_msg.contains("limit"))
+}
+
+/// Quota information extracted from a limit error response.
+struct QuotaInfo {
+    current: i64,
+    limit: i64,
+    plan: String,
+}
+
+/// Attempts to parse quota information from an error message.
+fn parse_quota_info(error_msg: &str) -> Option<QuotaInfo> {
+    // Look for JSON in the error message
+    // Example: {"error":"Would exceed session limit","details":{"current":48,"limit":50,"requested":3,"available":2,"plan":"free"}}
+    if let Some(start) = error_msg.find('{') {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_msg[start..]) {
+            if let Some(details) = json.get("details") {
+                return Some(QuotaInfo {
+                    current: details.get("current").and_then(|v| v.as_i64()).unwrap_or(0),
+                    limit: details.get("limit").and_then(|v| v.as_i64()).unwrap_or(0),
+                    plan: details
+                        .get("plan")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("free")
+                        .to_string(),
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Formats a timestamp as relative time.
 fn format_relative_time(time: chrono::DateTime<chrono::Utc>) -> String {
     let now = Utc::now();
@@ -801,6 +1000,68 @@ mod tests {
         assert!(!is_size_error("HTTP error: 500 Internal Server Error"));
         assert!(!is_size_error("Authentication failed"));
         assert!(!is_size_error("Network timeout"));
+    }
+
+    #[test]
+    fn test_is_quota_error() {
+        // Should detect "Would exceed session limit" message
+        assert!(is_quota_error(
+            "Server error (403): {\"error\":\"Would exceed session limit\"}"
+        ));
+
+        // Should detect "quota" keyword
+        assert!(is_quota_error("quota exceeded"));
+        assert!(is_quota_error("User quota limit reached"));
+
+        // Should detect 403 + limit combination
+        assert!(is_quota_error("403 limit reached"));
+        assert!(is_quota_error("Server returned 403: limit exceeded"));
+
+        // Should not match unrelated errors
+        assert!(!is_quota_error("Connection refused"));
+        assert!(!is_quota_error("500 Internal Server Error"));
+        assert!(!is_quota_error("HTTP error: 403 Forbidden")); // 403 without "limit"
+        assert!(!is_quota_error("Session limit")); // "limit" without 403
+    }
+
+    #[test]
+    fn test_parse_quota_info() {
+        let error_msg = "Server error (403): {\"error\":\"Would exceed session limit\",\"details\":{\"current\":48,\"limit\":50,\"requested\":3,\"available\":2,\"plan\":\"free\"}}";
+        let quota = parse_quota_info(error_msg).expect("Should parse quota info");
+        assert_eq!(quota.current, 48);
+        assert_eq!(quota.limit, 50);
+        assert_eq!(quota.plan, "free");
+    }
+
+    #[test]
+    fn test_parse_quota_info_pro_plan() {
+        let error_msg = "{\"error\":\"Would exceed session limit\",\"details\":{\"current\":999,\"limit\":1000,\"requested\":5,\"available\":1,\"plan\":\"pro\"}}";
+        let quota = parse_quota_info(error_msg).expect("Should parse quota info");
+        assert_eq!(quota.current, 999);
+        assert_eq!(quota.limit, 1000);
+        assert_eq!(quota.plan, "pro");
+    }
+
+    #[test]
+    fn test_parse_quota_info_missing() {
+        // Random error message with no JSON
+        assert!(parse_quota_info("Some random error").is_none());
+
+        // 403 error without details
+        assert!(parse_quota_info("403 Forbidden").is_none());
+
+        // JSON without details field
+        assert!(parse_quota_info("{\"error\":\"Something went wrong\"}").is_none());
+    }
+
+    #[test]
+    fn test_parse_quota_info_partial_details() {
+        // JSON with partial details (missing some fields should use defaults)
+        let error_msg = "{\"error\":\"limit\",\"details\":{\"limit\":100}}";
+        let quota = parse_quota_info(error_msg).expect("Should parse with defaults");
+        assert_eq!(quota.current, 0); // default
+        assert_eq!(quota.limit, 100);
+        assert_eq!(quota.plan, "free"); // default
     }
 
     #[test]
