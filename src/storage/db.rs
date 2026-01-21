@@ -1430,13 +1430,42 @@ impl Database {
     /// Clears the synced_at timestamp for all sessions.
     ///
     /// This effectively marks all sessions as unsynced and is useful
-    /// for resetting sync state or testing.
-    #[allow(dead_code)]
+    /// for resetting sync state when switching cloud environments.
     pub fn clear_sync_status(&self) -> Result<usize> {
         let updated = self
             .conn
             .execute("UPDATE sessions SET synced_at = NULL", [])?;
         Ok(updated)
+    }
+
+    /// Clears the synced_at timestamp for specific sessions.
+    ///
+    /// This marks only the specified sessions as unsynced, useful for
+    /// selectively re-uploading sessions to the cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_ids` - The UUIDs of sessions to clear sync status for
+    ///
+    /// # Returns
+    ///
+    /// The number of sessions that were updated.
+    pub fn clear_sync_status_for_sessions(&self, session_ids: &[Uuid]) -> Result<usize> {
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut total_updated = 0;
+
+        for id in session_ids {
+            let updated = self.conn.execute(
+                "UPDATE sessions SET synced_at = NULL WHERE id = ?1",
+                params![id.to_string()],
+            )?;
+            total_updated += updated;
+        }
+
+        Ok(total_updated)
     }
 
     // ==================== Stats ====================
@@ -5475,5 +5504,108 @@ mod tests {
             retrieved.message_count, 10,
             "Message count should be updated"
         );
+    }
+
+    #[test]
+    fn test_clear_sync_status_all_sessions() {
+        let (db, _dir) = create_test_db();
+
+        // Create and insert multiple sessions
+        let session1 = create_test_session("claude-code", "/home/user/project1", Utc::now(), None);
+        let session2 = create_test_session("aider", "/home/user/project2", Utc::now(), None);
+        let session3 = create_test_session("cline", "/home/user/project3", Utc::now(), None);
+
+        db.insert_session(&session1)
+            .expect("Failed to insert session1");
+        db.insert_session(&session2)
+            .expect("Failed to insert session2");
+        db.insert_session(&session3)
+            .expect("Failed to insert session3");
+
+        // Mark all as synced
+        db.mark_sessions_synced(&[session1.id, session2.id, session3.id], Utc::now())
+            .expect("Failed to mark synced");
+
+        // Verify all are synced
+        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
+        assert_eq!(unsynced.len(), 0, "All sessions should be synced");
+
+        // Clear sync status for all
+        let count = db.clear_sync_status().expect("Failed to clear sync status");
+        assert_eq!(count, 3, "Should have cleared 3 sessions");
+
+        // Verify all are now unsynced
+        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
+        assert_eq!(unsynced.len(), 3, "All sessions should be unsynced now");
+    }
+
+    #[test]
+    fn test_clear_sync_status_for_specific_sessions() {
+        let (db, _dir) = create_test_db();
+
+        // Create and insert multiple sessions
+        let session1 = create_test_session("claude-code", "/home/user/project1", Utc::now(), None);
+        let session2 = create_test_session("aider", "/home/user/project2", Utc::now(), None);
+        let session3 = create_test_session("cline", "/home/user/project3", Utc::now(), None);
+
+        db.insert_session(&session1)
+            .expect("Failed to insert session1");
+        db.insert_session(&session2)
+            .expect("Failed to insert session2");
+        db.insert_session(&session3)
+            .expect("Failed to insert session3");
+
+        // Mark all as synced
+        db.mark_sessions_synced(&[session1.id, session2.id, session3.id], Utc::now())
+            .expect("Failed to mark synced");
+
+        // Verify all are synced
+        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
+        assert_eq!(unsynced.len(), 0, "All sessions should be synced");
+
+        // Clear sync status for only session1 and session3
+        let count = db
+            .clear_sync_status_for_sessions(&[session1.id, session3.id])
+            .expect("Failed to clear sync status");
+        assert_eq!(count, 2, "Should have cleared 2 sessions");
+
+        // Verify only session2 is still synced
+        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
+        assert_eq!(unsynced.len(), 2, "Two sessions should be unsynced");
+        assert!(
+            unsynced.iter().any(|s| s.id == session1.id),
+            "session1 should be unsynced"
+        );
+        assert!(
+            !unsynced.iter().any(|s| s.id == session2.id),
+            "session2 should still be synced"
+        );
+        assert!(
+            unsynced.iter().any(|s| s.id == session3.id),
+            "session3 should be unsynced"
+        );
+    }
+
+    #[test]
+    fn test_clear_sync_status_for_sessions_empty_list() {
+        let (db, _dir) = create_test_db();
+
+        // Clear sync status with empty list should return 0
+        let count = db
+            .clear_sync_status_for_sessions(&[])
+            .expect("Failed to clear sync status");
+        assert_eq!(count, 0, "Should return 0 for empty list");
+    }
+
+    #[test]
+    fn test_clear_sync_status_for_nonexistent_session() {
+        let (db, _dir) = create_test_db();
+
+        // Try to clear sync status for a session that does not exist
+        let fake_id = Uuid::new_v4();
+        let count = db
+            .clear_sync_status_for_sessions(&[fake_id])
+            .expect("Failed to clear sync status");
+        assert_eq!(count, 0, "Should return 0 for nonexistent session");
     }
 }
