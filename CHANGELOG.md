@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-01-24
+
+### Added
+
+- **Lore Cloud** - Sync sessions across machines with end-to-end encryption
+  - `lore login` - Browser-based OAuth authentication
+  - `lore logout` - Clear stored credentials and encryption key
+  - `lore cloud status` - View account info, sync status, and storage usage
+  - `lore cloud push` - Upload sessions to cloud (encrypted)
+  - `lore cloud pull` - Download sessions from cloud (decrypted)
+  - `lore cloud sync` - Bidirectional sync (pull then push)
+- **Client-side encryption** - Your session content is encrypted before upload
+  - Passphrase-based key derivation using Argon2id
+  - AES-256-GCM encryption for session data
+  - Cloud service cannot read your session content
+  - Encryption salt synced to cloud for multi-machine support
+- **Credential storage options** - Choose how credentials are stored
+  - File storage (default) - Simple, works everywhere
+  - OS Keychain - macOS Keychain, Windows Credential Manager, Linux Secret Service
+- **Daemon automatic cloud sync** - Sessions sync every 4 hours automatically
+  - No manual `lore cloud push` needed once configured
+  - Sync schedule persists across daemon restarts
+  - View next sync time with `lore cloud status`
+- **Login encryption setup** - Prompted to set up passphrase after `lore login`
+  - Enables immediate auto-sync without separate push command
+
+### Fixed
+
+- Continued sessions (e.g., `claude --continue`) now re-sync with new messages
+- Gemini session deduplication - Multiple files with same session ID no longer cause repeated syncs
+- Cloud salt error handling - Network errors no longer accidentally create new encryption salt
+
 ## [0.1.10] - 2026-01-13
 
 ### Added
