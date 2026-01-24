@@ -476,11 +476,11 @@ impl SessionWatcher {
         }
 
         // Run auto-linking if the session has ended
-        // This is the key fix: we now run auto-linking for updated sessions
-        if let Some(session) = updated_session {
+        if let Some(ref session) = updated_session {
             if let Some(ended_at) = session.ended_at {
-                // Only log if session was previously ongoing
-                if existing_session.ended_at.is_none() {
+                let session_just_ended = existing_session.ended_at.is_none();
+
+                if session_just_ended {
                     tracing::info!(
                         "Session {} has ended, running auto-link",
                         &session.id.to_string()[..8]

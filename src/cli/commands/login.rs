@@ -4,12 +4,15 @@
 //! API key in the OS keychain or a fallback credentials file.
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use colored::Colorize;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
+use crate::cloud::client::CloudClient;
 use crate::cloud::credentials::{Credentials, CredentialsStore};
+use crate::cloud::encryption::{derive_key, encode_key_hex};
 use crate::cloud::DEFAULT_CLOUD_URL;
 use crate::config::Config;
 
@@ -150,6 +153,15 @@ pub fn run(args: Args) -> Result<()> {
         credentials.plan
     );
 
+    // Prompt for auto-sync setup
+    println!();
+    if let Err(e) = prompt_auto_sync_setup(&credentials, &store, &mut config) {
+        // Log the error but don't fail the login - user can set up later
+        tracing::warn!("Auto-sync setup failed: {e}");
+        eprintln!("{} Could not set up auto-sync: {e}", "Warning:".yellow());
+        eprintln!("You can set it up later by running 'lore cloud push'.");
+    }
+
     Ok(())
 }
 
@@ -246,6 +258,151 @@ fn prompt_storage_preference() -> Result<bool> {
 /// On macOS and Windows, the keychain is always available.
 fn is_keychain_option_available() -> bool {
     CredentialsStore::is_secret_service_available()
+}
+
+/// Prompts the user to set up auto-sync with encryption passphrase.
+///
+/// If the user agrees, this will:
+/// 1. Check if an encryption salt exists on the cloud (fetch it if so)
+/// 2. Generate a new salt if needed
+/// 3. Prompt for passphrase with confirmation
+/// 4. Derive encryption key using Argon2id
+/// 5. Store the derived key locally
+/// 6. Sync salt to cloud if newly generated
+fn prompt_auto_sync_setup(
+    credentials: &Credentials,
+    store: &CredentialsStore,
+    config: &mut Config,
+) -> Result<()> {
+    println!(
+        "{}",
+        "Enable auto-sync? This will automatically push sessions to the cloud as you work.".bold()
+    );
+    print!("Enter encryption passphrase now? [Y/n]: ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let choice = input.trim().to_lowercase();
+
+    // Default to yes if empty or starts with y
+    if !choice.is_empty() && !choice.starts_with('y') {
+        println!();
+        println!(
+            "Auto-sync disabled. Run '{}' manually to sync sessions.",
+            "lore cloud push".cyan()
+        );
+        return Ok(());
+    }
+
+    if store.load_encryption_key()?.is_some() {
+        println!();
+        println!(
+            "{} Auto-sync already configured. Sessions will sync automatically.",
+            "OK".green()
+        );
+        return Ok(());
+    }
+
+    let client = CloudClient::with_url(&credentials.cloud_url).with_api_key(&credentials.api_key);
+
+    let cloud_salt = match client.get_salt() {
+        Ok(salt) => salt,
+        Err(e) => {
+            tracing::debug!("Could not fetch salt from cloud: {e}");
+            println!();
+            println!(
+                "{} Could not connect to cloud service: {e}",
+                "Warning:".yellow()
+            );
+            println!("Please check your network connection and try again later.");
+            return Ok(());
+        }
+    };
+
+    let (salt_b64, is_new_salt) = if let Some(ref existing_salt) = cloud_salt {
+        // Salt exists on cloud - use it
+        tracing::debug!("Using existing encryption salt from cloud");
+        // Also save it locally if not already present
+        if config.encryption_salt.is_none() {
+            config.encryption_salt = Some(existing_salt.clone());
+            config.save()?;
+        }
+        (existing_salt.clone(), false)
+    } else {
+        // No salt on cloud - generate new one
+        tracing::debug!("Generating new encryption salt");
+        (config.get_or_create_encryption_salt()?, true)
+    };
+
+    // Decode salt for key derivation
+    let salt = BASE64
+        .decode(&salt_b64)
+        .context("Invalid encryption salt encoding")?;
+
+    // Prompt for passphrase with confirmation
+    println!();
+    println!(
+        "{}",
+        "Your sessions will be encrypted with a passphrase that only you know.".dimmed()
+    );
+    println!(
+        "{}",
+        "The cloud service cannot read your session content.".dimmed()
+    );
+    println!();
+
+    let passphrase = prompt_new_passphrase()?;
+
+    // Derive encryption key
+    let key = derive_key(&passphrase, &salt).context("Failed to derive encryption key")?;
+
+    // Store the derived key
+    store
+        .store_encryption_key(&encode_key_hex(&key))
+        .context("Failed to store encryption key")?;
+
+    // Sync salt to cloud if we generated a new one
+    if is_new_salt {
+        if let Err(e) = client.set_salt(&salt_b64) {
+            tracing::debug!("Could not sync salt to cloud (may already exist): {e}");
+        }
+    }
+
+    println!();
+    println!(
+        "{} Auto-sync enabled. Sessions will sync automatically.",
+        "OK".green()
+    );
+
+    Ok(())
+}
+
+/// Prompts for a new passphrase with confirmation.
+///
+/// Requires at least 8 characters and matching confirmation entry.
+fn prompt_new_passphrase() -> Result<String> {
+    loop {
+        print!("Enter passphrase: ");
+        io::stdout().flush()?;
+        let passphrase = rpassword::read_password().context("Failed to read passphrase")?;
+
+        if passphrase.len() < 8 {
+            println!("{}", "Passphrase must be at least 8 characters.".red());
+            continue;
+        }
+
+        print!("Confirm passphrase: ");
+        io::stdout().flush()?;
+        let confirm = rpassword::read_password().context("Failed to read passphrase")?;
+
+        if passphrase != confirm {
+            println!("{}", "Passphrases do not match.".red());
+            continue;
+        }
+
+        return Ok(passphrase);
+    }
 }
 
 /// Generates a random state string for CSRF protection.
