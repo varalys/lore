@@ -257,9 +257,56 @@ pub struct ParsedGeminiMessage {
     pub content: String,
 }
 
-/// Discovers all Gemini session files.
+/// Extracts the session ID from a Gemini session filename.
+///
+/// Gemini creates files with the pattern `session-{timestamp}-{session_id}.json`.
+/// Multiple files can share the same session ID but have different timestamps
+/// (and message counts). This function extracts the session ID portion.
+///
+/// Returns `None` if the filename does not match the expected pattern.
+fn extract_session_id_from_filename(filename: &str) -> Option<&str> {
+    // Pattern: session-{timestamp}-{session_id}.json
+    // Example: session-1737651044-1b872dcc.json -> 1b872dcc
+    let without_ext = filename.strip_suffix(".json")?;
+    let without_prefix = without_ext.strip_prefix("session-")?;
+    // Find the last hyphen to get the session ID
+    let last_hyphen = without_prefix.rfind('-')?;
+    Some(&without_prefix[last_hyphen + 1..])
+}
+
+/// Counts messages in a Gemini session file without fully parsing it.
+///
+/// This is a lightweight check used for deduplication. It reads the JSON
+/// and counts only the message array length.
+fn count_messages_in_file(path: &Path) -> usize {
+    // Try to parse just enough to count messages
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+
+    // Use a minimal struct to just get the message count
+    #[derive(Deserialize)]
+    struct MinimalSession {
+        #[serde(default)]
+        messages: Vec<serde_json::Value>,
+    }
+
+    match serde_json::from_str::<MinimalSession>(&content) {
+        Ok(session) => session.messages.len(),
+        Err(_) => 0,
+    }
+}
+
+/// Discovers all Gemini session files, deduplicating by session ID.
 ///
 /// Scans `~/.gemini/tmp/*/chats/` for `session-*.json` files.
+///
+/// Gemini creates multiple files with the same session ID but different
+/// timestamps as the session progresses (e.g., session-1737651044-1b872dcc.json,
+/// session-1737651054-1b872dcc.json). To avoid processing duplicate sessions
+/// with varying message counts, this function keeps only the file with the
+/// most messages for each unique session ID.
 pub fn find_gemini_session_files() -> Result<Vec<PathBuf>> {
     let base_dir = gemini_base_dir();
 
@@ -267,7 +314,8 @@ pub fn find_gemini_session_files() -> Result<Vec<PathBuf>> {
         return Ok(Vec::new());
     }
 
-    let mut files = Vec::new();
+    // Collect all session files first
+    let mut all_files = Vec::new();
 
     // Walk the directory tree: tmp/<project-hash>/chats/session-*.json
     for project_entry in std::fs::read_dir(&base_dir)? {
@@ -288,13 +336,57 @@ pub fn find_gemini_session_files() -> Result<Vec<PathBuf>> {
 
             if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with("session-") && name.ends_with(".json") {
-                    files.push(file_path);
+                    all_files.push(file_path);
                 }
             }
         }
     }
 
-    Ok(files)
+    // Deduplicate: group by session ID, keep the file with most messages
+    deduplicate_session_files(all_files)
+}
+
+/// Deduplicates session files by session ID, keeping the file with the most messages.
+///
+/// Groups files by their session ID (extracted from filename) and returns only
+/// the file with the highest message count for each group.
+fn deduplicate_session_files(files: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    use std::collections::HashMap;
+
+    // Map: session_id -> (path, message_count)
+    let mut best_by_session: HashMap<String, (PathBuf, usize)> = HashMap::new();
+
+    for path in files {
+        let filename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+
+        let session_id = match extract_session_id_from_filename(filename) {
+            Some(id) => id.to_string(),
+            None => {
+                // If we cannot extract a session ID, treat the whole filename as unique
+                filename.to_string()
+            }
+        };
+
+        let message_count = count_messages_in_file(&path);
+
+        match best_by_session.get(&session_id) {
+            Some((_, existing_count)) if *existing_count >= message_count => {
+                // Current file has fewer or equal messages, skip it
+            }
+            _ => {
+                // This file has more messages (or is the first we've seen)
+                best_by_session.insert(session_id, (path, message_count));
+            }
+        }
+    }
+
+    // Extract just the paths
+    let deduplicated: Vec<PathBuf> = best_by_session.into_values().map(|(path, _)| path).collect();
+
+    Ok(deduplicated)
 }
 
 #[cfg(test)]
@@ -618,5 +710,131 @@ mod tests {
 
         // Working directory should default to "."
         assert_eq!(session.working_directory, ".");
+    }
+
+    #[test]
+    fn test_extract_session_id_from_filename() {
+        // Standard pattern: session-{timestamp}-{session_id}.json
+        assert_eq!(
+            extract_session_id_from_filename("session-1737651044-1b872dcc.json"),
+            Some("1b872dcc")
+        );
+        assert_eq!(
+            extract_session_id_from_filename("session-1737651054-1b872dcc.json"),
+            Some("1b872dcc")
+        );
+        assert_eq!(
+            extract_session_id_from_filename("session-1737651059-1b872dcc.json"),
+            Some("1b872dcc")
+        );
+
+        // Different session IDs
+        assert_eq!(
+            extract_session_id_from_filename("session-1234567890-abcdef12.json"),
+            Some("abcdef12")
+        );
+
+        // Edge cases
+        assert_eq!(extract_session_id_from_filename("session-.json"), None);
+        assert_eq!(extract_session_id_from_filename("session-123.json"), None);
+        assert_eq!(extract_session_id_from_filename("other-file.json"), None);
+        assert_eq!(extract_session_id_from_filename("session-123-abc"), None);
+        assert_eq!(extract_session_id_from_filename(""), None);
+    }
+
+    #[test]
+    fn test_count_messages_in_file() {
+        // File with 2 messages
+        let json = make_session_json(
+            "test",
+            "hash",
+            r#"[{"type": "user", "content": "Hello"}, {"type": "gemini", "content": "Hi"}]"#,
+        );
+        let file = create_temp_session_file(&json);
+        assert_eq!(count_messages_in_file(file.path()), 2);
+
+        // File with 0 messages
+        let json_empty = make_session_json("test", "hash", "[]");
+        let file_empty = create_temp_session_file(&json_empty);
+        assert_eq!(count_messages_in_file(file_empty.path()), 0);
+
+        // Non-existent file returns 0
+        assert_eq!(count_messages_in_file(Path::new("/nonexistent/file.json")), 0);
+    }
+
+    #[test]
+    fn test_deduplicate_session_files() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
+        // Create files simulating Gemini's behavior: same session ID, different timestamps
+        // File 1: session-1737651044-1b872dcc.json with 1 message
+        let path1 = temp_dir.path().join("session-1737651044-1b872dcc.json");
+        let json1 = make_session_json(
+            "1b872dcc",
+            "hash",
+            r#"[{"type": "user", "content": "Hello"}]"#,
+        );
+        std::fs::write(&path1, &json1).expect("Failed to write file 1");
+
+        // File 2: session-1737651054-1b872dcc.json with 2 messages (should be kept)
+        let path2 = temp_dir.path().join("session-1737651054-1b872dcc.json");
+        let json2 = make_session_json(
+            "1b872dcc",
+            "hash",
+            r#"[{"type": "user", "content": "Hello"}, {"type": "gemini", "content": "Hi"}]"#,
+        );
+        std::fs::write(&path2, &json2).expect("Failed to write file 2");
+
+        // File 3: session-1737651059-1b872dcc.json with 1 message
+        let path3 = temp_dir.path().join("session-1737651059-1b872dcc.json");
+        let json3 = make_session_json(
+            "1b872dcc",
+            "hash",
+            r#"[{"type": "user", "content": "Goodbye"}]"#,
+        );
+        std::fs::write(&path3, &json3).expect("Failed to write file 3");
+
+        // File 4: Different session ID, should be kept
+        let path4 = temp_dir.path().join("session-1737651044-different.json");
+        let json4 = make_session_json(
+            "different",
+            "hash",
+            r#"[{"type": "user", "content": "Other session"}]"#,
+        );
+        std::fs::write(&path4, &json4).expect("Failed to write file 4");
+
+        let files = vec![path1.clone(), path2.clone(), path3.clone(), path4.clone()];
+        let result = deduplicate_session_files(files).expect("Should deduplicate");
+
+        // Should have 2 files: one for 1b872dcc (the one with 2 messages) and one for different
+        assert_eq!(result.len(), 2);
+
+        // Verify path2 (with most messages for 1b872dcc) is in the result
+        assert!(result.contains(&path2), "Should keep file with most messages");
+        assert!(result.contains(&path4), "Should keep different session");
+        assert!(!result.contains(&path1), "Should not keep file with fewer messages");
+        assert!(!result.contains(&path3), "Should not keep file with fewer messages");
+    }
+
+    #[test]
+    fn test_deduplicate_session_files_empty() {
+        let result = deduplicate_session_files(vec![]).expect("Should handle empty");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_deduplicate_session_files_single() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let path = temp_dir.path().join("session-1234-abc.json");
+        let json = make_session_json("abc", "hash", r#"[{"type": "user", "content": "Hello"}]"#);
+        std::fs::write(&path, &json).expect("Failed to write file");
+
+        let result = deduplicate_session_files(vec![path.clone()]).expect("Should deduplicate");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], path);
     }
 }
