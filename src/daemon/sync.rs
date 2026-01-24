@@ -48,27 +48,34 @@ impl SyncState {
         Ok(lore_dir.join("daemon_state.json"))
     }
 
-    /// Loads the sync state from disk.
+    /// Loads the sync state from a specific path.
     ///
     /// Returns the default state if the file does not exist.
-    pub fn load() -> Result<Self> {
-        let path = Self::state_path()?;
+    pub fn load_from_path(path: &std::path::Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
 
-        let content = fs::read_to_string(&path).context("Failed to read sync state file")?;
+        let content = fs::read_to_string(path).context("Failed to read sync state file")?;
         let state: SyncState =
             serde_json::from_str(&content).context("Failed to parse sync state file")?;
         Ok(state)
     }
 
-    /// Saves the sync state to disk atomically.
-    fn save(&self) -> Result<()> {
+    /// Loads the sync state from disk.
+    ///
+    /// Returns the default state if the file does not exist.
+    pub fn load() -> Result<Self> {
         let path = Self::state_path()?;
+        Self::load_from_path(&path)
+    }
 
+    /// Saves the sync state to a specific path atomically.
+    ///
+    /// Creates parent directories if they do not exist.
+    pub fn save_to_path(&self, path: &std::path::Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).context("Failed to create .lore directory")?;
+            fs::create_dir_all(parent).context("Failed to create parent directory")?;
         }
 
         let content = serde_json::to_string_pretty(self)?;
@@ -80,12 +87,18 @@ impl SyncState {
 
         #[cfg(windows)]
         if path.exists() {
-            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(path);
         }
 
-        fs::rename(&temp_path, &path).context("Failed to rename sync state file")?;
+        fs::rename(&temp_path, path).context("Failed to rename sync state file")?;
 
         Ok(())
+    }
+
+    /// Saves the sync state to disk atomically.
+    fn save(&self) -> Result<()> {
+        let path = Self::state_path()?;
+        self.save_to_path(&path)
     }
 
     /// Updates the state with next sync time and saves.
@@ -414,11 +427,9 @@ mod tests {
             last_sync_success: Some(true),
         };
 
-        let content = serde_json::to_string_pretty(&state).unwrap();
-        fs::write(&state_path, &content).unwrap();
+        state.save_to_path(&state_path).unwrap();
 
-        let loaded_content = fs::read_to_string(&state_path).unwrap();
-        let loaded: SyncState = serde_json::from_str(&loaded_content).unwrap();
+        let loaded = SyncState::load_from_path(&state_path).unwrap();
 
         assert_eq!(loaded.last_sync_count, Some(5));
         assert_eq!(loaded.last_sync_success, Some(true));
@@ -438,14 +449,15 @@ mod tests {
         let parent = nested_path.parent().unwrap();
         assert!(!parent.exists());
 
-        fs::create_dir_all(parent).unwrap();
-        assert!(parent.exists());
-
         let state = SyncState::default();
-        let content = serde_json::to_string_pretty(&state).unwrap();
-        fs::write(&nested_path, &content).unwrap();
+        state.save_to_path(&nested_path).unwrap();
 
+        assert!(parent.exists());
         assert!(nested_path.exists());
+
+        // Verify we can load it back
+        let loaded = SyncState::load_from_path(&nested_path).unwrap();
+        assert!(loaded.last_sync_at.is_none());
     }
 
     #[test]
@@ -503,24 +515,26 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let state_path = temp_dir.path().join("daemon_state.json");
 
+        // Save initial state
         let state1 = SyncState {
             last_sync_count: Some(1),
             ..Default::default()
         };
-        let content1 = serde_json::to_string_pretty(&state1).unwrap();
-        fs::write(&state_path, &content1).unwrap();
+        state1.save_to_path(&state_path).unwrap();
 
+        // Verify initial state
+        let loaded1 = SyncState::load_from_path(&state_path).unwrap();
+        assert_eq!(loaded1.last_sync_count, Some(1));
+
+        // Overwrite with new state (tests atomic rename behavior)
         let state2 = SyncState {
             last_sync_count: Some(2),
             ..Default::default()
         };
-        let content2 = serde_json::to_string_pretty(&state2).unwrap();
-        let temp_path = state_path.with_extension("json.tmp");
-        fs::write(&temp_path, &content2).unwrap();
-        fs::rename(&temp_path, &state_path).unwrap();
+        state2.save_to_path(&state_path).unwrap();
 
-        let loaded_content = fs::read_to_string(&state_path).unwrap();
-        let loaded: SyncState = serde_json::from_str(&loaded_content).unwrap();
-        assert_eq!(loaded.last_sync_count, Some(2));
+        // Verify overwritten state
+        let loaded2 = SyncState::load_from_path(&state_path).unwrap();
+        assert_eq!(loaded2.last_sync_count, Some(2));
     }
 }
