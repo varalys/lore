@@ -305,8 +305,8 @@ impl Database {
     /// Inserts a new session or updates an existing one.
     ///
     /// If a session with the same ID already exists, updates the `ended_at`
-    /// and `message_count` fields. Only resets `synced_at` to NULL if the
-    /// message_count has changed (indicating new messages that need re-sync).
+    /// and `message_count` fields. Resets `synced_at` to NULL if either the
+    /// message_count or ended_at has changed (indicating updates that need re-sync).
     /// Also updates the sessions_fts index for full-text search on session metadata.
     pub fn insert_session(&self, session: &Session) -> Result<()> {
         let rows_changed = self.conn.execute(
@@ -316,7 +316,13 @@ impl Database {
             ON CONFLICT(id) DO UPDATE SET
                 ended_at = ?5,
                 message_count = ?10,
-                synced_at = CASE WHEN message_count != ?10 THEN NULL ELSE synced_at END
+                synced_at = CASE
+                    WHEN message_count != ?10 THEN NULL
+                    WHEN (ended_at IS NULL AND ?5 IS NOT NULL) THEN NULL
+                    WHEN (ended_at IS NOT NULL AND ?5 IS NULL) THEN NULL
+                    WHEN ended_at != ?5 THEN NULL
+                    ELSE synced_at
+                END
             "#,
             params![
                 session.id.to_string(),

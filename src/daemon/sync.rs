@@ -66,11 +66,23 @@ impl SyncState {
     /// Saves the sync state to disk atomically.
     fn save(&self) -> Result<()> {
         let path = Self::state_path()?;
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).context("Failed to create .lore directory")?;
+        }
+
         let content = serde_json::to_string_pretty(self)?;
 
-        // Write to a temp file first, then rename for atomicity
+        // Write to temp file first, then rename for atomicity.
+        // On Windows, rename fails if target exists, so remove it first.
         let temp_path = path.with_extension("json.tmp");
         fs::write(&temp_path, &content).context("Failed to write sync state temp file")?;
+
+        #[cfg(windows)]
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+
         fs::rename(&temp_path, &path).context("Failed to rename sync state file")?;
 
         Ok(())
@@ -127,10 +139,17 @@ pub async fn run_periodic_sync(
     sync_state: SharedSyncState,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
-    // Initialize state with next sync time
     {
         let mut state = sync_state.write().await;
-        let next_sync = calculate_next_sync(&state);
+        let next_sync = if let Some(persisted_next) = state.next_sync_at {
+            if persisted_next > Utc::now() {
+                persisted_next
+            } else {
+                calculate_next_sync(&state)
+            }
+        } else {
+            calculate_next_sync(&state)
+        };
         if let Err(e) = state.schedule_next(next_sync) {
             tracing::warn!("Failed to save initial sync state: {e}");
         } else {
@@ -141,7 +160,6 @@ pub async fn run_periodic_sync(
         }
     }
 
-    // Check every minute if it's time to sync
     let mut check_interval = interval(Duration::from_secs(60));
 
     loop {
@@ -190,13 +208,19 @@ pub async fn run_periodic_sync(
 /// Returns the number of sessions synced, or an error if sync cannot proceed
 /// (e.g., not logged in, no encryption key).
 async fn perform_sync() -> Result<u64> {
-    // Load config to check login status and keychain preference
+    tokio::task::spawn_blocking(perform_sync_blocking)
+        .await
+        .context("Sync task panicked")?
+}
+
+/// Blocking implementation of sync operation.
+///
+/// This runs in a blocking thread pool to avoid stalling tokio worker threads.
+fn perform_sync_blocking() -> Result<u64> {
     let config = Config::load().context("Could not load config")?;
 
-    // Create credentials store with user's preference
     let store = CredentialsStore::with_keychain(config.use_keychain);
 
-    // Check if user is logged in
     let credentials = match store.load()? {
         Some(creds) => creds,
         None => {
@@ -204,7 +228,6 @@ async fn perform_sync() -> Result<u64> {
         }
     };
 
-    // Check if encryption key is available
     let encryption_key = match store.load_encryption_key()? {
         Some(key_hex) => decode_key_hex(&key_hex)?,
         None => {
@@ -212,7 +235,6 @@ async fn perform_sync() -> Result<u64> {
         }
     };
 
-    // Get machine ID
     let machine_id = match config.machine_id.clone() {
         Some(id) => id,
         None => {
@@ -220,10 +242,8 @@ async fn perform_sync() -> Result<u64> {
         }
     };
 
-    // Open database
     let db = Database::open_default().context("Could not open database")?;
 
-    // Get unsynced sessions
     let sessions = db.get_unsynced_sessions()?;
     if sessions.is_empty() {
         tracing::debug!("No sessions to sync");
@@ -232,10 +252,8 @@ async fn perform_sync() -> Result<u64> {
 
     tracing::info!("Found {} sessions to sync", sessions.len());
 
-    // Create cloud client
     let client = CloudClient::with_url(&credentials.cloud_url).with_api_key(&credentials.api_key);
 
-    // Prepare session data
     let session_data: Vec<_> = sessions
         .iter()
         .filter_map(|session| match db.get_messages(&session.id) {
@@ -251,7 +269,6 @@ async fn perform_sync() -> Result<u64> {
         })
         .collect();
 
-    // Process in batches
     let mut total_synced: u64 = 0;
 
     for batch in session_data.chunks(PUSH_BATCH_SIZE) {
@@ -276,7 +293,6 @@ async fn perform_sync() -> Result<u64> {
 
         match client.push(push_sessions.clone()) {
             Ok(response) => {
-                // Mark sessions in this batch as synced
                 let batch_session_ids: Vec<_> = push_sessions
                     .iter()
                     .filter_map(|ps| uuid::Uuid::parse_str(&ps.id).ok())
@@ -290,7 +306,6 @@ async fn perform_sync() -> Result<u64> {
             }
             Err(e) => {
                 let error_str = e.to_string();
-                // Stop on quota errors
                 if error_str.contains("quota")
                     || error_str.contains("Would exceed session limit")
                     || (error_str.contains("403") && error_str.contains("limit"))
@@ -316,6 +331,7 @@ fn encrypt_session_messages(messages: &[Message], key: &[u8]) -> Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_sync_state_default() {
@@ -331,7 +347,6 @@ mod tests {
         let state = SyncState::default();
         let next = calculate_next_sync(&state);
 
-        // Should be approximately 4 hours from now
         let expected = Utc::now() + chrono::Duration::hours(SYNC_INTERVAL_HOURS as i64);
         let diff = (next - expected).num_seconds().abs();
         assert!(diff < 5, "Next sync should be ~4 hours from now");
@@ -347,7 +362,6 @@ mod tests {
 
         let next = calculate_next_sync(&state);
 
-        // Should be 4 hours after the last sync (3 hours from now)
         let expected = last_sync + chrono::Duration::hours(SYNC_INTERVAL_HOURS as i64);
         let diff = (next - expected).num_seconds().abs();
         assert!(diff < 5, "Next sync should be 4 hours after last sync");
@@ -355,7 +369,6 @@ mod tests {
 
     #[test]
     fn test_calculate_next_sync_with_old_previous() {
-        // Last sync was 10 hours ago
         let state = SyncState {
             last_sync_at: Some(Utc::now() - chrono::Duration::hours(10)),
             ..Default::default()
@@ -363,7 +376,6 @@ mod tests {
 
         let next = calculate_next_sync(&state);
 
-        // Since last + interval is in the past, should be 4 hours from now
         let expected = Utc::now() + chrono::Duration::hours(SYNC_INTERVAL_HOURS as i64);
         let diff = (next - expected).num_seconds().abs();
         assert!(
@@ -388,5 +400,127 @@ mod tests {
         assert!(parsed.next_sync_at.is_some());
         assert_eq!(parsed.last_sync_count, Some(10));
         assert_eq!(parsed.last_sync_success, Some(true));
+    }
+
+    #[test]
+    fn test_sync_state_save_load_round_trip() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("daemon_state.json");
+
+        let state = SyncState {
+            last_sync_at: Some(Utc::now()),
+            next_sync_at: Some(Utc::now() + chrono::Duration::hours(4)),
+            last_sync_count: Some(5),
+            last_sync_success: Some(true),
+        };
+
+        let content = serde_json::to_string_pretty(&state).unwrap();
+        fs::write(&state_path, &content).unwrap();
+
+        let loaded_content = fs::read_to_string(&state_path).unwrap();
+        let loaded: SyncState = serde_json::from_str(&loaded_content).unwrap();
+
+        assert_eq!(loaded.last_sync_count, Some(5));
+        assert_eq!(loaded.last_sync_success, Some(true));
+        assert!(loaded.next_sync_at.is_some());
+        assert!(loaded.last_sync_at.is_some());
+    }
+
+    #[test]
+    fn test_sync_state_save_creates_parent_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let nested_path = temp_dir
+            .path()
+            .join("nested")
+            .join("deep")
+            .join("state.json");
+
+        let parent = nested_path.parent().unwrap();
+        assert!(!parent.exists());
+
+        fs::create_dir_all(parent).unwrap();
+        assert!(parent.exists());
+
+        let state = SyncState::default();
+        let content = serde_json::to_string_pretty(&state).unwrap();
+        fs::write(&nested_path, &content).unwrap();
+
+        assert!(nested_path.exists());
+    }
+
+    #[test]
+    fn test_persisted_next_sync_at_respected_when_future() {
+        let future_time = Utc::now() + chrono::Duration::hours(2);
+        let state = SyncState {
+            last_sync_at: Some(Utc::now() - chrono::Duration::hours(1)),
+            next_sync_at: Some(future_time),
+            last_sync_count: Some(3),
+            last_sync_success: Some(true),
+        };
+
+        let next_sync = if let Some(persisted_next) = state.next_sync_at {
+            if persisted_next > Utc::now() {
+                persisted_next
+            } else {
+                calculate_next_sync(&state)
+            }
+        } else {
+            calculate_next_sync(&state)
+        };
+
+        let diff = (next_sync - future_time).num_seconds().abs();
+        assert!(diff < 1, "Should use persisted next_sync_at when in future");
+    }
+
+    #[test]
+    fn test_persisted_next_sync_at_recalculated_when_past() {
+        let past_time = Utc::now() - chrono::Duration::hours(1);
+        let state = SyncState {
+            last_sync_at: Some(Utc::now() - chrono::Duration::hours(2)),
+            next_sync_at: Some(past_time),
+            last_sync_count: Some(3),
+            last_sync_success: Some(true),
+        };
+
+        let next_sync = if let Some(persisted_next) = state.next_sync_at {
+            if persisted_next > Utc::now() {
+                persisted_next
+            } else {
+                calculate_next_sync(&state)
+            }
+        } else {
+            calculate_next_sync(&state)
+        };
+
+        assert!(
+            next_sync > Utc::now(),
+            "Should recalculate when persisted next_sync_at is in the past"
+        );
+    }
+
+    #[test]
+    fn test_sync_state_atomic_save_overwrites() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("daemon_state.json");
+
+        let state1 = SyncState {
+            last_sync_count: Some(1),
+            ..Default::default()
+        };
+        let content1 = serde_json::to_string_pretty(&state1).unwrap();
+        fs::write(&state_path, &content1).unwrap();
+
+        let state2 = SyncState {
+            last_sync_count: Some(2),
+            ..Default::default()
+        };
+        let content2 = serde_json::to_string_pretty(&state2).unwrap();
+        let temp_path = state_path.with_extension("json.tmp");
+        fs::write(&temp_path, &content2).unwrap();
+        fs::rename(&temp_path, &state_path).unwrap();
+
+        let loaded_content = fs::read_to_string(&state_path).unwrap();
+        let loaded: SyncState = serde_json::from_str(&loaded_content).unwrap();
+        assert_eq!(loaded.last_sync_count, Some(2));
     }
 }

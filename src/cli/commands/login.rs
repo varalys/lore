@@ -295,7 +295,6 @@ fn prompt_auto_sync_setup(
         return Ok(());
     }
 
-    // Check if encryption key is already set
     if store.load_encryption_key()?.is_some() {
         println!();
         println!(
@@ -305,15 +304,19 @@ fn prompt_auto_sync_setup(
         return Ok(());
     }
 
-    // Create cloud client to check/set salt
     let client = CloudClient::with_url(&credentials.cloud_url).with_api_key(&credentials.api_key);
 
-    // Check if salt exists on cloud
     let cloud_salt = match client.get_salt() {
         Ok(salt) => salt,
         Err(e) => {
             tracing::debug!("Could not fetch salt from cloud: {e}");
-            None
+            println!();
+            println!(
+                "{} Could not connect to cloud service: {e}",
+                "Warning:".yellow()
+            );
+            println!("Please check your network connection and try again later.");
+            return Ok(());
         }
     };
 

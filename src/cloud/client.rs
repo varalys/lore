@@ -154,6 +154,7 @@ impl CloudClient {
     /// Gets the encryption salt from the cloud service.
     ///
     /// Returns the base64-encoded salt if set, or None if not yet configured.
+    /// Returns Ok(None) for 404 responses (salt not set), Err for other failures.
     pub fn get_salt(&self) -> Result<Option<String>, CloudError> {
         let api_key = self.api_key.as_ref().ok_or(CloudError::NotLoggedIn)?;
 
@@ -164,12 +165,19 @@ impl CloudClient {
             .header("Authorization", format!("Bearer {api_key}"))
             .send()?;
 
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
+        let status = response.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+
+        if !status.is_success() {
             let message = response
                 .text()
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(CloudError::ServerError { status, message });
+            return Err(CloudError::ServerError {
+                status: status.as_u16(),
+                message,
+            });
         }
 
         let body: ApiResponse<SaltResponse> = response.json()?;
