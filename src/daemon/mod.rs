@@ -7,14 +7,16 @@
 //! - Incremental parsing of session files
 //! - Unix socket IPC for CLI communication
 //! - Graceful shutdown handling
+//! - Periodic cloud sync (every 4 hours)
 //!
 //! # Architecture
 //!
-//! The daemon consists of three main components:
+//! The daemon consists of four main components:
 //!
 //! - **Watcher**: Monitors the file system for new/modified session files
 //! - **Server**: Handles IPC commands from CLI (status, stop, stats)
 //! - **State**: Manages PID file, socket path, and runtime state
+//! - **Sync**: Periodic cloud synchronization of pending sessions
 //!
 //! # Usage
 //!
@@ -24,6 +26,7 @@
 
 pub mod server;
 pub mod state;
+pub mod sync;
 pub mod watcher;
 
 use anyhow::Result;
@@ -37,6 +40,9 @@ use crate::config::Config;
 pub use server::{send_command_sync, DaemonCommand, DaemonResponse};
 pub use state::{DaemonState, DaemonStats};
 pub use watcher::SessionWatcher;
+
+// Re-export SyncState for use by cloud status command
+pub use sync::SyncState;
 
 /// Runs the daemon in the foreground.
 ///
@@ -93,6 +99,9 @@ pub async fn run_daemon() -> Result<()> {
     // Create shared stats
     let stats = Arc::new(RwLock::new(DaemonStats::default()));
 
+    // Create shared sync state
+    let sync_state = Arc::new(RwLock::new(sync::SyncState::load().unwrap_or_default()));
+
     // Create shutdown channels
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let (broadcast_tx, _) = tokio::sync::broadcast::channel::<()>(1);
@@ -124,6 +133,12 @@ pub async fn run_daemon() -> Result<()> {
         }
     });
 
+    // Start the periodic sync timer
+    let sync_broadcast_rx = broadcast_tx.subscribe();
+    let sync_handle = tokio::spawn(async move {
+        sync::run_periodic_sync(sync_state, sync_broadcast_rx).await;
+    });
+
     // Wait for shutdown signal
     tokio::select! {
         _ = signal::ctrl_c() => {
@@ -143,6 +158,7 @@ pub async fn run_daemon() -> Result<()> {
     // Abort handles if they haven't finished
     server_handle.abort();
     watcher_handle.abort();
+    sync_handle.abort();
 
     // Clean up state files
     state.cleanup()?;

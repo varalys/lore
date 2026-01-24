@@ -19,12 +19,8 @@ use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
 use crate::capture::watchers::{default_registry, Watcher};
-use crate::cloud::client::{CloudClient, PushSession, SessionMetadata};
-use crate::cloud::credentials::CredentialsStore;
-use crate::cloud::encryption::{decode_key_hex, encode_base64, encrypt_data};
-use crate::config::Config;
 use crate::git::get_commits_in_time_range;
-use crate::storage::models::{LinkCreator, LinkType, Message, Session, SessionLink};
+use crate::storage::models::{LinkCreator, LinkType, SessionLink};
 use crate::storage::Database;
 
 use super::state::DaemonStats;
@@ -392,11 +388,6 @@ impl SessionWatcher {
     ) -> Result<(u64, u64)> {
         tracing::debug!("Updating existing session from: {:?}", path);
 
-        // Check if session was already synced BEFORE insert_session resets synced_at
-        // This allows us to push sessions that were never synced (e.g., ended while
-        // old daemon was running) but not re-push already-synced sessions
-        let was_already_synced = db.is_session_synced(existing_session.id).unwrap_or(false);
-
         let path_buf = path.to_path_buf();
         let registry = default_registry();
         let available = registry.available_watchers();
@@ -484,8 +475,7 @@ impl SessionWatcher {
             updated_session = Some(session);
         }
 
-        // Run auto-linking and auto-push if the session has ended
-        // This is the key fix: we now run auto-linking for updated sessions
+        // Run auto-linking if the session has ended
         if let Some(ref session) = updated_session {
             if let Some(ended_at) = session.ended_at {
                 let session_just_ended = existing_session.ended_at.is_none();
@@ -510,16 +500,6 @@ impl SessionWatcher {
                         &session.id.to_string()[..8],
                         e
                     );
-                }
-
-                // Auto-push to cloud if:
-                // 1. Session just ended (real-time sync), OR
-                // 2. Session was ended but never synced (catching up on backlog)
-                // Skip if session was already synced (avoid re-pushing)
-                if !was_already_synced {
-                    if let Ok(all_messages) = db.get_messages(&session.id) {
-                        self.auto_push_session(db, session, &all_messages);
-                    }
                 }
             }
         }
@@ -583,11 +563,6 @@ impl SessionWatcher {
 
             let message_count = messages.len();
 
-            // Check if session was already synced BEFORE insert_session resets synced_at
-            // This handles the case where a session exists in DB (from CLI import) but
-            // get_session_by_source didn't find it (different source_path format)
-            let was_already_synced = db.is_session_synced(session.id).unwrap_or(false);
-
             // Store session
             db.insert_session(&session)?;
 
@@ -643,12 +618,6 @@ impl SessionWatcher {
                         &session.id.to_string()[..8],
                         e
                     );
-                }
-
-                // Auto-push to cloud if not already synced
-                // Skip if session was already synced (avoid re-pushing)
-                if !was_already_synced {
-                    self.auto_push_session(db, &session, &messages);
                 }
             }
 
@@ -765,162 +734,6 @@ impl SessionWatcher {
         Ok(linked_count)
     }
 
-    /// Automatically pushes a session to the cloud if configured.
-    ///
-    /// This function silently returns without action if:
-    /// - User is not logged in
-    /// - Encryption key is not configured
-    /// - Any error occurs during push (logged at WARN level)
-    ///
-    /// This is designed to be non-blocking and fail-safe - it should never
-    /// crash the daemon or block file watching.
-    ///
-    /// # Arguments
-    ///
-    /// * `db` - Database connection for reading session data
-    /// * `session` - The session to push
-    /// * `messages` - The messages for this session
-    fn auto_push_session(&self, db: &Database, session: &Session, messages: &[Message]) {
-        // Check if session is already synced to avoid re-pushing on daemon restart
-        match db.is_session_synced(session.id) {
-            Ok(true) => {
-                tracing::debug!(
-                    "Auto-push: session {} already synced, skipping",
-                    &session.id.to_string()[..8]
-                );
-                return;
-            }
-            Ok(false) => {} // Continue with push
-            Err(e) => {
-                tracing::debug!("Auto-push: could not check sync status: {e}");
-                return;
-            }
-        }
-
-        // Load config to check login status and keychain preference
-        let config = match Config::load() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::debug!("Auto-push: could not load config: {e}");
-                return;
-            }
-        };
-
-        // Create credentials store with user's preference
-        let store = CredentialsStore::with_keychain(config.use_keychain);
-
-        // Check if user is logged in
-        let credentials = match store.load() {
-            Ok(Some(creds)) => creds,
-            Ok(None) => {
-                tracing::debug!("Auto-push: not logged in, skipping");
-                return;
-            }
-            Err(e) => {
-                tracing::debug!("Auto-push: could not load credentials: {e}");
-                return;
-            }
-        };
-
-        // Check if encryption key is available
-        let encryption_key = match store.load_encryption_key() {
-            Ok(Some(key_hex)) => match decode_key_hex(&key_hex) {
-                Ok(key) => key,
-                Err(e) => {
-                    tracing::debug!("Auto-push: invalid encryption key: {e}");
-                    return;
-                }
-            },
-            Ok(None) => {
-                tracing::debug!("Auto-push: encryption key not configured, skipping");
-                return;
-            }
-            Err(e) => {
-                tracing::debug!("Auto-push: could not load encryption key: {e}");
-                return;
-            }
-        };
-
-        // Get machine ID
-        let machine_id = match config.machine_id.clone() {
-            Some(id) => id,
-            None => {
-                tracing::debug!("Auto-push: no machine ID configured, skipping");
-                return;
-            }
-        };
-
-        // Encrypt session messages
-        let encrypted_data = match encrypt_session_messages(messages, &encryption_key) {
-            Ok(data) => data,
-            Err(e) => {
-                tracing::warn!(
-                    "Auto-push: failed to encrypt session {}: {}",
-                    &session.id.to_string()[..8],
-                    e
-                );
-                return;
-            }
-        };
-
-        // Create the push session
-        let push_session = PushSession {
-            id: session.id.to_string(),
-            machine_id,
-            encrypted_data,
-            metadata: SessionMetadata {
-                tool_name: session.tool.clone(),
-                project_path: session.working_directory.clone(),
-                started_at: session.started_at,
-                ended_at: session.ended_at,
-                message_count: session.message_count,
-            },
-            updated_at: session.ended_at.unwrap_or_else(Utc::now),
-        };
-
-        // Create cloud client and push
-        let client =
-            CloudClient::with_url(&credentials.cloud_url).with_api_key(&credentials.api_key);
-
-        match client.push(vec![push_session]) {
-            Ok(response) => {
-                // Mark session as synced in DB
-                if let Err(e) = db.mark_sessions_synced(&[session.id], response.server_time) {
-                    tracing::warn!(
-                        "Auto-push: pushed session {} but failed to mark as synced: {}",
-                        &session.id.to_string()[..8],
-                        e
-                    );
-                } else {
-                    tracing::info!(
-                        "Auto-pushed session {} to cloud",
-                        &session.id.to_string()[..8]
-                    );
-                }
-            }
-            Err(e) => {
-                let error_str = e.to_string();
-                // Don't warn on quota errors - these are expected for free tier users
-                if error_str.contains("quota")
-                    || error_str.contains("Would exceed session limit")
-                    || (error_str.contains("403") && error_str.contains("limit"))
-                {
-                    tracing::debug!(
-                        "Auto-push: session {} skipped due to quota: {}",
-                        &session.id.to_string()[..8],
-                        e
-                    );
-                } else {
-                    tracing::warn!(
-                        "Auto-push: failed to push session {}: {}",
-                        &session.id.to_string()[..8],
-                        e
-                    );
-                }
-            }
-        }
-    }
-
     /// Returns the number of files currently being tracked.
     ///
     /// This method is part of the public API for status reporting
@@ -929,15 +742,6 @@ impl SessionWatcher {
     pub fn tracked_file_count(&self) -> usize {
         self.file_positions.len()
     }
-}
-
-/// Encrypts session messages for cloud storage.
-///
-/// Returns a base64-encoded string of the encrypted message data.
-fn encrypt_session_messages(messages: &[Message], key: &[u8]) -> Result<String> {
-    let json = serde_json::to_vec(messages)?;
-    let encrypted = encrypt_data(&json, key)?;
-    Ok(encode_base64(&encrypted))
 }
 
 #[cfg(test)]

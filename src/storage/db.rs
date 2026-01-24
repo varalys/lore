@@ -1406,23 +1406,6 @@ impl Database {
         Ok(total_updated)
     }
 
-    /// Checks if a session has been synced to the cloud.
-    ///
-    /// Returns true if the session has a non-NULL synced_at timestamp.
-    pub fn is_session_synced(&self, session_id: Uuid) -> Result<bool> {
-        let synced: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT synced_at FROM sessions WHERE id = ?1",
-                params![session_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
-
-        Ok(synced.is_some())
-    }
-
     /// Returns the most recent sync timestamp across all sessions.
     ///
     /// Returns None if no sessions have been synced yet.

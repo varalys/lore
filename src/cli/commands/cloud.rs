@@ -20,6 +20,7 @@ use crate::cloud::encryption::{
     encrypt_data,
 };
 use crate::config::Config;
+use crate::daemon::SyncState;
 use crate::storage::models::{Message, Session};
 use crate::storage::Database;
 
@@ -122,6 +123,7 @@ struct LocalStatus {
     total_sessions: i32,
     unsynced_sessions: i32,
     last_sync_at: Option<String>,
+    next_auto_sync_at: Option<String>,
 }
 
 /// Executes the cloud command.
@@ -145,6 +147,10 @@ fn run_status(format: OutputFormat) -> Result<()> {
     let total_sessions = db.session_count()?;
     let unsynced_sessions = db.unsynced_session_count()?;
     let last_local_sync = db.last_sync_time()?;
+
+    // Load daemon sync state to get next auto-sync time
+    let sync_state = SyncState::load().ok();
+    let next_auto_sync = sync_state.as_ref().and_then(|s| s.next_sync_at);
 
     match format {
         OutputFormat::Json => {
@@ -174,6 +180,7 @@ fn run_status(format: OutputFormat) -> Result<()> {
                     total_sessions,
                     unsynced_sessions,
                     last_sync_at: last_local_sync.map(|t| t.to_rfc3339()),
+                    next_auto_sync_at: next_auto_sync.map(|t| t.to_rfc3339()),
                 },
             };
 
@@ -223,6 +230,15 @@ fn run_status(format: OutputFormat) -> Result<()> {
             println!("  Pending sync:      {}", unsynced_sessions);
             if let Some(last_sync) = last_local_sync {
                 println!("  Last sync:         {}", format_relative_time(last_sync));
+            }
+            // Show next auto-sync time
+            match next_auto_sync {
+                Some(next_sync) => {
+                    println!("  Next auto-sync:    {}", format_future_relative_time(next_sync));
+                }
+                None => {
+                    println!("  Next auto-sync:    {}", "Not scheduled".dimmed());
+                }
             }
         }
     }
@@ -947,7 +963,7 @@ fn parse_quota_info(error_msg: &str) -> Option<QuotaInfo> {
     None
 }
 
-/// Formats a timestamp as relative time.
+/// Formats a timestamp as relative time (past).
 fn format_relative_time(time: chrono::DateTime<chrono::Utc>) -> String {
     let now = Utc::now();
     let duration = now.signed_duration_since(time);
@@ -965,6 +981,46 @@ fn format_relative_time(time: chrono::DateTime<chrono::Utc>) -> String {
     } else {
         let days = duration.num_days();
         format!("{} days ago", days)
+    }
+}
+
+/// Formats a timestamp as relative time (future).
+fn format_future_relative_time(time: chrono::DateTime<chrono::Utc>) -> String {
+    let now = Utc::now();
+    let duration = time.signed_duration_since(now);
+
+    // If the time has already passed, show "now" or past tense
+    if duration.num_seconds() <= 0 {
+        return "now".to_string();
+    }
+
+    let hours = duration.num_hours();
+    let minutes = duration.num_minutes();
+
+    if hours >= 24 {
+        let days = duration.num_days();
+        if days == 1 {
+            "in 1 day".to_string()
+        } else {
+            format!("in {} days", days)
+        }
+    } else if hours >= 1 {
+        let remaining_minutes = minutes % 60;
+        if remaining_minutes > 0 {
+            if hours == 1 {
+                format!("in 1 hour {} minutes", remaining_minutes)
+            } else {
+                format!("in {} hours {} minutes", hours, remaining_minutes)
+            }
+        } else if hours == 1 {
+            "in 1 hour".to_string()
+        } else {
+            format!("in {} hours", hours)
+        }
+    } else if minutes == 1 {
+        "in 1 minute".to_string()
+    } else {
+        format!("in {} minutes", minutes)
     }
 }
 
@@ -1092,5 +1148,74 @@ mod tests {
 
         assert_eq!(decrypted.len(), 1);
         assert_eq!(decrypted[0].content.text(), "Hello, world!");
+    }
+
+    #[test]
+    fn test_format_future_relative_time_minutes() {
+        let now = Utc::now();
+
+        // 2 minutes (use > 1 to avoid timing edge cases)
+        let time = now + chrono::Duration::minutes(2);
+        let result = format_future_relative_time(time);
+        assert!(
+            result.contains("minute"),
+            "Expected 'minute' in result, got: {}",
+            result
+        );
+
+        // 30 minutes
+        let time = now + chrono::Duration::minutes(30);
+        let result = format_future_relative_time(time);
+        assert!(
+            result.starts_with("in 29 minutes") || result.starts_with("in 30 minutes"),
+            "Expected ~30 minutes, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_format_future_relative_time_hours() {
+        let now = Utc::now();
+
+        // 2 hours (use > 1 to avoid timing edge cases)
+        let time = now + chrono::Duration::hours(2);
+        let result = format_future_relative_time(time);
+        assert!(
+            result.contains("hour"),
+            "Expected 'hour' in result, got: {}",
+            result
+        );
+
+        // 3 hours 42 minutes
+        let time = now + chrono::Duration::hours(3) + chrono::Duration::minutes(42);
+        let result = format_future_relative_time(time);
+        assert!(
+            result.starts_with("in 3 hours"),
+            "Expected 'in 3 hours...', got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_format_future_relative_time_days() {
+        let now = Utc::now();
+
+        // 2 days (use > 1 day to avoid timing edge cases)
+        let time = now + chrono::Duration::days(2);
+        let result = format_future_relative_time(time);
+        assert!(
+            result.contains("day"),
+            "Expected 'day' in result, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_format_future_relative_time_past() {
+        let now = Utc::now();
+
+        // Past time should show "now"
+        let time = now - chrono::Duration::minutes(5);
+        assert_eq!(format_future_relative_time(time), "now");
     }
 }
