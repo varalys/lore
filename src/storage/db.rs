@@ -1098,34 +1098,34 @@ impl Database {
             params_vec.push(Box::new(metadata_query_pattern));
 
             // Re-apply session-level filters to the UNION query
-            if options.repo.is_some() {
+            if let Some(repo) = &options.repo {
                 sql.push_str(&format!(" AND s.working_directory LIKE ?{param_idx}"));
-                params_vec.push(Box::new(format!("{}%", options.repo.as_ref().unwrap())));
+                params_vec.push(Box::new(format!("{}%", repo)));
                 param_idx += 1;
             }
-            if options.tool.is_some() {
+            if let Some(tool) = &options.tool {
                 sql.push_str(&format!(" AND LOWER(s.tool) = LOWER(?{param_idx})"));
-                params_vec.push(Box::new(options.tool.as_ref().unwrap().clone()));
+                params_vec.push(Box::new(tool.clone()));
                 param_idx += 1;
             }
-            if options.since.is_some() {
+            if let Some(since) = options.since {
                 sql.push_str(&format!(" AND s.started_at >= ?{param_idx}"));
-                params_vec.push(Box::new(options.since.unwrap().to_rfc3339()));
+                params_vec.push(Box::new(since.to_rfc3339()));
                 param_idx += 1;
             }
-            if options.until.is_some() {
+            if let Some(until) = options.until {
                 sql.push_str(&format!(" AND s.started_at <= ?{param_idx}"));
-                params_vec.push(Box::new(options.until.unwrap().to_rfc3339()));
+                params_vec.push(Box::new(until.to_rfc3339()));
                 param_idx += 1;
             }
-            if options.project.is_some() {
+            if let Some(project) = &options.project {
                 sql.push_str(&format!(" AND s.working_directory LIKE ?{param_idx}"));
-                params_vec.push(Box::new(format!("%{}%", options.project.as_ref().unwrap())));
+                params_vec.push(Box::new(format!("%{}%", project)));
                 param_idx += 1;
             }
-            if options.branch.is_some() {
+            if let Some(branch) = &options.branch {
                 sql.push_str(&format!(" AND s.git_branch LIKE ?{param_idx}"));
-                params_vec.push(Box::new(format!("%{}%", options.branch.as_ref().unwrap())));
+                params_vec.push(Box::new(format!("%{}%", branch)));
                 param_idx += 1;
             }
         }
