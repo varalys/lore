@@ -305,10 +305,9 @@ impl Database {
     /// Inserts a new session or updates an existing one.
     ///
     /// If a session with the same ID already exists, updates the `ended_at`
-    /// and `message_count` fields, and resets `synced_at` to NULL to mark
-    /// the session as needing re-sync (e.g., when a session is continued
-    /// with new messages). Also updates the sessions_fts index for
-    /// full-text search on session metadata.
+    /// and `message_count` fields. Only resets `synced_at` to NULL if the
+    /// message_count has changed (indicating new messages that need re-sync).
+    /// Also updates the sessions_fts index for full-text search on session metadata.
     pub fn insert_session(&self, session: &Session) -> Result<()> {
         let rows_changed = self.conn.execute(
             r#"
@@ -317,7 +316,7 @@ impl Database {
             ON CONFLICT(id) DO UPDATE SET
                 ended_at = ?5,
                 message_count = ?10,
-                synced_at = NULL
+                synced_at = CASE WHEN message_count != ?10 THEN NULL ELSE synced_at END
             "#,
             params![
                 session.id.to_string(),
@@ -1405,6 +1404,23 @@ impl Database {
         }
 
         Ok(total_updated)
+    }
+
+    /// Checks if a session has been synced to the cloud.
+    ///
+    /// Returns true if the session has a non-NULL synced_at timestamp.
+    pub fn is_session_synced(&self, session_id: Uuid) -> Result<bool> {
+        let synced: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT synced_at FROM sessions WHERE id = ?1",
+                params![session_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        Ok(synced.is_some())
     }
 
     /// Returns the most recent sync timestamp across all sessions.
