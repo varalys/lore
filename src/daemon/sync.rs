@@ -238,17 +238,15 @@ async fn perform_sync() -> Result<u64> {
     // Prepare session data
     let session_data: Vec<_> = sessions
         .iter()
-        .filter_map(|session| {
-            match db.get_messages(&session.id) {
-                Ok(messages) => Some((session.clone(), messages)),
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to get messages for session {}: {}",
-                        &session.id.to_string()[..8],
-                        e
-                    );
-                    None
-                }
+        .filter_map(|session| match db.get_messages(&session.id) {
+            Ok(messages) => Some((session.clone(), messages)),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to get messages for session {}: {}",
+                    &session.id.to_string()[..8],
+                    e
+                );
+                None
             }
         })
         .collect();
@@ -368,7 +366,10 @@ mod tests {
         // Since last + interval is in the past, should be 4 hours from now
         let expected = Utc::now() + chrono::Duration::hours(SYNC_INTERVAL_HOURS as i64);
         let diff = (next - expected).num_seconds().abs();
-        assert!(diff < 5, "Next sync should be ~4 hours from now when last sync is old");
+        assert!(
+            diff < 5,
+            "Next sync should be ~4 hours from now when last sync is old"
+        );
     }
 
     #[test]

@@ -234,7 +234,10 @@ fn run_status(format: OutputFormat) -> Result<()> {
             // Show next auto-sync time
             match next_auto_sync {
                 Some(next_sync) => {
-                    println!("  Next auto-sync:    {}", format_future_relative_time(next_sync));
+                    println!(
+                        "  Next auto-sync:    {}",
+                        format_future_relative_time(next_sync)
+                    );
                 }
                 None => {
                     println!("  Next auto-sync:    {}", "Not scheduled".dimmed());

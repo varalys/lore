@@ -384,7 +384,10 @@ fn deduplicate_session_files(files: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
     }
 
     // Extract just the paths
-    let deduplicated: Vec<PathBuf> = best_by_session.into_values().map(|(path, _)| path).collect();
+    let deduplicated: Vec<PathBuf> = best_by_session
+        .into_values()
+        .map(|(path, _)| path)
+        .collect();
 
     Ok(deduplicated)
 }
@@ -759,7 +762,10 @@ mod tests {
         assert_eq!(count_messages_in_file(file_empty.path()), 0);
 
         // Non-existent file returns 0
-        assert_eq!(count_messages_in_file(Path::new("/nonexistent/file.json")), 0);
+        assert_eq!(
+            count_messages_in_file(Path::new("/nonexistent/file.json")),
+            0
+        );
     }
 
     #[test]
@@ -812,10 +818,19 @@ mod tests {
         assert_eq!(result.len(), 2);
 
         // Verify path2 (with most messages for 1b872dcc) is in the result
-        assert!(result.contains(&path2), "Should keep file with most messages");
+        assert!(
+            result.contains(&path2),
+            "Should keep file with most messages"
+        );
         assert!(result.contains(&path4), "Should keep different session");
-        assert!(!result.contains(&path1), "Should not keep file with fewer messages");
-        assert!(!result.contains(&path3), "Should not keep file with fewer messages");
+        assert!(
+            !result.contains(&path1),
+            "Should not keep file with fewer messages"
+        );
+        assert!(
+            !result.contains(&path3),
+            "Should not keep file with fewer messages"
+        );
     }
 
     #[test]
