@@ -2275,6 +2275,235 @@ impl Database {
             sessions_by_tool,
         })
     }
+
+    // ==================== Insights ====================
+
+    /// Returns sessions filtered by an optional date range and working directory.
+    ///
+    /// Both `since` and `until` are optional bounds on `started_at`.
+    /// When `working_dir` is provided, only sessions whose working directory
+    /// starts with the given prefix are returned.
+    pub fn sessions_in_date_range(
+        &self,
+        since: Option<DateTime<Utc>>,
+        until: Option<DateTime<Utc>>,
+        working_dir: Option<&str>,
+    ) -> Result<Vec<Session>> {
+        let mut conditions = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(since) = since {
+            conditions.push(format!("started_at >= ?{}", param_values.len() + 1));
+            param_values.push(Box::new(since.to_rfc3339()));
+        }
+        if let Some(until) = until {
+            conditions.push(format!("started_at <= ?{}", param_values.len() + 1));
+            param_values.push(Box::new(until.to_rfc3339()));
+        }
+        if let Some(wd) = working_dir {
+            conditions.push(format!(
+                "working_directory LIKE ?{}",
+                param_values.len() + 1
+            ));
+            param_values.push(Box::new(format!("{}%", wd)));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
+             FROM sessions{}
+             ORDER BY started_at DESC",
+            where_clause
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params = rusqlite::params_from_iter(param_values.iter().map(|p| p.as_ref()));
+        let rows = stmt.query_map(params, Self::row_to_session)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to query sessions in date range")
+    }
+
+    /// Returns the average session duration in minutes.
+    ///
+    /// Only sessions where `ended_at` is set are included in the calculation.
+    /// Returns `None` if no matching sessions have an end time.
+    pub fn average_session_duration_minutes(
+        &self,
+        since: Option<DateTime<Utc>>,
+        working_dir: Option<&str>,
+    ) -> Result<Option<f64>> {
+        let mut conditions = vec!["ended_at IS NOT NULL".to_string()];
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(since) = since {
+            conditions.push(format!("started_at >= ?{}", param_values.len() + 1));
+            param_values.push(Box::new(since.to_rfc3339()));
+        }
+        if let Some(wd) = working_dir {
+            conditions.push(format!(
+                "working_directory LIKE ?{}",
+                param_values.len() + 1
+            ));
+            param_values.push(Box::new(format!("{}%", wd)));
+        }
+
+        let where_clause = format!(" WHERE {}", conditions.join(" AND "));
+
+        let sql = format!(
+            "SELECT AVG((julianday(ended_at) - julianday(started_at)) * 24 * 60) FROM sessions{}",
+            where_clause
+        );
+
+        let avg: Option<f64> = self
+            .conn
+            .query_row(
+                &sql,
+                rusqlite::params_from_iter(param_values.iter().map(|p| p.as_ref())),
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        Ok(avg)
+    }
+
+    /// Returns session counts grouped by tool name.
+    ///
+    /// Results are sorted by count in descending order. Optionally filters
+    /// by a minimum start date and working directory prefix.
+    pub fn sessions_by_tool_in_range(
+        &self,
+        since: Option<DateTime<Utc>>,
+        working_dir: Option<&str>,
+    ) -> Result<Vec<(String, i32)>> {
+        let mut conditions = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(since) = since {
+            conditions.push(format!("started_at >= ?{}", param_values.len() + 1));
+            param_values.push(Box::new(since.to_rfc3339()));
+        }
+        if let Some(wd) = working_dir {
+            conditions.push(format!(
+                "working_directory LIKE ?{}",
+                param_values.len() + 1
+            ));
+            param_values.push(Box::new(format!("{}%", wd)));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT tool, COUNT(*) FROM sessions{} GROUP BY tool ORDER BY COUNT(*) DESC",
+            where_clause
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params = rusqlite::params_from_iter(param_values.iter().map(|p| p.as_ref()));
+        let rows = stmt.query_map(params, |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to query sessions by tool")
+    }
+
+    /// Returns session counts grouped by weekday number.
+    ///
+    /// Uses SQLite `strftime('%w', started_at)` which yields 0 for Sunday
+    /// through 6 for Saturday. Only weekdays that have at least one session
+    /// are returned. Optionally filters by a minimum start date and working
+    /// directory prefix.
+    pub fn sessions_by_weekday(
+        &self,
+        since: Option<DateTime<Utc>>,
+        working_dir: Option<&str>,
+    ) -> Result<Vec<(i32, i32)>> {
+        let mut conditions = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(since) = since {
+            conditions.push(format!("started_at >= ?{}", param_values.len() + 1));
+            param_values.push(Box::new(since.to_rfc3339()));
+        }
+        if let Some(wd) = working_dir {
+            conditions.push(format!(
+                "working_directory LIKE ?{}",
+                param_values.len() + 1
+            ));
+            param_values.push(Box::new(format!("{}%", wd)));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT CAST(strftime('%w', started_at) AS INTEGER), COUNT(*) FROM sessions{} GROUP BY strftime('%w', started_at) ORDER BY strftime('%w', started_at)",
+            where_clause
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params = rusqlite::params_from_iter(param_values.iter().map(|p| p.as_ref()));
+        let rows = stmt.query_map(params, |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to query sessions by weekday")
+    }
+
+    /// Returns the average message count across sessions.
+    ///
+    /// Returns `None` if no sessions match the given filters.
+    pub fn average_message_count(
+        &self,
+        since: Option<DateTime<Utc>>,
+        working_dir: Option<&str>,
+    ) -> Result<Option<f64>> {
+        let mut conditions = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(since) = since {
+            conditions.push(format!("started_at >= ?{}", param_values.len() + 1));
+            param_values.push(Box::new(since.to_rfc3339()));
+        }
+        if let Some(wd) = working_dir {
+            conditions.push(format!(
+                "working_directory LIKE ?{}",
+                param_values.len() + 1
+            ));
+            param_values.push(Box::new(format!("{}%", wd)));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!("SELECT AVG(message_count) FROM sessions{}", where_clause);
+
+        let avg: Option<f64> = self
+            .conn
+            .query_row(
+                &sql,
+                rusqlite::params_from_iter(param_values.iter().map(|p| p.as_ref())),
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        Ok(avg)
+    }
 }
 
 /// Statistics about the Lore database.
@@ -5612,5 +5841,190 @@ mod tests {
             .clear_sync_status_for_sessions(&[fake_id])
             .expect("Failed to clear sync status");
         assert_eq!(count, 0, "Should return 0 for nonexistent session");
+    }
+
+    // ==================== Insights Tests ====================
+
+    #[test]
+    fn test_sessions_in_date_range_all() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let s1 = create_test_session("claude-code", "/project/a", now - Duration::hours(3), None);
+        let s2 = create_test_session("aider", "/project/b", now - Duration::hours(1), None);
+
+        db.insert_session(&s1).expect("Failed to insert session");
+        db.insert_session(&s2).expect("Failed to insert session");
+
+        let results = db
+            .sessions_in_date_range(None, None, None)
+            .expect("Failed to query sessions");
+        assert_eq!(
+            results.len(),
+            2,
+            "Should return all sessions when no filters"
+        );
+    }
+
+    #[test]
+    fn test_sessions_in_date_range_with_since() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let s1 = create_test_session("claude-code", "/project/a", now - Duration::hours(5), None);
+        let s2 = create_test_session("aider", "/project/b", now - Duration::hours(1), None);
+
+        db.insert_session(&s1).expect("Failed to insert session");
+        db.insert_session(&s2).expect("Failed to insert session");
+
+        let since = now - Duration::hours(3);
+        let results = db
+            .sessions_in_date_range(Some(since), None, None)
+            .expect("Failed to query sessions");
+        assert_eq!(results.len(), 1, "Should return only sessions after since");
+        assert_eq!(results[0].id, s2.id, "Should return the newer session");
+    }
+
+    #[test]
+    fn test_sessions_in_date_range_with_working_dir() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let s1 = create_test_session(
+            "claude-code",
+            "/project/alpha",
+            now - Duration::hours(2),
+            None,
+        );
+        let s2 = create_test_session("aider", "/project/beta", now - Duration::hours(1), None);
+
+        db.insert_session(&s1).expect("Failed to insert session");
+        db.insert_session(&s2).expect("Failed to insert session");
+
+        let results = db
+            .sessions_in_date_range(None, None, Some("/project/alpha"))
+            .expect("Failed to query sessions");
+        assert_eq!(results.len(), 1, "Should return only matching working dir");
+        assert_eq!(results[0].id, s1.id, "Should return the alpha session");
+    }
+
+    #[test]
+    fn test_average_session_duration() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let mut s1 = create_test_session("claude-code", "/project", now - Duration::hours(2), None);
+        s1.ended_at = Some(s1.started_at + Duration::minutes(30));
+
+        let mut s2 = create_test_session("aider", "/project", now - Duration::hours(1), None);
+        s2.ended_at = Some(s2.started_at + Duration::minutes(60));
+
+        db.insert_session(&s1).expect("Failed to insert session");
+        db.insert_session(&s2).expect("Failed to insert session");
+
+        let avg = db
+            .average_session_duration_minutes(None, None)
+            .expect("Failed to get average duration");
+        assert!(avg.is_some(), "Should return an average");
+        let avg_val = avg.unwrap();
+        // Average of 30 and 60 = 45
+        assert!(
+            (avg_val - 45.0).abs() < 1.0,
+            "Average should be approximately 45 minutes, got {}",
+            avg_val
+        );
+    }
+
+    #[test]
+    fn test_average_session_duration_no_ended_sessions() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // Session without ended_at
+        let s1 = create_test_session("claude-code", "/project", now, None);
+        db.insert_session(&s1).expect("Failed to insert session");
+
+        let avg = db
+            .average_session_duration_minutes(None, None)
+            .expect("Failed to get average duration");
+        assert!(
+            avg.is_none(),
+            "Should return None when no sessions have ended_at"
+        );
+    }
+
+    #[test]
+    fn test_sessions_by_tool_in_range() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let s1 = create_test_session("claude-code", "/project", now - Duration::hours(3), None);
+        let s2 = create_test_session("claude-code", "/project", now - Duration::hours(2), None);
+        let s3 = create_test_session("aider", "/project", now - Duration::hours(1), None);
+
+        db.insert_session(&s1).expect("Failed to insert session");
+        db.insert_session(&s2).expect("Failed to insert session");
+        db.insert_session(&s3).expect("Failed to insert session");
+
+        let results = db
+            .sessions_by_tool_in_range(None, None)
+            .expect("Failed to get sessions by tool");
+        assert_eq!(results.len(), 2, "Should have two tools");
+        // Sorted by count descending, claude-code should be first
+        assert_eq!(results[0].0, "claude-code");
+        assert_eq!(results[0].1, 2);
+        assert_eq!(results[1].0, "aider");
+        assert_eq!(results[1].1, 1);
+    }
+
+    #[test]
+    fn test_sessions_by_weekday() {
+        let (db, _dir) = create_test_db();
+        // Use a known date: 2024-01-15 is a Monday (weekday 1)
+        let monday = chrono::NaiveDate::from_ymd_opt(2024, 1, 15)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc();
+
+        let s1 = create_test_session("claude-code", "/project", monday, None);
+        let s2 = create_test_session("aider", "/project", monday + Duration::hours(1), None);
+
+        db.insert_session(&s1).expect("Failed to insert session");
+        db.insert_session(&s2).expect("Failed to insert session");
+
+        let results = db
+            .sessions_by_weekday(None, None)
+            .expect("Failed to get sessions by weekday");
+        assert_eq!(results.len(), 1, "Should have one weekday entry");
+        assert_eq!(results[0].0, 1, "Monday is weekday 1");
+        assert_eq!(results[0].1, 2, "Should have 2 sessions on Monday");
+    }
+
+    #[test]
+    fn test_average_message_count() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let mut s1 = create_test_session("claude-code", "/project", now - Duration::hours(2), None);
+        s1.message_count = 10;
+
+        let mut s2 = create_test_session("aider", "/project", now - Duration::hours(1), None);
+        s2.message_count = 20;
+
+        db.insert_session(&s1).expect("Failed to insert session");
+        db.insert_session(&s2).expect("Failed to insert session");
+
+        let avg = db
+            .average_message_count(None, None)
+            .expect("Failed to get average message count");
+        assert!(avg.is_some(), "Should return an average");
+        let avg_val = avg.unwrap();
+        // Average of 10 and 20 = 15
+        assert!(
+            (avg_val - 15.0).abs() < 0.01,
+            "Average should be 15.0, got {}",
+            avg_val
+        );
     }
 }
