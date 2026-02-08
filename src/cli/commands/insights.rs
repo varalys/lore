@@ -94,38 +94,39 @@ struct FileInfo {
 /// Parses a date filter string into a DateTime.
 ///
 /// Supports relative formats (7d, 2w, 1m) and absolute (2025-01-15).
+/// Returns an error if the resulting date is in the future.
 fn parse_date(date_str: &str) -> Result<DateTime<Utc>> {
     let date_str = date_str.trim().to_lowercase();
 
-    if date_str.ends_with('d') {
+    let dt = if date_str.ends_with('d') {
         let days: i64 = date_str[..date_str.len() - 1]
             .parse()
             .context("Invalid number of days")?;
-        return Ok(Utc::now() - Duration::days(days));
-    }
-
-    if date_str.ends_with('w') {
+        Utc::now() - Duration::days(days)
+    } else if date_str.ends_with('w') {
         let weeks: i64 = date_str[..date_str.len() - 1]
             .parse()
             .context("Invalid number of weeks")?;
-        return Ok(Utc::now() - Duration::weeks(weeks));
-    }
-
-    if date_str.ends_with('m') {
+        Utc::now() - Duration::weeks(weeks)
+    } else if date_str.ends_with('m') {
         let months: i64 = date_str[..date_str.len() - 1]
             .parse()
             .context("Invalid number of months")?;
-        return Ok(Utc::now() - Duration::days(months * 30));
+        Utc::now() - Duration::days(months * 30)
+    } else {
+        let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+            .context("Invalid date format. Use YYYY-MM-DD or relative format like 7d, 2w, 1m")?;
+        let datetime = date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create datetime from date {date_str}"))?;
+        datetime.and_utc()
+    };
+
+    if dt > Utc::now() {
+        anyhow::bail!("--since date is in the future: {}", date_str);
     }
 
-    let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-        .context("Invalid date format. Use YYYY-MM-DD or relative format like 7d, 2w, 1m")?;
-
-    let datetime = date
-        .and_hms_opt(0, 0, 0)
-        .ok_or_else(|| anyhow::anyhow!("Failed to create datetime from date {date_str}"))?;
-
-    Ok(datetime.and_utc())
+    Ok(dt)
 }
 
 /// Converts a SQLite weekday number (0=Sunday) to a day name.
@@ -143,6 +144,8 @@ fn weekday_name(day: i32) -> &'static str {
 }
 
 /// Builds a human-readable period description for the header.
+///
+/// Assumes `since` is not in the future (validated by `parse_date`).
 fn period_description(since: Option<&DateTime<Utc>>) -> String {
     match since {
         Some(dt) => {
@@ -209,16 +212,6 @@ pub fn run(args: Args) -> Result<()> {
     // Gather data
     let sessions = db.sessions_in_date_range(since, None, working_dir_ref)?;
     let total_sessions = sessions.len();
-
-    if total_sessions == 0 {
-        println!("{}", "No sessions found for the given filters.".dimmed());
-        println!(
-            "{}",
-            "Try removing --repo or --since filters, or import sessions first with 'lore import'."
-                .dimmed()
-        );
-        return Ok(());
-    }
 
     // Total messages across matching sessions
     let total_messages: i32 = sessions.iter().map(|s| s.message_count).sum();
@@ -548,9 +541,20 @@ mod tests {
     }
 
     #[test]
-    fn test_period_description_future() {
-        // A future date results in 0 or negative days, should show "today"
-        let dt = Utc::now() + Duration::hours(5);
+    fn test_parse_date_rejects_future() {
+        assert!(parse_date("2099-01-01").is_err());
+    }
+
+    #[test]
+    fn test_parse_date_negative_days_rejected() {
+        // -5d means 5 days in the future
+        assert!(parse_date("-5d").is_err());
+    }
+
+    #[test]
+    fn test_period_description_zero_days() {
+        // --since 0d resolves to "now", which is today
+        let dt = Utc::now();
         assert_eq!(period_description(Some(&dt)), "today");
     }
 }
