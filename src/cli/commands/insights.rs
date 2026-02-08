@@ -147,10 +147,10 @@ fn period_description(since: Option<&DateTime<Utc>>) -> String {
     match since {
         Some(dt) => {
             let days = (Utc::now() - *dt).num_days();
-            if days <= 7 {
-                "last 7 days".to_string()
+            if days <= 0 {
+                "today".to_string()
             } else if days <= 30 {
-                format!("last {} days", days)
+                format!("last {} day{}", days, if days == 1 { "" } else { "s" })
             } else if days <= 90 {
                 let months = days / 30;
                 format!(
@@ -322,10 +322,8 @@ fn calculate_coverage(
 ) -> Result<(usize, usize)> {
     let repo_path = working_dir.map(Path::new).unwrap_or_else(|| Path::new("."));
 
-    let after = since.unwrap_or_else(|| {
-        // Default to 1 year ago if no since filter
-        Utc::now() - Duration::days(365)
-    });
+    // When no --since filter, use Unix epoch to cover full git history
+    let after = since.unwrap_or(DateTime::UNIX_EPOCH);
     let before = Utc::now();
 
     let commits = git::get_commits_in_time_range(repo_path, after, before).unwrap_or_default();
@@ -513,9 +511,21 @@ mod tests {
     }
 
     #[test]
-    fn test_period_description_recent() {
+    fn test_period_description_today() {
+        let dt = Utc::now();
+        assert_eq!(period_description(Some(&dt)), "today");
+    }
+
+    #[test]
+    fn test_period_description_one_day() {
+        let dt = Utc::now() - Duration::days(1);
+        assert_eq!(period_description(Some(&dt)), "last 1 day");
+    }
+
+    #[test]
+    fn test_period_description_five_days() {
         let dt = Utc::now() - Duration::days(5);
-        assert_eq!(period_description(Some(&dt)), "last 7 days");
+        assert_eq!(period_description(Some(&dt)), "last 5 days");
     }
 
     #[test]
@@ -535,5 +545,12 @@ mod tests {
         let dt = Utc::now() - Duration::days(200);
         let result = period_description(Some(&dt));
         assert!(result.starts_with("since "));
+    }
+
+    #[test]
+    fn test_period_description_future() {
+        // A future date results in 0 or negative days, should show "today"
+        let dt = Utc::now() + Duration::hours(5);
+        assert_eq!(period_description(Some(&dt)), "today");
     }
 }

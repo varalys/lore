@@ -5909,6 +5909,51 @@ mod tests {
     }
 
     #[test]
+    fn test_sessions_in_date_range_with_until() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let s1 = create_test_session("claude-code", "/project/a", now - Duration::hours(5), None);
+        let s2 = create_test_session("aider", "/project/b", now - Duration::hours(1), None);
+
+        db.insert_session(&s1).expect("Failed to insert session");
+        db.insert_session(&s2).expect("Failed to insert session");
+
+        let until = now - Duration::hours(3);
+        let results = db
+            .sessions_in_date_range(None, Some(until), None)
+            .expect("Failed to query sessions");
+        assert_eq!(results.len(), 1, "Should return only sessions before until");
+        assert_eq!(results[0].id, s1.id, "Should return the older session");
+    }
+
+    #[test]
+    fn test_sessions_in_date_range_with_since_and_until() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let s1 = create_test_session("claude-code", "/project", now - Duration::hours(8), None);
+        let s2 = create_test_session("aider", "/project", now - Duration::hours(4), None);
+        let s3 = create_test_session("claude-code", "/project", now - Duration::hours(1), None);
+
+        db.insert_session(&s1).expect("Failed to insert session");
+        db.insert_session(&s2).expect("Failed to insert session");
+        db.insert_session(&s3).expect("Failed to insert session");
+
+        let since = now - Duration::hours(6);
+        let until = now - Duration::hours(2);
+        let results = db
+            .sessions_in_date_range(Some(since), Some(until), None)
+            .expect("Failed to query sessions");
+        assert_eq!(
+            results.len(),
+            1,
+            "Should return only sessions in the window"
+        );
+        assert_eq!(results[0].id, s2.id, "Should return the middle session");
+    }
+
+    #[test]
     fn test_average_session_duration() {
         let (db, _dir) = create_test_db();
         let now = Utc::now();
