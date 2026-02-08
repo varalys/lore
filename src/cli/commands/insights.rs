@@ -94,6 +94,7 @@ struct FileInfo {
 /// Parses a date filter string into a DateTime.
 ///
 /// Supports relative formats (7d, 2w, 1m) and absolute (2025-01-15).
+/// A value of 0 (e.g., "0d") snaps to the start of today (midnight UTC).
 /// Returns an error if the resulting date is in the future.
 fn parse_date(date_str: &str) -> Result<DateTime<Utc>> {
     let date_str = date_str.trim().to_lowercase();
@@ -102,17 +103,29 @@ fn parse_date(date_str: &str) -> Result<DateTime<Utc>> {
         let days: i64 = date_str[..date_str.len() - 1]
             .parse()
             .context("Invalid number of days")?;
-        Utc::now() - Duration::days(days)
+        if days == 0 {
+            start_of_today()
+        } else {
+            Utc::now() - Duration::days(days)
+        }
     } else if date_str.ends_with('w') {
         let weeks: i64 = date_str[..date_str.len() - 1]
             .parse()
             .context("Invalid number of weeks")?;
-        Utc::now() - Duration::weeks(weeks)
+        if weeks == 0 {
+            start_of_today()
+        } else {
+            Utc::now() - Duration::weeks(weeks)
+        }
     } else if date_str.ends_with('m') {
         let months: i64 = date_str[..date_str.len() - 1]
             .parse()
             .context("Invalid number of months")?;
-        Utc::now() - Duration::days(months * 30)
+        if months == 0 {
+            start_of_today()
+        } else {
+            Utc::now() - Duration::days(months * 30)
+        }
     } else {
         let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
             .context("Invalid date format. Use YYYY-MM-DD or relative format like 7d, 2w, 1m")?;
@@ -127,6 +140,15 @@ fn parse_date(date_str: &str) -> Result<DateTime<Utc>> {
     }
 
     Ok(dt)
+}
+
+/// Returns midnight UTC of the current day.
+fn start_of_today() -> DateTime<Utc> {
+    Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is always valid")
+        .and_utc()
 }
 
 /// Converts a SQLite weekday number (0=Sunday) to a day name.
@@ -552,9 +574,62 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_date_zero_days_is_start_of_today() {
+        let result = parse_date("0d").unwrap();
+        let expected = start_of_today();
+        assert_eq!(result, expected);
+        // Should be midnight, not "now"
+        assert_eq!(
+            result.time(),
+            chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_parse_date_zero_weeks_is_start_of_today() {
+        let result = parse_date("0w").unwrap();
+        assert_eq!(result, start_of_today());
+    }
+
+    #[test]
     fn test_period_description_zero_days() {
-        // --since 0d resolves to "now", which is today
-        let dt = Utc::now();
+        let dt = start_of_today();
         assert_eq!(period_description(Some(&dt)), "today");
+    }
+
+    #[test]
+    fn test_display_text_zero_sessions() {
+        // Verify display_text handles zero sessions without panicking
+        let data = DisplayData {
+            period_desc: "all time",
+            total_commits: 50,
+            linked_commits: 10,
+            tools_breakdown: &[],
+            total_sessions: 0,
+            total_messages: 0,
+            avg_duration: None,
+            avg_messages: None,
+            most_active_day: None,
+            top_files: &[],
+        };
+        // Should not panic; coverage section should still render
+        display_text(&data);
+    }
+
+    #[test]
+    fn test_display_text_zero_sessions_zero_commits() {
+        let data = DisplayData {
+            period_desc: "last 30 days",
+            total_commits: 0,
+            linked_commits: 0,
+            tools_breakdown: &[],
+            total_sessions: 0,
+            total_messages: 0,
+            avg_duration: None,
+            avg_messages: None,
+            most_active_day: None,
+            top_files: &[],
+        };
+        display_text(&data);
     }
 }
