@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-02-05
+
+### Added
+
+- `lore insights` command for AI development analytics
+  - Commit coverage: repo commits vs commits with linked sessions
+  - Tool usage breakdown with session counts and percentages
+  - Activity stats: avg duration, avg messages per session, most active day
+  - Top files touched across AI sessions
+  - `--since` filter with relative (30d, 3m) and absolute (2025-01-01) dates
+  - `--repo` to scope insights to a specific repository
+  - `--format json` for machine-readable output
+- 5 new date-range-aware database query methods for insights analytics
+
 ## [0.1.11] - 2026-01-24
 
 ### Added
