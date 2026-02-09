@@ -62,6 +62,7 @@ const PROMPT_TIMEOUT_SECS: u64 = 30;
     lore show --commit HEAD  View sessions linked to HEAD\n    \
     lore link abc123         Link session to HEAD\n    \
     lore search \"auth\"       Search sessions for text\n    \
+    lore insights            Show AI development insights\n    \
     lore daemon start        Start background watcher\n\n\
     For more information about a command, run 'lore <command> --help'.")]
 pub struct Cli {
@@ -225,6 +226,14 @@ enum Commands {
         - Gemini CLI (JSON files in ~/.gemini/tmp/)"
     )]
     Import(commands::import::Args),
+
+    /// Show AI development insights and analytics
+    #[command(
+        long_about = "Surfaces analytics about AI-assisted development patterns\n\
+        including commit coverage, tool usage breakdown, activity patterns,\n\
+        and most-touched files. Use --since to scope to a time period."
+    )]
+    Insights(commands::insights::Args),
 
     /// Manage git hooks for automatic session linking
     #[command(
@@ -437,6 +446,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Search(_) => "search",
         Commands::Config(_) => "config",
         Commands::Import(_) => "import",
+        Commands::Insights(_) => "insights",
         Commands::Hooks(_) => "hooks",
         Commands::Daemon(_) => "daemon",
         Commands::Db(_) => "db",
@@ -523,6 +533,7 @@ fn main() -> Result<()> {
         Commands::Search(args) => commands::search::run(args),
         Commands::Config(args) => commands::config::run(args),
         Commands::Import(args) => commands::import::run(args),
+        Commands::Insights(args) => commands::insights::run(args),
         Commands::Hooks(args) => commands::hooks::run(args),
         Commands::Daemon(args) => commands::daemon::run(args),
         Commands::Db(args) => commands::db::run(args),

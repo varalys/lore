@@ -45,6 +45,9 @@ pub mod hooks;
 /// Import sessions from AI coding tools.
 pub mod import;
 
+/// AI development insights and analytics.
+pub mod insights;
+
 /// Guided first-run setup.
 pub mod init;
 
