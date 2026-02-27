@@ -10,12 +10,14 @@ use colored::Colorize;
 use uuid::Uuid;
 
 use crate::storage::{Database, Summary};
+use crate::summarize::{generate_summary, SummarizeError};
 
 /// Arguments for the summarize command.
 #[derive(clap::Args)]
 #[command(after_help = "EXAMPLES:\n    \
     lore summarize abc123 \"Implemented auth feature\"  Add summary to session\n    \
-    lore summarize abc123 --show                       View existing summary")]
+    lore summarize abc123 --show                       View existing summary\n    \
+    lore summarize abc123 --generate                   Generate summary via LLM")]
 pub struct Args {
     /// Session ID prefix
     #[arg(value_name = "SESSION")]
@@ -40,6 +42,13 @@ pub struct Args {
         adding or updating one."
     )]
     pub show: bool,
+
+    /// Generate summary using a configured LLM provider
+    #[arg(long)]
+    #[arg(long_help = "Generate a summary using the configured LLM provider.\n\
+        Requires a summary provider to be configured via 'lore init --force'\n\
+        or 'lore config set'. Cannot be used with manual summary text.")]
+    pub generate: bool,
 }
 
 /// Executes the summarize command.
@@ -91,15 +100,49 @@ pub fn run(args: Args) -> Result<()> {
     let session_id = session.id;
     let session_short = &session.id.to_string()[..8];
 
+    if args.show && args.generate {
+        bail!("Cannot use --show and --generate together.");
+    }
+
     if args.show {
         // Show existing summary
         show_summary(&db, &session_id, session_short)?;
+    } else if args.generate && args.summary.is_some() {
+        bail!("Cannot use --generate with manual summary text.");
+    } else if args.generate {
+        // Generate summary via LLM
+        let messages = db.get_messages(&session_id)?;
+        match generate_summary(&messages) {
+            Ok(summary_text) => {
+                add_or_update_summary(&db, &session_id, session_short, &summary_text)?;
+                println!(
+                    "{} {}",
+                    "Generated summary for session".green(),
+                    session_short.cyan()
+                );
+                println!("{summary_text}");
+            }
+            Err(SummarizeError::NotConfigured) => {
+                bail!(
+                    "Summary provider not configured.\n\n\
+                     Configure a summary provider first:\n  \
+                     lore init --force       (guided setup with hidden key input)\n  \
+                     lore config set summary_provider <anthropic|openai|openrouter>"
+                );
+            }
+            Err(SummarizeError::EmptySession) => {
+                bail!("Session has no messages to summarize.");
+            }
+            Err(e) => {
+                bail!("Failed to generate summary: {e}");
+            }
+        }
     } else if let Some(summary_text) = args.summary {
         // Add or update summary
         add_or_update_summary(&db, &session_id, session_short, &summary_text)?;
     } else {
-        // No summary text and not showing - error
-        bail!("Please provide a summary text or use --show to view the existing summary.");
+        // No summary text, not showing, not generating - error
+        bail!("Please provide a summary text, use --show to view, or --generate to auto-generate.");
     }
 
     Ok(())

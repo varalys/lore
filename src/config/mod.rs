@@ -63,6 +63,42 @@ pub struct Config {
     /// Note: Keychain may prompt for permission on first access.
     #[serde(default)]
     pub use_keychain: bool,
+
+    /// LLM provider for summary generation ("anthropic", "openai", "openrouter").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_provider: Option<String>,
+
+    /// API key for Anthropic summary provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_api_key_anthropic: Option<String>,
+
+    /// API key for OpenAI summary provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_api_key_openai: Option<String>,
+
+    /// API key for OpenRouter summary provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_api_key_openrouter: Option<String>,
+
+    /// Model override for Anthropic summary provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_model_anthropic: Option<String>,
+
+    /// Model override for OpenAI summary provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_model_openai: Option<String>,
+
+    /// Model override for OpenRouter summary provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_model_openrouter: Option<String>,
+
+    /// Whether to automatically generate summaries when sessions end.
+    #[serde(default)]
+    pub summary_auto: bool,
+
+    /// Minimum message count to trigger auto-summary generation.
+    #[serde(default = "default_summary_auto_threshold")]
+    pub summary_auto_threshold: usize,
 }
 
 impl Default for Config {
@@ -77,6 +113,15 @@ impl Default for Config {
             cloud_url: None,
             encryption_salt: None,
             use_keychain: false,
+            summary_provider: None,
+            summary_api_key_anthropic: None,
+            summary_api_key_openai: None,
+            summary_api_key_openrouter: None,
+            summary_model_anthropic: None,
+            summary_model_openai: None,
+            summary_model_openrouter: None,
+            summary_auto: false,
+            summary_auto_threshold: 4,
         }
     }
 }
@@ -228,6 +273,15 @@ impl Config {
     /// - `machine_name` - human-readable machine name
     /// - `cloud_url` - cloud service URL
     /// - `encryption_salt` - salt for encryption key derivation (read-only)
+    /// - `summary_provider` - LLM provider for summaries
+    /// - `summary_api_key_anthropic` - Anthropic API key
+    /// - `summary_api_key_openai` - OpenAI API key
+    /// - `summary_api_key_openrouter` - OpenRouter API key
+    /// - `summary_model_anthropic` - Anthropic model override
+    /// - `summary_model_openai` - OpenAI model override
+    /// - `summary_model_openrouter` - OpenRouter model override
+    /// - `summary_auto` - "true" or "false"
+    /// - `summary_auto_threshold` - minimum messages for auto-summary
     ///
     /// Returns `None` if the key is not recognized.
     pub fn get(&self, key: &str) -> Option<String> {
@@ -241,6 +295,15 @@ impl Config {
             "cloud_url" => Some(self.get_cloud_url()),
             "encryption_salt" => self.encryption_salt.clone(),
             "use_keychain" => Some(self.use_keychain.to_string()),
+            "summary_provider" => self.summary_provider.clone(),
+            "summary_api_key_anthropic" => self.summary_api_key_anthropic.clone(),
+            "summary_api_key_openai" => self.summary_api_key_openai.clone(),
+            "summary_api_key_openrouter" => self.summary_api_key_openrouter.clone(),
+            "summary_model_anthropic" => self.summary_model_anthropic.clone(),
+            "summary_model_openai" => self.summary_model_openai.clone(),
+            "summary_model_openrouter" => self.summary_model_openrouter.clone(),
+            "summary_auto" => Some(self.summary_auto.to_string()),
+            "summary_auto_threshold" => Some(self.summary_auto_threshold.to_string()),
             _ => None,
         }
     }
@@ -254,6 +317,15 @@ impl Config {
     /// - `commit_footer` - "true" or "false"
     /// - `machine_name` - human-readable machine name
     /// - `cloud_url` - cloud service URL
+    /// - `summary_provider` - "anthropic", "openai", or "openrouter"
+    /// - `summary_api_key_anthropic` - Anthropic API key
+    /// - `summary_api_key_openai` - OpenAI API key
+    /// - `summary_api_key_openrouter` - OpenRouter API key
+    /// - `summary_model_anthropic` - Anthropic model override
+    /// - `summary_model_openai` - OpenAI model override
+    /// - `summary_model_openrouter` - OpenRouter model override
+    /// - `summary_auto` - "true" or "false"
+    /// - `summary_auto_threshold` - positive integer
     ///
     /// Note: `machine_id` and `encryption_salt` cannot be set manually.
     ///
@@ -301,6 +373,51 @@ impl Config {
                     format!("Invalid boolean value for use_keychain: '{value}'")
                 })?;
             }
+            "summary_provider" => {
+                let lower = value.to_lowercase();
+                match lower.as_str() {
+                    "anthropic" | "openai" | "openrouter" => {
+                        self.summary_provider = Some(lower);
+                    }
+                    _ => {
+                        bail!(
+                            "Invalid summary_provider: '{value}'. \
+                             Must be one of: anthropic, openai, openrouter"
+                        );
+                    }
+                }
+            }
+            "summary_api_key_anthropic" => {
+                self.summary_api_key_anthropic = Some(value.to_string());
+            }
+            "summary_api_key_openai" => {
+                self.summary_api_key_openai = Some(value.to_string());
+            }
+            "summary_api_key_openrouter" => {
+                self.summary_api_key_openrouter = Some(value.to_string());
+            }
+            "summary_model_anthropic" => {
+                self.summary_model_anthropic = Some(value.to_string());
+            }
+            "summary_model_openai" => {
+                self.summary_model_openai = Some(value.to_string());
+            }
+            "summary_model_openrouter" => {
+                self.summary_model_openrouter = Some(value.to_string());
+            }
+            "summary_auto" => {
+                self.summary_auto = parse_bool(value)
+                    .with_context(|| format!("Invalid value for summary_auto: '{value}'"))?;
+            }
+            "summary_auto_threshold" => {
+                let threshold: usize = value.parse().with_context(|| {
+                    format!("Invalid value for summary_auto_threshold: '{value}'")
+                })?;
+                if threshold == 0 {
+                    bail!("summary_auto_threshold must be greater than 0, got {threshold}");
+                }
+                self.summary_auto_threshold = threshold;
+            }
             _ => {
                 bail!("Unknown configuration key: '{key}'");
             }
@@ -331,7 +448,36 @@ impl Config {
             "cloud_url",
             "encryption_salt",
             "use_keychain",
+            "summary_provider",
+            "summary_api_key_anthropic",
+            "summary_api_key_openai",
+            "summary_api_key_openrouter",
+            "summary_model_anthropic",
+            "summary_model_openai",
+            "summary_model_openrouter",
+            "summary_auto",
+            "summary_auto_threshold",
         ]
+    }
+
+    /// Returns the API key for the given summary provider.
+    pub fn summary_api_key_for_provider(&self, provider: &str) -> Option<String> {
+        match provider {
+            "anthropic" => self.summary_api_key_anthropic.clone(),
+            "openai" => self.summary_api_key_openai.clone(),
+            "openrouter" => self.summary_api_key_openrouter.clone(),
+            _ => None,
+        }
+    }
+
+    /// Returns the model override for the given summary provider.
+    pub fn summary_model_for_provider(&self, provider: &str) -> Option<String> {
+        match provider {
+            "anthropic" => self.summary_model_anthropic.clone(),
+            "openai" => self.summary_model_openai.clone(),
+            "openrouter" => self.summary_model_openrouter.clone(),
+            _ => None,
+        }
     }
 
     /// Checks if use_keychain was explicitly set in the config file.
@@ -359,6 +505,11 @@ impl Config {
             trimmed.starts_with("use_keychain:")
         }))
     }
+}
+
+/// Returns the default minimum message count for auto-summary generation.
+fn default_summary_auto_threshold() -> usize {
+    4
 }
 
 /// Parses a boolean value from a string.
@@ -450,6 +601,7 @@ mod tests {
             cloud_url: None,
             encryption_salt: None,
             use_keychain: false,
+            ..Default::default()
         };
 
         assert_eq!(
@@ -637,5 +789,249 @@ mod tests {
             trimmed.starts_with("use_keychain:")
         });
         assert!(!has_use_keychain);
+    }
+
+    #[test]
+    fn test_default_config_summary_fields() {
+        let config = Config::default();
+        assert!(config.summary_provider.is_none());
+        assert!(config.summary_api_key_anthropic.is_none());
+        assert!(config.summary_api_key_openai.is_none());
+        assert!(config.summary_api_key_openrouter.is_none());
+        assert!(config.summary_model_anthropic.is_none());
+        assert!(config.summary_model_openai.is_none());
+        assert!(config.summary_model_openrouter.is_none());
+        assert!(!config.summary_auto);
+        assert_eq!(config.summary_auto_threshold, 4);
+    }
+
+    #[test]
+    fn test_get_set_summary_provider() {
+        let mut config = Config::default();
+
+        // Default is None
+        assert_eq!(config.get("summary_provider"), None);
+
+        // Set with lowercase
+        config.set("summary_provider", "anthropic").unwrap();
+        assert_eq!(
+            config.get("summary_provider"),
+            Some("anthropic".to_string())
+        );
+
+        // Set with mixed case is normalized to lowercase
+        config.set("summary_provider", "OpenAI").unwrap();
+        assert_eq!(config.get("summary_provider"), Some("openai".to_string()));
+
+        config.set("summary_provider", "OPENROUTER").unwrap();
+        assert_eq!(
+            config.get("summary_provider"),
+            Some("openrouter".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_summary_provider_validates() {
+        let mut config = Config::default();
+
+        let result = config.set("summary_provider", "invalid-provider");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Invalid summary_provider"));
+        assert!(err_msg.contains("invalid-provider"));
+    }
+
+    #[test]
+    fn test_get_set_summary_api_keys_per_provider() {
+        let mut config = Config::default();
+
+        // All default to None
+        assert_eq!(config.get("summary_api_key_anthropic"), None);
+        assert_eq!(config.get("summary_api_key_openai"), None);
+        assert_eq!(config.get("summary_api_key_openrouter"), None);
+
+        // Set and retrieve each independently
+        config
+            .set("summary_api_key_anthropic", "sk-ant-123")
+            .unwrap();
+        config.set("summary_api_key_openai", "sk-oai-456").unwrap();
+        config
+            .set("summary_api_key_openrouter", "sk-or-789")
+            .unwrap();
+
+        assert_eq!(
+            config.get("summary_api_key_anthropic"),
+            Some("sk-ant-123".to_string())
+        );
+        assert_eq!(
+            config.get("summary_api_key_openai"),
+            Some("sk-oai-456".to_string())
+        );
+        assert_eq!(
+            config.get("summary_api_key_openrouter"),
+            Some("sk-or-789".to_string())
+        );
+
+        // Helper method returns the right key for each provider
+        assert_eq!(
+            config.summary_api_key_for_provider("anthropic"),
+            Some("sk-ant-123".to_string())
+        );
+        assert_eq!(
+            config.summary_api_key_for_provider("openai"),
+            Some("sk-oai-456".to_string())
+        );
+        assert_eq!(
+            config.summary_api_key_for_provider("openrouter"),
+            Some("sk-or-789".to_string())
+        );
+        assert_eq!(config.summary_api_key_for_provider("unknown"), None);
+    }
+
+    #[test]
+    fn test_get_set_summary_models_per_provider() {
+        let mut config = Config::default();
+
+        // All default to None
+        assert_eq!(config.get("summary_model_anthropic"), None);
+        assert_eq!(config.get("summary_model_openai"), None);
+        assert_eq!(config.get("summary_model_openrouter"), None);
+
+        // Set and retrieve each
+        config
+            .set("summary_model_anthropic", "claude-sonnet-4-20250514")
+            .unwrap();
+        config.set("summary_model_openai", "gpt-4o").unwrap();
+        config
+            .set(
+                "summary_model_openrouter",
+                "meta-llama/llama-3.1-8b-instruct:free",
+            )
+            .unwrap();
+
+        assert_eq!(
+            config.get("summary_model_anthropic"),
+            Some("claude-sonnet-4-20250514".to_string())
+        );
+        assert_eq!(
+            config.get("summary_model_openai"),
+            Some("gpt-4o".to_string())
+        );
+        assert_eq!(
+            config.get("summary_model_openrouter"),
+            Some("meta-llama/llama-3.1-8b-instruct:free".to_string())
+        );
+
+        // Helper returns the right model for each provider
+        assert_eq!(
+            config.summary_model_for_provider("anthropic"),
+            Some("claude-sonnet-4-20250514".to_string())
+        );
+        assert_eq!(
+            config.summary_model_for_provider("openai"),
+            Some("gpt-4o".to_string())
+        );
+        assert_eq!(config.summary_model_for_provider("unknown"), None);
+    }
+
+    #[test]
+    fn test_get_set_summary_auto() {
+        let mut config = Config::default();
+
+        // Default is false
+        assert_eq!(config.get("summary_auto"), Some("false".to_string()));
+
+        // Set to true
+        config.set("summary_auto", "true").unwrap();
+        assert!(config.summary_auto);
+        assert_eq!(config.get("summary_auto"), Some("true".to_string()));
+
+        // Set back to false
+        config.set("summary_auto", "false").unwrap();
+        assert!(!config.summary_auto);
+        assert_eq!(config.get("summary_auto"), Some("false".to_string()));
+
+        // Invalid value rejected
+        assert!(config.set("summary_auto", "maybe").is_err());
+    }
+
+    #[test]
+    fn test_get_set_summary_auto_threshold() {
+        let mut config = Config::default();
+
+        // Default is 4
+        assert_eq!(config.get("summary_auto_threshold"), Some("4".to_string()));
+
+        // Set valid value
+        config.set("summary_auto_threshold", "10").unwrap();
+        assert_eq!(config.summary_auto_threshold, 10);
+        assert_eq!(config.get("summary_auto_threshold"), Some("10".to_string()));
+
+        // Reject 0
+        let result = config.set("summary_auto_threshold", "0");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be greater than 0"));
+
+        // Reject negative (parsing fails since usize cannot be negative)
+        assert!(config.set("summary_auto_threshold", "-1").is_err());
+
+        // Reject non-numeric
+        assert!(config.set("summary_auto_threshold", "abc").is_err());
+    }
+
+    #[test]
+    fn test_summary_fields_yaml_serialization() {
+        // When None, summary fields are omitted from YAML
+        let config = Config::default();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        assert!(!yaml.contains("summary_provider"));
+        assert!(!yaml.contains("summary_api_key"));
+        assert!(!yaml.contains("summary_model"));
+
+        // When set, they appear in the output
+        let config = Config {
+            summary_provider: Some("anthropic".to_string()),
+            summary_api_key_anthropic: Some("sk-ant-test".to_string()),
+            summary_api_key_openai: Some("sk-oai-test".to_string()),
+            summary_model_anthropic: Some("claude-sonnet-4-20250514".to_string()),
+            summary_auto: true,
+            summary_auto_threshold: 8,
+            ..Default::default()
+        };
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        assert!(yaml.contains("summary_provider"));
+        assert!(yaml.contains("anthropic"));
+        assert!(yaml.contains("summary_api_key_anthropic"));
+        assert!(yaml.contains("sk-ant-test"));
+        assert!(yaml.contains("summary_api_key_openai"));
+        assert!(yaml.contains("sk-oai-test"));
+        assert!(yaml.contains("summary_model_anthropic"));
+        assert!(yaml.contains("claude-sonnet-4-20250514"));
+        assert!(yaml.contains("summary_auto"));
+        assert!(yaml.contains("summary_auto_threshold"));
+
+        // Verify roundtrip through YAML serialization/deserialization
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("config.yaml");
+        config.save_to_path(&path).unwrap();
+        let loaded = Config::load_from_path(&path).unwrap();
+        assert_eq!(loaded.summary_provider, Some("anthropic".to_string()));
+        assert_eq!(
+            loaded.summary_api_key_anthropic,
+            Some("sk-ant-test".to_string())
+        );
+        assert_eq!(
+            loaded.summary_api_key_openai,
+            Some("sk-oai-test".to_string())
+        );
+        assert_eq!(
+            loaded.summary_model_anthropic,
+            Some("claude-sonnet-4-20250514".to_string())
+        );
+        assert!(loaded.summary_auto);
+        assert_eq!(loaded.summary_auto_threshold, 8);
     }
 }

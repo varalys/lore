@@ -4,6 +4,8 @@
 //! Sessions can be filtered by working directory and output in
 //! text, JSON, or markdown format.
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 use colored::Colorize;
 
@@ -85,7 +87,7 @@ pub fn run(args: Args) -> Result<()> {
         }
         OutputFormat::Text | OutputFormat::Markdown => {
             // Column widths for consistent alignment
-            const ID_WIDTH: usize = 8;
+            const ID_WIDTH: usize = 12;
             const STARTED_WIDTH: usize = 16;
             const MESSAGES_WIDTH: usize = 8;
             const BRANCH_WIDTH: usize = 24;
@@ -99,8 +101,19 @@ pub fn run(args: Args) -> Result<()> {
                 .bold()
             );
 
+            let session_ids: Vec<uuid::Uuid> = sessions.iter().map(|s| s.id).collect();
+            let sessions_with_summaries: HashSet<uuid::Uuid> = db
+                .get_sessions_with_summaries(&session_ids)
+                .unwrap_or_default();
+
             for session in &sessions {
                 let id_short = &session.id.to_string()[..8];
+                let has_summary = sessions_with_summaries.contains(&session.id);
+                let id_display = if has_summary {
+                    format!("{} {}", id_short.cyan(), "[S]".green())
+                } else {
+                    format!("{}", id_short.cyan())
+                };
                 let started = session.started_at.format("%Y-%m-%d %H:%M").to_string();
                 let branch_history = db.get_session_branch_history(session.id)?;
                 let branch_display = format_branch_history(&branch_history, BRANCH_WIDTH);
@@ -112,7 +125,7 @@ pub fn run(args: Args) -> Result<()> {
 
                 println!(
                     "{:<ID_WIDTH$}  {:<STARTED_WIDTH$}  {:>MESSAGES_WIDTH$}  {:<BRANCH_WIDTH$}  {}",
-                    id_short.cyan(),
+                    id_display,
                     started.dimmed(),
                     session.message_count,
                     branch_display.yellow(),
