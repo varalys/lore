@@ -4,6 +4,8 @@
 //! Sessions can be filtered by working directory and output in
 //! text, JSON, or markdown format.
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 use colored::Colorize;
 
@@ -99,9 +101,14 @@ pub fn run(args: Args) -> Result<()> {
                 .bold()
             );
 
+            let session_ids: Vec<uuid::Uuid> = sessions.iter().map(|s| s.id).collect();
+            let sessions_with_summaries: HashSet<uuid::Uuid> = db
+                .get_sessions_with_summaries(&session_ids)
+                .unwrap_or_default();
+
             for session in &sessions {
                 let id_short = &session.id.to_string()[..8];
-                let has_summary = db.get_summary(&session.id).ok().flatten().is_some();
+                let has_summary = sessions_with_summaries.contains(&session.id);
                 let id_display = if has_summary {
                     format!("{} {}", id_short.cyan(), "[S]".green())
                 } else {

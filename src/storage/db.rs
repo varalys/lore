@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -1948,6 +1949,42 @@ impl Database {
             )
             .optional()
             .context("Failed to get summary")
+    }
+
+    /// Returns the set of session IDs (from the given list) that have summaries.
+    ///
+    /// This is a batch alternative to calling `get_summary` per session,
+    /// avoiding N+1 queries in list views where only existence matters.
+    pub fn get_sessions_with_summaries(&self, session_ids: &[Uuid]) -> Result<HashSet<Uuid>> {
+        if session_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let placeholders: Vec<&str> = session_ids.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT session_id FROM summaries WHERE session_id IN ({})",
+            placeholders.join(", ")
+        );
+
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> = session_ids
+            .iter()
+            .map(|id| Box::new(id.to_string()) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            let id_str: String = row.get(0)?;
+            parse_uuid(&id_str)
+        })?;
+
+        let mut result = HashSet::new();
+        for row in rows {
+            result.insert(row?);
+        }
+        Ok(result)
     }
 
     /// Updates the summary for a session.

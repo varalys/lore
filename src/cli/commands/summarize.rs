@@ -46,8 +46,8 @@ pub struct Args {
     /// Generate summary using a configured LLM provider
     #[arg(long)]
     #[arg(long_help = "Generate a summary using the configured LLM provider.\n\
-        Requires summary_provider and a provider API key to be set via\n\
-        'lore config set'. Cannot be used with manual summary text.")]
+        Requires a summary provider to be configured via 'lore init --force'\n\
+        or 'lore config set'. Cannot be used with manual summary text.")]
     pub generate: bool,
 }
 
@@ -100,6 +100,10 @@ pub fn run(args: Args) -> Result<()> {
     let session_id = session.id;
     let session_short = &session.id.to_string()[..8];
 
+    if args.show && args.generate {
+        bail!("Cannot use --show and --generate together.");
+    }
+
     if args.show {
         // Show existing summary
         show_summary(&db, &session_id, session_short)?;
@@ -119,21 +123,18 @@ pub fn run(args: Args) -> Result<()> {
                 println!("{summary_text}");
             }
             Err(SummarizeError::NotConfigured) => {
-                eprintln!(
-                    "{}\n\n\
+                bail!(
+                    "Summary provider not configured.\n\n\
                      Configure a summary provider first:\n  \
-                     lore config set summary_provider <anthropic|openai|openrouter>\n  \
-                     lore config set summary_api_key_anthropic <key>\n  \
-                     lore config set summary_api_key_openai <key>\n  \
-                     lore config set summary_api_key_openrouter <key>",
-                    "Summary provider not configured.".red()
+                     lore init --force       (guided setup with hidden key input)\n  \
+                     lore config set summary_provider <anthropic|openai|openrouter>"
                 );
             }
             Err(SummarizeError::EmptySession) => {
-                eprintln!("Session has no messages to summarize.");
+                bail!("Session has no messages to summarize.");
             }
             Err(e) => {
-                eprintln!("{} {e}", "Failed to generate summary:".red());
+                bail!("Failed to generate summary: {e}");
             }
         }
     } else if let Some(summary_text) = args.summary {

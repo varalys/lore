@@ -51,7 +51,9 @@ pub fn resolve_config() -> Result<SummaryConfig, SummarizeError> {
         .ok()
         .or_else(|| config.summary_provider.clone());
 
-    let provider_str = provider_str.ok_or(SummarizeError::NotConfigured)?;
+    let provider_str = provider_str
+        .ok_or(SummarizeError::NotConfigured)?
+        .to_lowercase();
 
     let kind: SummaryProviderKind = provider_str
         .parse()

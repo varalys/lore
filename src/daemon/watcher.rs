@@ -503,7 +503,13 @@ impl SessionWatcher {
                 }
 
                 if session_just_ended {
-                    Self::auto_summarize_session(db, session);
+                    let session_clone = session.clone();
+                    std::thread::spawn(move || match Database::open_default() {
+                        Ok(db) => Self::auto_summarize_session(&db, &session_clone),
+                        Err(e) => {
+                            tracing::warn!("Failed to open DB for auto-summarize: {e}")
+                        }
+                    });
                 }
             }
         }
