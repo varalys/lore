@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-02-27
+
+### Added
+
+- **LLM-powered session summaries** - Generate concise session summaries via Anthropic, OpenAI, or OpenRouter
+  - `lore summarize <session> --generate` - Generate a summary using the configured LLM
+  - Per-provider API keys and model overrides (`summary_api_key_{provider}`, `summary_model_{provider}`)
+  - Environment variable overrides: `LORE_SUMMARY_PROVIDER`, `LORE_SUMMARY_API_KEY`, `LORE_SUMMARY_MODEL`
+- **Daemon auto-summarization** - Automatically summarize sessions when they end
+  - Enable with `lore config set summary_auto true`
+  - Configurable message threshold (`summary_auto_threshold`, default: 10)
+  - Runs on a background thread to avoid blocking session capture
+- **Summary provider setup in `lore init`** - Guided wizard with hidden API key input
+- `[S]` indicator in `lore sessions` output for sessions with summaries
+- API key masking in `lore config get` and `lore config set` output
+
+### Fixed
+
+- `lore summarize --generate` now returns a non-zero exit code on failure
+- `lore summarize --show --generate` now gives an explicit error instead of silently ignoring `--generate`
+- Provider name matching is now case-insensitive (`LORE_SUMMARY_PROVIDER=Anthropic` works)
+- Guidance text no longer suggests setting API keys via CLI arguments (avoids shell history leakage)
+
+### Performance
+
+- Sessions list uses a batch query for summary indicators instead of per-session lookups
+
 ## [0.1.12] - 2026-02-05
 
 ### Added
@@ -234,7 +261,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON and Markdown output formats
 - GitHub Actions CI and release workflows
 
-[Unreleased]: https://github.com/varalys/lore/compare/v0.1.12...HEAD
+[Unreleased]: https://github.com/varalys/lore/compare/v0.1.13...HEAD
+[0.1.13]: https://github.com/varalys/lore/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/varalys/lore/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/varalys/lore/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/varalys/lore/compare/v0.1.9...v0.1.10
