@@ -1144,7 +1144,10 @@ fn offer_summary_setup(config: &mut Config, config_path: &std::path::Path) -> Re
     println!();
     println!("Lore can generate short summaries of your AI coding sessions using an LLM.");
     println!("Summaries help you quickly understand what each session accomplished.");
-    println!("{}", "Requires an API key from a supported provider.".dimmed());
+    println!(
+        "{}",
+        "Requires an API key from a supported provider.".dimmed()
+    );
     println!();
 
     if !prompt_yes_no("Set up session summaries?", false)? {
