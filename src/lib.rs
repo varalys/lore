@@ -36,3 +36,6 @@ pub mod mcp;
 
 /// SQLite storage layer for sessions, messages, and links.
 pub mod storage;
+
+/// LLM-powered session summarization.
+pub mod summarize;

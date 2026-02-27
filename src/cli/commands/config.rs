@@ -64,6 +64,16 @@ struct ConfigSettings {
     auto_link: bool,
     auto_link_threshold: f64,
     commit_footer: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary_model_anthropic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary_model_openai: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary_model_openrouter: Option<String>,
+    summary_auto: bool,
+    summary_auto_threshold: usize,
 }
 
 /// Executes the config command.
@@ -95,6 +105,12 @@ fn run_show(format: OutputFormat) -> Result<()> {
                     auto_link: config.auto_link,
                     auto_link_threshold: config.auto_link_threshold,
                     commit_footer: config.commit_footer,
+                    summary_provider: config.summary_provider.clone(),
+                    summary_model_anthropic: config.summary_model_anthropic.clone(),
+                    summary_model_openai: config.summary_model_openai.clone(),
+                    summary_model_openrouter: config.summary_model_openrouter.clone(),
+                    summary_auto: config.summary_auto,
+                    summary_auto_threshold: config.summary_auto_threshold,
                 },
             };
             let json = serde_json::to_string_pretty(&output)?;
@@ -159,6 +175,73 @@ fn run_show(format: OutputFormat) -> Result<()> {
                 }
             );
             println!();
+
+            // Summary settings (only show section if any summary config exists)
+            let has_summary_config = config.summary_provider.is_some()
+                || config.summary_api_key_anthropic.is_some()
+                || config.summary_api_key_openai.is_some()
+                || config.summary_api_key_openrouter.is_some();
+
+            if has_summary_config {
+                println!("{}", "Summary:".dimmed());
+                println!(
+                    "  summary_provider:    {}",
+                    config
+                        .summary_provider
+                        .as_deref()
+                        .map(|s| s.cyan().to_string())
+                        .unwrap_or_else(|| "(not set)".dimmed().to_string())
+                );
+
+                // Show which providers have keys configured (masked)
+                let providers = [
+                    ("anthropic", &config.summary_api_key_anthropic),
+                    ("openai", &config.summary_api_key_openai),
+                    ("openrouter", &config.summary_api_key_openrouter),
+                ];
+                for (name, key) in &providers {
+                    if let Some(k) = key {
+                        println!(
+                            "  summary_api_key_{}: {}",
+                            format!("{name:<10}"),
+                            mask_secret(k).dimmed()
+                        );
+                    }
+                }
+
+                // Show custom models if set
+                let models = [
+                    ("anthropic", &config.summary_model_anthropic),
+                    ("openai", &config.summary_model_openai),
+                    ("openrouter", &config.summary_model_openrouter),
+                ];
+                for (name, model) in &models {
+                    if let Some(m) = model {
+                        println!(
+                            "  summary_model_{}: {}",
+                            format!("{name:<11}"),
+                            m.cyan()
+                        );
+                    }
+                }
+
+                println!(
+                    "  summary_auto:        {}",
+                    if config.summary_auto {
+                        "true".green()
+                    } else {
+                        "false".yellow()
+                    }
+                );
+                if config.summary_auto {
+                    println!(
+                        "  summary_auto_threshold: {}",
+                        config.summary_auto_threshold.to_string().cyan()
+                    );
+                }
+                println!();
+            }
+
             println!(
                 "{}",
                 "Use 'lore config set <key> <value>' to change settings.".dimmed()
@@ -177,13 +260,20 @@ fn run_get(key: &str, format: OutputFormat) -> Result<()> {
 
     match value {
         Some(v) => {
+            // Mask sensitive values in output
+            let display_value = if key.starts_with("summary_api_key") {
+                mask_secret(&v)
+            } else {
+                v.clone()
+            };
+
             match format {
                 OutputFormat::Json => {
-                    let output = serde_json::json!({ "key": key, "value": v });
+                    let output = serde_json::json!({ "key": key, "value": display_value });
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 OutputFormat::Text | OutputFormat::Markdown => {
-                    println!("{v}");
+                    println!("{display_value}");
                 }
             }
             Ok(())
@@ -222,9 +312,31 @@ fn run_set(key: &str, value: &str) -> Result<()> {
         }
     }
 
-    println!("{} {} = {}", "Set".green(), key.cyan(), value.cyan());
+    // Mask sensitive values in output
+    let display_value = if key.starts_with("summary_api_key") {
+        mask_secret(value)
+    } else {
+        value.to_string()
+    };
+    println!(
+        "{} {} = {}",
+        "Set".green(),
+        key.cyan(),
+        display_value.cyan()
+    );
 
     Ok(())
+}
+
+/// Masks a secret value for display, showing only the first 4 and last 4 characters.
+///
+/// Short values (12 characters or fewer) are fully masked.
+fn mask_secret(value: &str) -> String {
+    if value.len() <= 12 {
+        "*".repeat(value.len())
+    } else {
+        format!("{}...{}", &value[..4], &value[value.len() - 4..])
+    }
 }
 
 #[cfg(test)]
@@ -252,6 +364,12 @@ mod tests {
                 auto_link: false,
                 auto_link_threshold: 0.7,
                 commit_footer: false,
+                summary_provider: None,
+                summary_model_anthropic: None,
+                summary_model_openai: None,
+                summary_model_openrouter: None,
+                summary_auto: false,
+                summary_auto_threshold: 4,
             },
         };
 
@@ -271,6 +389,12 @@ mod tests {
             auto_link: true,
             auto_link_threshold: 0.8,
             commit_footer: true,
+            summary_provider: Some("anthropic".to_string()),
+            summary_model_anthropic: None,
+            summary_model_openai: None,
+            summary_model_openrouter: None,
+            summary_auto: false,
+            summary_auto_threshold: 4,
         };
 
         let json = serde_json::to_string(&settings).unwrap();
@@ -278,6 +402,8 @@ mod tests {
         assert!(json.contains("claude-code"));
         assert!(json.contains("true"));
         assert!(json.contains("0.8"));
+        assert!(json.contains("summary_provider"));
+        assert!(json.contains("anthropic"));
     }
 
     #[test]
@@ -313,5 +439,29 @@ mod tests {
                 "cline".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn test_mask_secret_long_value() {
+        let masked = mask_secret("sk-ant-api03-abcdef123456");
+        assert_eq!(masked, "sk-a...3456");
+    }
+
+    #[test]
+    fn test_mask_secret_short_value() {
+        let masked = mask_secret("short");
+        assert_eq!(masked, "*****");
+    }
+
+    #[test]
+    fn test_mask_secret_exactly_12_chars() {
+        let masked = mask_secret("123456789012");
+        assert_eq!(masked, "************");
+    }
+
+    #[test]
+    fn test_mask_secret_13_chars() {
+        let masked = mask_secret("1234567890123");
+        assert_eq!(masked, "1234...0123");
     }
 }

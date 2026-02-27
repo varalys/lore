@@ -85,7 +85,7 @@ pub fn run(args: Args) -> Result<()> {
         }
         OutputFormat::Text | OutputFormat::Markdown => {
             // Column widths for consistent alignment
-            const ID_WIDTH: usize = 8;
+            const ID_WIDTH: usize = 12;
             const STARTED_WIDTH: usize = 16;
             const MESSAGES_WIDTH: usize = 8;
             const BRANCH_WIDTH: usize = 24;
@@ -101,6 +101,12 @@ pub fn run(args: Args) -> Result<()> {
 
             for session in &sessions {
                 let id_short = &session.id.to_string()[..8];
+                let has_summary = db.get_summary(&session.id).ok().flatten().is_some();
+                let id_display = if has_summary {
+                    format!("{} {}", id_short.cyan(), "[S]".green())
+                } else {
+                    format!("{}", id_short.cyan())
+                };
                 let started = session.started_at.format("%Y-%m-%d %H:%M").to_string();
                 let branch_history = db.get_session_branch_history(session.id)?;
                 let branch_display = format_branch_history(&branch_history, BRANCH_WIDTH);
@@ -112,7 +118,7 @@ pub fn run(args: Args) -> Result<()> {
 
                 println!(
                     "{:<ID_WIDTH$}  {:<STARTED_WIDTH$}  {:>MESSAGES_WIDTH$}  {:<BRANCH_WIDTH$}  {}",
-                    id_short.cyan(),
+                    id_display,
                     started.dimmed(),
                     session.message_count,
                     branch_display.yellow(),

@@ -30,6 +30,7 @@ mod daemon;
 mod git;
 mod mcp;
 mod storage;
+mod summarize;
 
 use cli::commands;
 use config::Config;

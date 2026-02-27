@@ -501,6 +501,10 @@ impl SessionWatcher {
                         e
                     );
                 }
+
+                if session_just_ended {
+                    Self::auto_summarize_session(db, session);
+                }
             }
         }
 
@@ -621,6 +625,10 @@ impl SessionWatcher {
                 }
             }
 
+            if session.ended_at.is_some() {
+                Self::auto_summarize_session(db, &session);
+            }
+
             total_sessions += 1;
             total_messages += message_count as u64;
         }
@@ -732,6 +740,75 @@ impl SessionWatcher {
         }
 
         Ok(linked_count)
+    }
+
+    /// Attempts to auto-generate a summary for a completed session.
+    ///
+    /// This is best-effort: all errors are logged but not propagated.
+    /// Does nothing if summary_auto is disabled, the session has too few
+    /// messages, or a summary already exists.
+    fn auto_summarize_session(db: &Database, session: &crate::storage::models::Session) {
+        let config = match crate::config::Config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!("Could not load config for auto-summarize: {e}");
+                return;
+            }
+        };
+
+        if !config.summary_auto {
+            return;
+        }
+
+        if (session.message_count as usize) < config.summary_auto_threshold {
+            return;
+        }
+
+        // Check if summary already exists
+        match db.get_summary(&session.id) {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("Failed to check existing summary: {e}");
+                return;
+            }
+        }
+
+        let messages = match db.get_messages(&session.id) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("Failed to get messages for auto-summarize: {e}");
+                return;
+            }
+        };
+
+        match crate::summarize::generate_summary(&messages) {
+            Ok(content) => {
+                let summary = crate::storage::models::Summary {
+                    id: uuid::Uuid::new_v4(),
+                    session_id: session.id,
+                    content,
+                    generated_at: chrono::Utc::now(),
+                };
+                if let Err(e) = db.insert_summary(&summary) {
+                    tracing::warn!(
+                        "Failed to save auto-generated summary for {}: {e}",
+                        &session.id.to_string()[..8]
+                    );
+                } else {
+                    tracing::info!(
+                        "Auto-generated summary for session {}",
+                        &session.id.to_string()[..8]
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Auto-summarize skipped for session {}: {e}",
+                    &session.id.to_string()[..8]
+                );
+            }
+        }
     }
 
     /// Returns the number of files currently being tracked.
