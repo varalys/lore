@@ -202,8 +202,8 @@ fn run_show(format: OutputFormat) -> Result<()> {
                 for (name, key) in &providers {
                     if let Some(k) = key {
                         println!(
-                            "  summary_api_key_{}: {}",
-                            format!("{name:<10}"),
+                            "  summary_api_key_{:<10}: {}",
+                            name,
                             mask_secret(k).dimmed()
                         );
                     }
@@ -217,11 +217,7 @@ fn run_show(format: OutputFormat) -> Result<()> {
                 ];
                 for (name, model) in &models {
                     if let Some(m) = model {
-                        println!(
-                            "  summary_model_{}: {}",
-                            format!("{name:<11}"),
-                            m.cyan()
-                        );
+                        println!("  summary_model_{:<11}: {}", name, m.cyan());
                     }
                 }
 

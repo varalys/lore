@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::daemon::DaemonState;
 use crate::storage::db::default_db_path;
 use crate::storage::{Database, Machine};
+use crate::summarize::provider::{default_model, SummaryProviderKind};
 use clap::CommandFactory;
 
 /// Arguments for the init command.
@@ -238,6 +239,10 @@ pub fn run(args: Args) -> Result<()> {
     if aider_enabled {
         offer_aider_scan(&db)?;
     }
+
+    // Offer to configure session summaries
+    println!();
+    offer_summary_setup(&mut config, &config_path)?;
 
     // Offer to install shell completions
     println!();
@@ -1127,6 +1132,160 @@ fn offer_aider_scan(db: &Database) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Offers to configure session summary generation during init.
+///
+/// Walks the user through selecting an LLM provider, entering an API key,
+/// choosing a model, and enabling auto-summarize. Saves all settings to
+/// the config file.
+fn offer_summary_setup(config: &mut Config, config_path: &std::path::Path) -> Result<()> {
+    println!("{}", "Session Summaries".bold());
+    println!();
+    println!("Lore can generate short summaries of your AI coding sessions using an LLM.");
+    println!("Summaries help you quickly understand what each session accomplished.");
+    println!("{}", "Requires an API key from a supported provider.".dimmed());
+    println!();
+
+    if !prompt_yes_no("Set up session summaries?", false)? {
+        return Ok(());
+    }
+
+    println!();
+    let provider = match prompt_provider_selection()? {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    println!();
+    let api_key = prompt_api_key(&provider)?;
+    if api_key.is_empty() {
+        println!("{}", "No API key entered. Summary setup skipped.".yellow());
+        return Ok(());
+    }
+
+    // Parse provider kind to get the default model
+    let kind: SummaryProviderKind = provider
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!("{}", e))?;
+    let default = default_model(kind);
+
+    println!();
+    print!("Model [{}]: ", default.cyan());
+    io::stdout().flush()?;
+
+    let mut model_input = String::new();
+    io::stdin().read_line(&mut model_input)?;
+    let model_input = model_input.trim().to_string();
+
+    println!();
+    let auto_summarize = prompt_yes_no("Enable auto-summarize for new sessions?", true)?;
+
+    // Apply all settings
+    config.set("summary_provider", &provider)?;
+    config.set(&format!("summary_api_key_{}", provider), &api_key)?;
+    if !model_input.is_empty() {
+        config.set(&format!("summary_model_{}", provider), &model_input)?;
+    }
+    config.set(
+        "summary_auto",
+        if auto_summarize { "true" } else { "false" },
+    )?;
+    config.set("summary_auto_threshold", "4")?;
+
+    config
+        .save_to_path(config_path)
+        .context("Failed to save summary configuration")?;
+
+    // Show confirmation
+    let display_model = if model_input.is_empty() {
+        default.to_string()
+    } else {
+        model_input
+    };
+
+    println!();
+    println!("{}", "Summary configuration saved:".green());
+    println!(
+        "  Provider:       {}",
+        capitalize_provider(&provider).cyan()
+    );
+    println!("  Model:          {}", display_model.cyan());
+    println!("  API key:        {}", "(saved)".dimmed());
+    println!(
+        "  Auto-summarize: {}",
+        if auto_summarize {
+            "enabled".green().to_string()
+        } else {
+            "disabled".dimmed().to_string()
+        }
+    );
+
+    Ok(())
+}
+
+/// Prompts the user to select an LLM provider from a numbered list.
+///
+/// Displays available providers and returns the lowercase provider name,
+/// or `None` if the selection is invalid.
+fn prompt_provider_selection() -> Result<Option<String>> {
+    println!("{}", "Choose a provider:".bold());
+    println!("  [1] Anthropic (Claude)");
+    println!("  [2] OpenAI (GPT)");
+    println!("  [3] OpenRouter (multiple models)");
+    println!();
+    print!("Provider [1]: ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    let provider = match input {
+        "" | "1" => "anthropic",
+        "2" => "openai",
+        "3" => "openrouter",
+        _ => {
+            println!("{}: Invalid selection '{}'", "Warning".yellow(), input);
+            return Ok(None);
+        }
+    };
+
+    Ok(Some(provider.to_string()))
+}
+
+/// Prompts for an API key with hidden input.
+///
+/// Uses `rpassword` to prevent the key from being displayed on screen.
+/// Returns the entered key, which may be empty if the user presses Enter
+/// without typing anything.
+fn prompt_api_key(provider: &str) -> Result<String> {
+    let display_name = capitalize_provider(provider);
+    print!("API key for {} (hidden input): ", display_name);
+    io::stdout().flush()?;
+
+    let key = rpassword::read_password().context("Failed to read API key")?;
+
+    if !key.is_empty() {
+        let masked = if key.len() > 4 {
+            format!("...{}", &key[key.len() - 4..])
+        } else {
+            "****".to_string()
+        };
+        println!("  Key received: {}", masked.dimmed());
+    }
+
+    Ok(key)
+}
+
+/// Returns a human-readable capitalized name for the given provider.
+fn capitalize_provider(provider: &str) -> &str {
+    match provider {
+        "anthropic" => "Anthropic",
+        "openai" => "OpenAI",
+        "openrouter" => "OpenRouter",
+        _ => provider,
+    }
 }
 
 #[cfg(test)]
