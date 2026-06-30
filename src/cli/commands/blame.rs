@@ -199,7 +199,7 @@ fn git_blame(file_path: &str, line_num: usize) -> Result<BlameInfo> {
         .with_context(|| format!("Could not find commit: {commit_sha}"))?;
 
     let author = commit.author().name().unwrap_or("Unknown").to_string();
-    let summary = commit.summary().unwrap_or("").to_string();
+    let summary = commit.summary().ok().flatten().unwrap_or("").to_string();
 
     // Format the commit date
     let time = commit.time();

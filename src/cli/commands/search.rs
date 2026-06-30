@@ -300,7 +300,7 @@ fn group_results_with_context(
     }
 
     // Sort by session start time (most recent first)
-    grouped_results.sort_by(|a, b| b.session_started_at.cmp(&a.session_started_at));
+    grouped_results.sort_by_key(|b| std::cmp::Reverse(b.session_started_at));
 
     Ok(grouped_results)
 }

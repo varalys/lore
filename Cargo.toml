@@ -28,7 +28,7 @@ notify = "6"
 notify-debouncer-mini = "0.4"
 
 # Git
-git2 = "0.18"
+git2 = "0.21"
 
 # Async (for daemon)
 tokio = { version = "1", features = ["full"] }
@@ -62,7 +62,7 @@ rpassword = "7"
 rand = "0.8"
 
 # MCP (Model Context Protocol)
-rmcp = { version = "0.12", features = ["server", "transport-io"] }
+rmcp = { version = "1.8", features = ["server", "transport-io"] }
 schemars = "1.0"
 
 [dev-dependencies]
