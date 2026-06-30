@@ -61,9 +61,13 @@ webbrowser = "1"
 rpassword = "7"
 rand = "0.8"
 
+# Git-ref sync (gzip compression of session blobs before encryption)
+flate2 = "1"
+
 # MCP (Model Context Protocol)
 rmcp = { version = "1.8", features = ["server", "transport-io"] }
 schemars = "1.0"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

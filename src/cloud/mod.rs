@@ -82,6 +82,17 @@ pub enum CloudError {
     ServerError { status: u16, message: String },
 }
 
+/// Bridges sync errors into the cloud error type.
+///
+/// The encryption primitives moved into [`crate::sync`] and now report
+/// [`crate::sync::SyncError`]. This conversion lets the still-live cloud code
+/// keep propagating those failures with `?` in `CloudError`-returning paths.
+impl From<crate::sync::SyncError> for CloudError {
+    fn from(err: crate::sync::SyncError) -> Self {
+        CloudError::EncryptionError(err.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
