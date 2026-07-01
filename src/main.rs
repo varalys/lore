@@ -31,12 +31,6 @@ mod git;
 mod mcp;
 mod storage;
 mod summarize;
-// The sync module is the foundation for git-ref sync. Its public API is consumed
-// by later phases (the `lore sync` command, global store, and daemon wiring) and
-// is not yet called from the binary, so allow dead code here for the binary
-// build only. The library build (`pub mod sync` in lib.rs) keeps full dead-code
-// checking, so genuinely unused internals are still caught.
-#[allow(dead_code)]
 mod sync;
 
 use cli::commands;
@@ -289,6 +283,18 @@ enum Commands {
     )]
     Cloud(commands::cloud::Args),
 
+    /// Sync reasoning history over git (serverless, per-repo)
+    #[command(
+        long_about = "Serverless sync that stores encrypted reasoning history in this\n\
+        repository's own git repo under refs/lore/sessions. Sharing the repo\n\
+        and a passphrase is all a teammate needs to read the reasoning; there\n\
+        is no server and no per-seat fee.\n\n\
+        Run 'lore sync setup' once per repo to set the passphrase, then\n\
+        'lore sync' to fetch, merge, and push. Session content is encrypted\n\
+        with a passphrase that only you and your teammates know."
+    )]
+    Sync(commands::sync::Args),
+
     /// Diagnose Lore installation and configuration issues
     #[command(
         long_about = "Performs comprehensive health checks on the Lore installation.\n\
@@ -461,6 +467,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Login(_) => "login",
         Commands::Logout(_) => "logout",
         Commands::Cloud(_) => "cloud",
+        Commands::Sync(_) => "sync",
         Commands::Doctor(_) => "doctor",
         Commands::Mcp(_) => "mcp",
         Commands::Completions(_) => "completions",
@@ -548,6 +555,7 @@ fn main() -> Result<()> {
         Commands::Login(args) => commands::login::run(args),
         Commands::Logout(args) => commands::logout::run(args),
         Commands::Cloud(args) => commands::cloud::run(args),
+        Commands::Sync(args) => commands::sync::run(args),
         Commands::Doctor(args) => commands::doctor::run(args),
         Commands::Mcp(args) => commands::mcp::run(args),
         Commands::Completions(args) => {

@@ -146,6 +146,11 @@ impl KeyStore {
     }
 
     /// Deletes any stored key for a store from both file and keychain storage.
+    ///
+    /// Part of the key-store foundation's public API. Retained for a future
+    /// store reset/forget flow; the per-repo `lore sync` command only stores and
+    /// loads keys, so the binary does not yet call this directly.
+    #[allow(dead_code)]
     pub fn delete_key(&self, store_id: &str) -> Result<(), SyncError> {
         let path = self.key_path(store_id)?;
         if path.exists() {

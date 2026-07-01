@@ -75,6 +75,9 @@ pub mod show;
 /// Add or view session summaries.
 pub mod summarize;
 
+/// Serverless git-ref sync for a repository's lore store.
+pub mod sync;
+
 /// Show current Lore status and recent sessions.
 pub mod status;
 

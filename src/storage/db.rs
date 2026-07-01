@@ -821,6 +821,34 @@ impl Database {
         Ok(())
     }
 
+    /// Inserts a session link idempotently, ignoring an existing id.
+    ///
+    /// Used by git-ref sync when merging a pulled session record: a link that
+    /// already exists (matched by its stable UUID) is left untouched rather than
+    /// raising a primary-key conflict, so re-merging the same remote record is a
+    /// no-op.
+    pub fn upsert_link(&self, link: &SessionLink) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO session_links (id, session_id, link_type, commit_sha, branch, remote, created_at, created_by, confidence)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(id) DO NOTHING
+            "#,
+            params![
+                link.id.to_string(),
+                link.session_id.to_string(),
+                format!("{:?}", link.link_type).to_lowercase(),
+                link.commit_sha,
+                link.branch,
+                link.remote,
+                link.created_at.to_rfc3339(),
+                format!("{:?}", link.created_by).to_lowercase(),
+                link.confidence,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Retrieves all session links for a commit.
     ///
     /// Supports prefix matching on the commit SHA, allowing short SHAs
@@ -1760,10 +1788,30 @@ impl Database {
         Ok(())
     }
 
+    /// Inserts an annotation idempotently, ignoring an existing id.
+    ///
+    /// Used by git-ref sync when merging a pulled session record so re-merging
+    /// the same annotation (matched by its stable UUID) is a no-op.
+    pub fn upsert_annotation(&self, annotation: &Annotation) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO annotations (id, session_id, content, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(id) DO NOTHING
+            "#,
+            params![
+                annotation.id.to_string(),
+                annotation.session_id.to_string(),
+                annotation.content,
+                annotation.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Retrieves all annotations for a session.
     ///
     /// Annotations are returned in order of creation (oldest first).
-    #[allow(dead_code)]
     pub fn get_annotations(&self, session_id: &Uuid) -> Result<Vec<Annotation>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, content, created_at
@@ -1820,6 +1868,30 @@ impl Database {
             r#"
             INSERT INTO tags (id, session_id, label, created_at)
             VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                tag.id.to_string(),
+                tag.session_id.to_string(),
+                tag.label,
+                tag.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Inserts a tag idempotently, ignoring any uniqueness conflict.
+    ///
+    /// Used by git-ref sync when merging a pulled session record. The bare
+    /// `ON CONFLICT DO NOTHING` covers both the primary key and the
+    /// `UNIQUE(session_id, label)` constraint, so a tag that already exists
+    /// (whether matched by id or by the same label on the same session) is left
+    /// untouched instead of raising an error.
+    pub fn upsert_tag(&self, tag: &Tag) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO tags (id, session_id, label, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT DO NOTHING
             "#,
             params![
                 tag.id.to_string(),
@@ -1919,6 +1991,31 @@ impl Database {
             r#"
             INSERT INTO summaries (id, session_id, content, generated_at)
             VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                summary.id.to_string(),
+                summary.session_id.to_string(),
+                summary.content,
+                summary.generated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Inserts or updates the summary for a session (keyed by session).
+    ///
+    /// Used by git-ref sync when merging a pulled session record. Summaries are
+    /// unique per session, so on conflict the existing summary's content and
+    /// timestamp are refreshed from the incoming record (newer content wins)
+    /// while the row identity is preserved.
+    pub fn upsert_summary(&self, summary: &Summary) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO summaries (id, session_id, content, generated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(session_id) DO UPDATE SET
+                content = excluded.content,
+                generated_at = excluded.generated_at
             "#,
             params![
                 summary.id.to_string(),
@@ -6108,5 +6205,113 @@ mod tests {
             "Average should be 15.0, got {}",
             avg_val
         );
+    }
+
+    // ==================== Idempotent Upsert Tests (git-ref sync) ====================
+
+    use crate::storage::models::{Annotation, Summary, Tag};
+
+    #[test]
+    fn test_upsert_link_is_idempotent() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).unwrap();
+
+        let link = create_test_link(session.id, Some("abc123"), LinkType::Commit);
+
+        // First upsert inserts, second upsert with the same id is a no-op.
+        db.upsert_link(&link).unwrap();
+        db.upsert_link(&link).unwrap();
+
+        let links = db.get_links_by_session(&session.id).unwrap();
+        assert_eq!(
+            links.len(),
+            1,
+            "Re-upserting the same link must not duplicate"
+        );
+        assert_eq!(links[0].id, link.id);
+    }
+
+    #[test]
+    fn test_upsert_tag_idempotent_by_id_and_label() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).unwrap();
+
+        let tag = Tag {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            label: "bug-fix".to_string(),
+            created_at: Utc::now(),
+        };
+
+        db.upsert_tag(&tag).unwrap();
+        // Same id again is a no-op.
+        db.upsert_tag(&tag).unwrap();
+        // A different id but the same (session, label) also collapses to a no-op.
+        let tag_same_label = Tag {
+            id: Uuid::new_v4(),
+            ..tag.clone()
+        };
+        db.upsert_tag(&tag_same_label).unwrap();
+
+        let tags = db.get_tags(&session.id).unwrap();
+        assert_eq!(
+            tags.len(),
+            1,
+            "Duplicate tag label must not be inserted twice"
+        );
+        assert_eq!(tags[0].label, "bug-fix");
+    }
+
+    #[test]
+    fn test_upsert_annotation_is_idempotent() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).unwrap();
+
+        let annotation = Annotation {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "important".to_string(),
+            created_at: Utc::now(),
+        };
+
+        db.upsert_annotation(&annotation).unwrap();
+        db.upsert_annotation(&annotation).unwrap();
+
+        let annotations = db.get_annotations(&session.id).unwrap();
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].content, "important");
+    }
+
+    #[test]
+    fn test_upsert_summary_inserts_then_updates() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).unwrap();
+
+        let summary = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "first".to_string(),
+            generated_at: Utc::now(),
+        };
+        db.upsert_summary(&summary).unwrap();
+
+        // A second upsert for the same session refreshes the content in place.
+        let updated = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "second".to_string(),
+            generated_at: Utc::now(),
+        };
+        db.upsert_summary(&updated).unwrap();
+
+        let stored = db
+            .get_summary(&session.id)
+            .unwrap()
+            .expect("summary exists");
+        assert_eq!(stored.content, "second", "Newer content should win");
     }
 }
