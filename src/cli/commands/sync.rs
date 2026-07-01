@@ -25,18 +25,21 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::cli::OutputFormat;
 use crate::config::Config;
-use crate::storage::models::{Machine, Session};
+use crate::storage::models::{Machine, Session, Tombstone};
 use crate::storage::Database;
 use crate::sync::gitref::{self, TreeEntry};
 use crate::sync::keystore::{derive_store_key, generate_store_salt, store_id_from_salt, KeyStore};
-use crate::sync::store::{decrypt_session_record, encrypt_session_record, SessionRecord};
+use crate::sync::store::{
+    decrypt_session_record, decrypt_tombstones, encrypt_session_record, encrypt_tombstones,
+    SessionRecord,
+};
 use crate::sync::SyncError;
 
 /// Full ref name for a repository's per-repo lore store.
@@ -53,6 +56,19 @@ const GLOBAL_REMOTE: &str = "origin";
 
 /// Minimum passphrase length for a newly created store.
 const MIN_PASSPHRASE_LEN: usize = 8;
+
+/// Tree path of the encrypted tombstone set inside the store.
+///
+/// Holds the JSON array of child-record deletions ({child_id, kind, session_id,
+/// deleted_at}) so a deletion on one machine suppresses that record everywhere.
+const TOMBSTONES_PATH: &str = "meta/tombstones";
+
+/// Age past which a tombstone is garbage-collected during sync.
+///
+/// A deletion older than this is assumed to have reached every machine, so
+/// dropping its tombstone can no longer resurrect the deleted child. Bounds the
+/// tombstone set so it does not grow without limit.
+const TOMBSTONE_GC_DAYS: i64 = 90;
 
 /// Maximum number of fetch/merge/build/push attempts before giving up.
 ///
@@ -561,11 +577,26 @@ fn perform_sync_in_store(
             Vec::new()
         };
 
+        // TOMBSTONES: union the remote deletion set into the local table BEFORE
+        // the merge so the merge suppresses re-adding any child that was deleted
+        // on another machine, then GC entries older than the retention window.
+        // A wrong key makes the remote tombstones undecryptable; that is treated
+        // as an empty set here (the merge below surfaces the wrong-key error).
+        let remote_tombstones = read_remote_tombstones(repo, &tracking_entries, key)?;
+        db.add_tombstones(&remote_tombstones)?;
+        db.prune_tombstones(Utc::now() - Duration::days(TOMBSTONE_GC_DAYS))?;
+
         // MERGE remote -> local database (full records, newer-wins). A wrong key
         // surfaces here and aborts before anything is built or pushed. The store
         // selects which sync-tracking column an imported session is marked on.
         pulled_total += merge_remote_in_store(store, db, repo, &tracking_entries, key)?;
         merge_machines(db, repo, &tracking_entries)?;
+
+        // APPLY tombstones: remove any child that is present locally but has been
+        // deleted (on this or another machine). Suppression above stops a stale
+        // remote blob from re-adding it; this removes one already stored here.
+        let tombstones = db.list_tombstones()?;
+        db.apply_tombstones(&tombstones)?;
 
         // BUILD the outgoing tree. Separate the TREE BASE (which entries the new
         // tree inherits) from the COMMIT PARENT (which commit it descends from):
@@ -628,6 +659,12 @@ fn perform_sync_in_store(
         }
 
         add_meta_changes(db, repo, tree_base.as_deref(), salt, machine, &mut changes)?;
+
+        // Write the unioned, GC'd tombstone set back to the store, but only when
+        // it differs from what the base tree already holds so an unchanged set
+        // keeps its existing content-addressed blob (no churn from re-encrypting
+        // with a fresh nonce every sync).
+        add_tombstone_changes(db, repo, &remote_tombstones, key, &mut changes)?;
 
         let tree = gitref::build_tree(repo, tree_base.as_deref(), &changes)?;
         let message = format!("lore: sync {} session(s)", sessions.len());
@@ -845,6 +882,69 @@ fn add_meta_changes(
         gitref::write_blob(repo, &serde_json::to_vec(&machines)?)?,
     );
     Ok(())
+}
+
+/// Reads and decrypts the remote store's tombstone set.
+///
+/// Returns an empty set when the store has no `meta/tombstones` blob or the blob
+/// cannot be decrypted (a wrong key, which the session merge reports separately;
+/// treating it as empty here avoids a confusing early error).
+fn read_remote_tombstones(
+    repo: &Path,
+    entries: &[TreeEntry],
+    key: &[u8],
+) -> Result<Vec<Tombstone>> {
+    match blob_at_path(repo, entries, TOMBSTONES_PATH)? {
+        Some(bytes) => match decrypt_tombstones(&bytes, key) {
+            Ok(tombstones) => Ok(tombstones),
+            Err(e) => {
+                tracing::debug!("Could not decrypt remote tombstones: {e}");
+                Ok(Vec::new())
+            }
+        },
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Adds the encrypted tombstone blob to the outgoing tree when it changed.
+///
+/// Compares the local tombstone set with what the base tree already holds
+/// (`remote_tombstones`) by their `(child_id, kind)` keys. When the keys match,
+/// nothing is written so the base's existing blob is preserved verbatim
+/// (content-addressed dedup). Otherwise the full local set is re-encrypted and
+/// written, which also shrinks the stored set after garbage collection.
+fn add_tombstone_changes(
+    db: &Database,
+    repo: &Path,
+    remote_tombstones: &[Tombstone],
+    key: &[u8],
+    changes: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let local = db.list_tombstones()?;
+    if tombstone_keys_equal(&local, remote_tombstones) {
+        return Ok(());
+    }
+    let blob = encrypt_tombstones(&local, key)?;
+    let sha = gitref::write_blob(repo, &blob)?;
+    changes.insert(TOMBSTONES_PATH.to_string(), sha);
+    Ok(())
+}
+
+/// Returns whether two tombstone sets hold the same `(child_id, kind)` keys.
+///
+/// Only the identifying keys are compared (not `deleted_at` or `session_id`) so
+/// two machines recording the same deletion at different times do not trigger a
+/// perpetual rewrite of the store blob.
+fn tombstone_keys_equal(a: &[Tombstone], b: &[Tombstone]) -> bool {
+    let keys_a: HashSet<(&str, &str)> = a
+        .iter()
+        .map(|t| (t.child_id.as_str(), t.kind.as_str()))
+        .collect();
+    let keys_b: HashSet<(&str, &str)> = b
+        .iter()
+        .map(|t| (t.child_id.as_str(), t.kind.as_str()))
+        .collect();
+    keys_a == keys_b
 }
 
 /// Assembles the complete reasoning record for a session from the database.
@@ -2786,5 +2886,375 @@ mod tests {
                 .any(|s| s.id == id),
             "global sync must NOT mark the per-repo track"
         );
+    }
+
+    // ==================== tombstones ====================
+
+    /// Sets up a per-repo store on a fresh remote and returns (remote, url).
+    ///
+    /// Kept alive by the caller so the bare remote directory is not dropped.
+    fn setup_repo_with_store(
+        remote_url: &str,
+        passphrase: &str,
+    ) -> (TempDir, PathBuf, KeyStore, TempDir, MachineIdentity) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        init_repo(&repo);
+        git(&repo, &["remote", "add", "origin", remote_url]);
+        let (keystore, kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(&repo, "origin", &keystore, &m, passphrase).unwrap();
+        (dir, repo, keystore, kd, m)
+    }
+
+    #[test]
+    fn test_link_deletion_propagates_via_tombstone() {
+        // Machine A deletes a link and syncs. Machine B (which has that link)
+        // syncs and the link is removed, and a further sync does not resurrect it.
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let passphrase = "shared team passphrase";
+
+        // Machine A: set up, seed a session with a link, sync.
+        let (_da, repo_a, keystore_a, _ka, ma) = setup_repo_with_store(&remote_url, passphrase);
+        let (mut db_a, _dba) = open_db();
+        let session_id = seed_full_session(&mut db_a, "machine-a", &repo_dir(&repo_a));
+        let (key_a, salt_a) = load_store_credentials(&repo_a, "origin", &keystore_a).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, &repo_a);
+        perform_sync(
+            &mut db_a, &repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
+
+        // Machine B: join, sync (pull the session and its link).
+        let dir_b = tempfile::tempdir().unwrap();
+        let repo_b = dir_b.path();
+        init_repo(repo_b);
+        git(repo_b, &["remote", "add", "origin", &remote_url]);
+        let (keystore_b, _kb) = test_keystore();
+        let mb = machine("machine-b", "Machine B");
+        gitref::fetch(repo_b, "origin", SESSIONS_REF).unwrap();
+        let salt_b = read_store_salt(repo_b, "origin").unwrap().unwrap();
+        join_store(repo_b, "origin", &keystore_b, &mb, &salt_b, passphrase).unwrap();
+        let (mut db_b, _dbb) = open_db();
+        let (key_b, salt_b2) = load_store_credentials(repo_b, "origin", &keystore_b).unwrap();
+        let sessions_b = scoped_unsynced(&db_b, repo_b);
+        perform_sync(
+            &mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb, sessions_b,
+        )
+        .unwrap();
+        assert_eq!(
+            db_b.get_links_by_session(&session_id).unwrap().len(),
+            1,
+            "machine B must have pulled the link"
+        );
+
+        // Machine A: delete the link (records a tombstone) and sync.
+        assert!(db_a
+            .delete_link_by_session_and_commit(&session_id, "deadbeef")
+            .unwrap());
+        let sessions_a = scoped_unsynced(&db_a, &repo_a);
+        perform_sync(
+            &mut db_a, &repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
+
+        // Machine B: sync. The tombstone removes the link locally.
+        let sessions_b = scoped_unsynced(&db_b, repo_b);
+        perform_sync(
+            &mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb, sessions_b,
+        )
+        .unwrap();
+        assert!(
+            db_b.get_links_by_session(&session_id).unwrap().is_empty(),
+            "the deleted link must be removed on machine B"
+        );
+
+        // A subsequent sync must not resurrect it.
+        let sessions_b = scoped_unsynced(&db_b, repo_b);
+        perform_sync(
+            &mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb, sessions_b,
+        )
+        .unwrap();
+        assert!(
+            db_b.get_links_by_session(&session_id).unwrap().is_empty(),
+            "the deleted link must stay removed after another sync"
+        );
+    }
+
+    #[test]
+    fn test_concurrent_add_survives_remote_deletion() {
+        // A deletes link X while B adds a different link Y to the same session.
+        // After both sync, X is gone everywhere but Y survives everywhere. Uses
+        // the global store so both machines can push the shared session (the
+        // per-repo store scopes pushes by working directory, which differs per
+        // temp repo, so it cannot model a two-way concurrent edit in a test).
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let passphrase = "shared global passphrase";
+
+        // A: set up the global store, seed a session with link X, sync.
+        let (_store_a, store_a) = init_global_store(&remote_url);
+        let (keystore_a, _ka) = test_keystore();
+        let ma = machine("machine-a", "Machine A");
+        create_store(&store_a, GLOBAL_REMOTE, &keystore_a, &ma, passphrase).unwrap();
+        let (mut db_a, _dba) = open_db();
+        let session_id = seed_full_session(&mut db_a, "machine-a", "/projects/repo-one");
+        let (key_a, salt_a) = load_store_credentials(&store_a, GLOBAL_REMOTE, &keystore_a).unwrap();
+        let run_a = |db: &mut Database| {
+            let sessions = db.get_unsynced_global_sessions().unwrap();
+            perform_sync_in_store(
+                SyncStore::Global,
+                db,
+                &store_a,
+                GLOBAL_REMOTE,
+                &key_a,
+                &salt_a,
+                &ma,
+                sessions,
+            )
+            .unwrap();
+        };
+        run_a(&mut db_a);
+
+        // B: join and sync (has X).
+        let (_store_b, store_b) = init_global_store(&remote_url);
+        let (keystore_b, _kb) = test_keystore();
+        let mb = machine("machine-b", "Machine B");
+        gitref::fetch(&store_b, GLOBAL_REMOTE, SESSIONS_REF).unwrap();
+        let salt_b = read_store_salt(&store_b, GLOBAL_REMOTE).unwrap().unwrap();
+        join_store(
+            &store_b,
+            GLOBAL_REMOTE,
+            &keystore_b,
+            &mb,
+            &salt_b,
+            passphrase,
+        )
+        .unwrap();
+        let (mut db_b, _dbb) = open_db();
+        let (key_b, salt_b2) =
+            load_store_credentials(&store_b, GLOBAL_REMOTE, &keystore_b).unwrap();
+        let run_b = |db: &mut Database| {
+            let sessions = db.get_unsynced_global_sessions().unwrap();
+            perform_sync_in_store(
+                SyncStore::Global,
+                db,
+                &store_b,
+                GLOBAL_REMOTE,
+                &key_b,
+                &salt_b2,
+                &mb,
+                sessions,
+            )
+            .unwrap();
+        };
+        run_b(&mut db_b);
+
+        // A: delete X, sync.
+        assert!(db_a
+            .delete_link_by_session_and_commit(&session_id, "deadbeef")
+            .unwrap());
+        run_a(&mut db_a);
+
+        // B: add a DIFFERENT link Y, then sync.
+        let y_id = Uuid::new_v4();
+        db_b.insert_link(&SessionLink {
+            id: y_id,
+            session_id,
+            link_type: LinkType::Commit,
+            commit_sha: Some("feedface".to_string()),
+            branch: Some("main".to_string()),
+            remote: Some("origin".to_string()),
+            created_at: Utc::now(),
+            created_by: LinkCreator::User,
+            confidence: Some(0.9),
+        })
+        .unwrap();
+        run_b(&mut db_b);
+
+        // B has only Y now (X removed by the tombstone).
+        let b_links = db_b.get_links_by_session(&session_id).unwrap();
+        assert_eq!(b_links.len(), 1, "B keeps only its own new link");
+        assert_eq!(b_links[0].id, y_id);
+
+        // A: sync again to pull Y.
+        run_a(&mut db_a);
+        let a_links = db_a.get_links_by_session(&session_id).unwrap();
+        assert_eq!(a_links.len(), 1, "A gets the concurrently added link");
+        assert_eq!(a_links[0].id, y_id, "X stays deleted, Y propagates to A");
+    }
+
+    #[test]
+    fn test_tombstone_suppresses_stale_remote_blob() {
+        // Directly importing an older remote blob that still contains a
+        // tombstoned child must not re-add it. This is the resurrection path a
+        // tombstone must close even when the parent session blob is stale.
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let (_da, repo, keystore, _kd, _m) =
+            setup_repo_with_store(&remote_url, "passphrase abcdefgh");
+        let (key, _salt) = load_store_credentials(&repo, "origin", &keystore).unwrap();
+
+        let (mut db, _dbd) = open_db();
+        // A session with a link, then delete the link (records the tombstone).
+        let session_id = seed_full_session(&mut db, "machine-a", &repo_dir(&repo));
+        let link = db.get_links_by_session(&session_id).unwrap()[0].clone();
+        assert!(db
+            .delete_link_by_session_and_commit(&session_id, "deadbeef")
+            .unwrap());
+
+        // Build a stale remote blob that still holds the deleted link.
+        let session = db.get_session(&session_id).unwrap().unwrap();
+        let record = SessionRecord {
+            session,
+            messages: vec![],
+            links: vec![link],
+            tags: vec![],
+            annotations: vec![],
+            summary: None,
+        };
+        let blob = encrypt_session_record(&record, &key).unwrap();
+        let sha = gitref::write_blob(&repo, &blob).unwrap();
+        let entries = vec![TreeEntry {
+            mode: "100644".to_string(),
+            sha,
+            path: format!("sessions/{session_id}.enc"),
+        }];
+
+        // Merging the stale blob must not resurrect the tombstoned link.
+        merge_remote(&mut db, &repo, &entries, &key).unwrap();
+        assert!(
+            db.get_links_by_session(&session_id).unwrap().is_empty(),
+            "a stale remote blob must not resurrect a tombstoned link"
+        );
+    }
+
+    #[test]
+    fn test_annotation_deletion_propagates_via_tombstone_global() {
+        // The same deletion-propagation guarantee holds for the global store and
+        // for annotations, exercising a second store path and child kind.
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let passphrase = "shared global passphrase";
+
+        // Machine A: set up the global store, seed a session, sync.
+        let (_store_a, store_a) = init_global_store(&remote_url);
+        let (keystore_a, _ka) = test_keystore();
+        let ma = machine("machine-a", "Machine A");
+        create_store(&store_a, GLOBAL_REMOTE, &keystore_a, &ma, passphrase).unwrap();
+        let (mut db_a, _dba) = open_db();
+        let session_id = seed_full_session(&mut db_a, "machine-a", "/projects/repo-one");
+        let annotation_id = db_a.get_annotations(&session_id).unwrap()[0].id;
+        let (key_a, salt_a) = load_store_credentials(&store_a, GLOBAL_REMOTE, &keystore_a).unwrap();
+        let run_a = |db: &mut Database| {
+            let sessions = db.get_unsynced_global_sessions().unwrap();
+            perform_sync_in_store(
+                SyncStore::Global,
+                db,
+                &store_a,
+                GLOBAL_REMOTE,
+                &key_a,
+                &salt_a,
+                &ma,
+                sessions,
+            )
+            .unwrap();
+        };
+        run_a(&mut db_a);
+
+        // Machine B: join and sync (pull the annotation).
+        let (_store_b, store_b) = init_global_store(&remote_url);
+        let (keystore_b, _kb) = test_keystore();
+        let mb = machine("machine-b", "Machine B");
+        gitref::fetch(&store_b, GLOBAL_REMOTE, SESSIONS_REF).unwrap();
+        let salt_b = read_store_salt(&store_b, GLOBAL_REMOTE).unwrap().unwrap();
+        join_store(
+            &store_b,
+            GLOBAL_REMOTE,
+            &keystore_b,
+            &mb,
+            &salt_b,
+            passphrase,
+        )
+        .unwrap();
+        let (mut db_b, _dbb) = open_db();
+        let (key_b, salt_b2) =
+            load_store_credentials(&store_b, GLOBAL_REMOTE, &keystore_b).unwrap();
+        let run_b = |db: &mut Database| {
+            let sessions = db.get_unsynced_global_sessions().unwrap();
+            perform_sync_in_store(
+                SyncStore::Global,
+                db,
+                &store_b,
+                GLOBAL_REMOTE,
+                &key_b,
+                &salt_b2,
+                &mb,
+                sessions,
+            )
+            .unwrap();
+        };
+        run_b(&mut db_b);
+        assert_eq!(
+            db_b.get_annotations(&session_id).unwrap().len(),
+            1,
+            "machine B must have pulled the annotation"
+        );
+
+        // Machine A: delete the annotation and sync.
+        assert!(db_a.delete_annotation(&annotation_id).unwrap());
+        run_a(&mut db_a);
+
+        // Machine B: sync. The tombstone removes the annotation.
+        run_b(&mut db_b);
+        assert!(
+            db_b.get_annotations(&session_id).unwrap().is_empty(),
+            "the deleted annotation must be removed on machine B via the global store"
+        );
+
+        // Not resurrected on a subsequent sync.
+        run_b(&mut db_b);
+        assert!(
+            db_b.get_annotations(&session_id).unwrap().is_empty(),
+            "the deleted annotation must stay removed"
+        );
+    }
+
+    #[test]
+    fn test_tombstone_blob_is_stable_across_unchanged_syncs() {
+        // Once the tombstone set is written, a sync that does not change it must
+        // reuse the existing content-addressed blob (no churn from re-encrypting
+        // with a fresh nonce every time).
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let (_da, repo, keystore, _kd, m) =
+            setup_repo_with_store(&remote_url, "passphrase abcdefgh");
+        let (key, salt) = load_store_credentials(&repo, "origin", &keystore).unwrap();
+
+        let (mut db, _dbd) = open_db();
+        let session_id = seed_full_session(&mut db, "machine-a", &repo_dir(&repo));
+        let sessions = scoped_unsynced(&db, &repo);
+        perform_sync(&mut db, &repo, "origin", &key, &salt, &m, sessions).unwrap();
+
+        // Delete the link and sync so a tombstone blob is written.
+        assert!(db
+            .delete_link_by_session_and_commit(&session_id, "deadbeef")
+            .unwrap());
+        let sessions = scoped_unsynced(&db, &repo);
+        perform_sync(&mut db, &repo, "origin", &key, &salt, &m, sessions).unwrap();
+        let first = tombstone_blob_sha(&repo);
+
+        // A no-op sync must not rewrite the tombstone blob.
+        let sessions = scoped_unsynced(&db, &repo);
+        perform_sync(&mut db, &repo, "origin", &key, &salt, &m, sessions).unwrap();
+        let second = tombstone_blob_sha(&repo);
+        assert_eq!(first, second, "unchanged tombstone blob must be reused");
+    }
+
+    /// Returns the blob SHA of `meta/tombstones` in the local ref.
+    fn tombstone_blob_sha(repo: &Path) -> String {
+        let entries = gitref::read_tree(repo, SESSIONS_REF).unwrap();
+        entries
+            .iter()
+            .find(|e| e.path == TOMBSTONES_PATH)
+            .expect("a tombstone blob should exist")
+            .sha
+            .clone()
     }
 }

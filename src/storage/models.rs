@@ -467,6 +467,35 @@ pub struct Machine {
     pub created_at: String,
 }
 
+/// A record of a locally deleted child record (link, tag, annotation, summary).
+///
+/// Child records merge additively across machines, so without a tombstone a
+/// child DELETED on one machine would be resurrected the next time another
+/// machine re-exported the parent session. A tombstone captures the deleted
+/// child's id and kind so the sync merge can suppress re-adding that specific
+/// record on every machine, while leaving concurrent additions of other records
+/// untouched.
+///
+/// Only user-facing deletions (unlink, tag remove, annotation delete, summary
+/// delete) record tombstones. Deleting a whole session is a purely local
+/// operation and must NOT tombstone its children, or a teammate who shares the
+/// store would lose that session's reasoning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Tombstone {
+    /// The id of the deleted child record (its UUID rendered as a string).
+    pub child_id: String,
+
+    /// The kind of child record: `link`, `tag`, `annotation`, or `summary`.
+    pub kind: String,
+
+    /// The session the deleted child belonged to, when known. Used to re-export
+    /// the cleaned parent session after a tombstone is applied.
+    pub session_id: Option<String>,
+
+    /// When the child was deleted, used for garbage-collecting stale tombstones.
+    pub deleted_at: DateTime<Utc>,
+}
+
 /// A tracked git repository.
 ///
 /// Repositories are discovered when sessions reference working directories
