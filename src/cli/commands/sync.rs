@@ -480,7 +480,14 @@ fn perform_sync(
         // dropped from the outgoing tree.
         if tracking_commit.is_some() {
             if let Some(local_commit) = &old_local {
-                carry_forward_local_sessions(repo, local_commit, &tracking_entries, &mut changes)?;
+                let in_scope = db.get_session_ids_for_repo(repo)?;
+                carry_forward_local_sessions(
+                    repo,
+                    local_commit,
+                    &tracking_entries,
+                    &in_scope,
+                    &mut changes,
+                )?;
             }
         }
 
@@ -869,7 +876,22 @@ fn is_session_path(path: &str) -> bool {
     path.starts_with("sessions/") && (path.ends_with(".enc") || path.ends_with(".meta.json"))
 }
 
-/// Carries forward local-only session artifacts when rebasing on the remote.
+/// Parses the session UUID from a stored session artifact tree path.
+///
+/// Handles both artifact forms a session contributes to the tree:
+/// `sessions/<uuid>.enc` and `sessions/<uuid>.meta.json`. Returns `None` for any
+/// path that is not a recognizable session artifact or whose stem is not a
+/// UUID, so callers can conservatively skip it.
+fn session_uuid_from_path(path: &str) -> Option<Uuid> {
+    let name = path.strip_prefix("sessions/")?;
+    let stem = name
+        .strip_suffix(".meta.json")
+        .or_else(|| name.strip_suffix(".enc"))?;
+    Uuid::parse_str(stem).ok()
+}
+
+/// Carries forward in-scope, local-only session artifacts when rebasing on the
+/// remote.
 ///
 /// When the outgoing tree is based on the remote tracking commit, any session
 /// entry present in the local ref but absent from the fetched remote tree (a
@@ -877,10 +899,18 @@ fn is_session_path(path: &str) -> bool {
 /// the freshly re-encrypted set) would be dropped. This re-adds each such entry
 /// at its existing blob SHA. A freshly re-encrypted unsynced session already
 /// owns its paths in `changes`, so `or_insert` never overwrites those.
+///
+/// Only artifacts whose session id is in `in_scope` (the ids of this repo's
+/// sessions, from [`Database::get_session_ids_for_repo`]) are carried forward.
+/// A local ref can hold out-of-scope sessions when it was written before per-repo
+/// scoping existed; carrying those forward would re-push another repo's history
+/// and reopen the privacy leak, so any artifact that is out of scope, or whose id
+/// cannot be parsed or is not in the local database, is conservatively skipped.
 fn carry_forward_local_sessions(
     repo: &Path,
     local_commit: &str,
     tracking_entries: &[TreeEntry],
+    in_scope: &HashSet<Uuid>,
     changes: &mut BTreeMap<String, String>,
 ) -> Result<()> {
     let tracking_paths: HashSet<&str> = tracking_entries.iter().map(|e| e.path.as_str()).collect();
@@ -888,6 +918,10 @@ fn carry_forward_local_sessions(
     for entry in gitref::read_tree(repo, local_commit)? {
         if !is_session_path(&entry.path) || tracking_paths.contains(entry.path.as_str()) {
             continue;
+        }
+        match session_uuid_from_path(&entry.path) {
+            Some(id) if in_scope.contains(&id) => {}
+            _ => continue,
         }
         changes.entry(entry.path.clone()).or_insert(entry.sha);
     }
@@ -1557,14 +1591,20 @@ mod tests {
         let repo = dir.path();
         init_repo(repo);
 
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        let a_enc = format!("sessions/{id_a}.enc");
+        let a_meta = format!("sessions/{id_a}.meta.json");
+        let b_enc = format!("sessions/{id_b}.enc");
+
         let enc_sha = gitref::write_blob(repo, b"local-a-enc").unwrap();
         let meta_sha = gitref::write_blob(repo, b"local-a-meta").unwrap();
         let other_sha = gitref::write_blob(repo, b"remote-b-enc").unwrap();
 
         let mut local = BTreeMap::new();
-        local.insert("sessions/a.enc".to_string(), enc_sha.clone());
-        local.insert("sessions/a.meta.json".to_string(), meta_sha.clone());
-        local.insert("sessions/b.enc".to_string(), other_sha.clone());
+        local.insert(a_enc.clone(), enc_sha.clone());
+        local.insert(a_meta.clone(), meta_sha.clone());
+        local.insert(b_enc.clone(), other_sha.clone());
         let local_tree = gitref::build_tree(repo, None, &local).unwrap();
         let local_commit = gitref::commit_tree(repo, &local_tree, None, "lore: local").unwrap();
 
@@ -1572,24 +1612,77 @@ mod tests {
         let tracking = vec![TreeEntry {
             mode: "100644".to_string(),
             sha: other_sha,
-            path: "sessions/b.enc".to_string(),
+            path: b_enc.clone(),
         }];
 
         // A freshly re-encrypted unsynced session owns its own path already.
         let mut changes = BTreeMap::new();
-        changes.insert("sessions/a.enc".to_string(), "fresh-sha".to_string());
+        changes.insert(a_enc.clone(), "fresh-sha".to_string());
 
-        carry_forward_local_sessions(repo, &local_commit, &tracking, &mut changes).unwrap();
+        // Both sessions are in scope for this repo.
+        let in_scope: HashSet<Uuid> = [id_a, id_b].into_iter().collect();
+        carry_forward_local_sessions(repo, &local_commit, &tracking, &in_scope, &mut changes)
+            .unwrap();
 
         // a.meta.json (local-only) is carried forward.
-        assert_eq!(changes.get("sessions/a.meta.json"), Some(&meta_sha));
+        assert_eq!(changes.get(&a_meta), Some(&meta_sha));
         // a.enc keeps the fresh re-encrypted value (or_insert must not override).
-        assert_eq!(
-            changes.get("sessions/a.enc"),
-            Some(&"fresh-sha".to_string())
-        );
+        assert_eq!(changes.get(&a_enc), Some(&"fresh-sha".to_string()));
         // b.enc is in the tracking tree, so it is not re-added.
-        assert!(!changes.contains_key("sessions/b.enc"));
+        assert!(!changes.contains_key(&b_enc));
+    }
+
+    #[test]
+    fn test_carry_forward_skips_out_of_scope_sessions() {
+        // A local-only session artifact whose id is NOT in this repo's scope must
+        // not be carried forward. This is the privacy regression the scoped
+        // carry-forward closes: a local ref written before scoping can hold other
+        // repos' sessions, and re-pushing them would leak that history.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+
+        let id_in = Uuid::new_v4();
+        let id_out = Uuid::new_v4();
+        let in_enc = format!("sessions/{id_in}.enc");
+        let in_meta = format!("sessions/{id_in}.meta.json");
+        let out_enc = format!("sessions/{id_out}.enc");
+        let out_meta = format!("sessions/{id_out}.meta.json");
+
+        let in_enc_sha = gitref::write_blob(repo, b"in-enc").unwrap();
+        let in_meta_sha = gitref::write_blob(repo, b"in-meta").unwrap();
+        let out_enc_sha = gitref::write_blob(repo, b"out-enc").unwrap();
+        let out_meta_sha = gitref::write_blob(repo, b"out-meta").unwrap();
+
+        let mut local = BTreeMap::new();
+        local.insert(in_enc.clone(), in_enc_sha);
+        local.insert(in_meta.clone(), in_meta_sha);
+        local.insert(out_enc.clone(), out_enc_sha);
+        local.insert(out_meta.clone(), out_meta_sha);
+        let local_tree = gitref::build_tree(repo, None, &local).unwrap();
+        let local_commit = gitref::commit_tree(repo, &local_tree, None, "lore: local").unwrap();
+
+        // The remote tree is empty (a rewind), so nothing is already present.
+        let tracking: Vec<TreeEntry> = Vec::new();
+
+        // Only the in-scope session's id is in scope.
+        let in_scope: HashSet<Uuid> = [id_in].into_iter().collect();
+        let mut changes = BTreeMap::new();
+        carry_forward_local_sessions(repo, &local_commit, &tracking, &in_scope, &mut changes)
+            .unwrap();
+
+        // In-scope artifacts are carried forward.
+        assert!(changes.contains_key(&in_enc), "in-scope .enc carried");
+        assert!(changes.contains_key(&in_meta), "in-scope .meta carried");
+        // Out-of-scope artifacts are dropped, not re-pushed.
+        assert!(
+            !changes.contains_key(&out_enc),
+            "out-of-scope .enc must not be carried forward"
+        );
+        assert!(
+            !changes.contains_key(&out_meta),
+            "out-of-scope .meta must not be carried forward"
+        );
     }
 
     #[test]
@@ -1804,6 +1897,67 @@ mod tests {
         assert!(
             !unsynced_ids.contains(&in_scope),
             "the in-scope session must be marked synced after the push"
+        );
+    }
+
+    #[test]
+    fn test_sync_does_not_carry_forward_out_of_scope_local_session() {
+        // A local ref written before per-repo scoping can hold another repo's
+        // session artifact. When such an out-of-scope artifact lives only in the
+        // local ref (absent from the remote), a sync that rebases on the remote
+        // must NOT carry it forward, or it would re-push another repo's history.
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(repo, &["remote", "add", "origin", &remote_url]);
+
+        let (keystore, _kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(repo, "origin", &keystore, &m, "passphrase abcdefgh").unwrap();
+
+        let (mut db, _dd) = open_db();
+        let in_scope = seed_full_session(&mut db, "machine-a", &repo_dir(repo));
+        // An out-of-scope session exists in the database (so its id is known) but
+        // its working directory is outside the repo, so it is out of scope.
+        let out_of_scope = seed_full_session(&mut db, "machine-a", "/somewhere/else/project");
+
+        // Inject the out-of-scope session's artifacts into the LOCAL ref only,
+        // simulating a pre-scoping local store that still holds them.
+        let base = gitref::resolve_ref(repo, SESSIONS_REF).unwrap();
+        let leaked_enc = gitref::write_blob(repo, b"leaked-enc").unwrap();
+        let leaked_meta = gitref::write_blob(repo, b"leaked-meta").unwrap();
+        let mut inject = BTreeMap::new();
+        inject.insert(format!("sessions/{out_of_scope}.enc"), leaked_enc);
+        inject.insert(format!("sessions/{out_of_scope}.meta.json"), leaked_meta);
+        let tree = gitref::build_tree(repo, base.as_deref(), &inject).unwrap();
+        let commit = gitref::commit_tree(repo, &tree, base.as_deref(), "inject leaked").unwrap();
+        gitref::update_ref_checked(repo, SESSIONS_REF, &commit, base.as_deref()).unwrap();
+
+        let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
+
+        let entries = gitref::read_tree(repo, SESSIONS_REF).unwrap();
+        // The in-scope session is stored.
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.path == format!("sessions/{in_scope}.enc")),
+            "the in-scope session must be stored"
+        );
+        // The out-of-scope local-only artifacts must not survive the sync.
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.path == format!("sessions/{out_of_scope}.enc")),
+            "out-of-scope local-only session must not be carried forward or pushed"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.path == format!("sessions/{out_of_scope}.meta.json")),
+            "out-of-scope local-only metadata must not be carried forward or pushed"
         );
     }
 }

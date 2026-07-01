@@ -61,6 +61,62 @@ fn directory_match_params(directory: &str) -> (String, String, String) {
     (normalized, trailing, like_pattern)
 }
 
+/// Builds a SQL predicate and bind values scoping `working_directory` to a repo.
+///
+/// A session stores the raw working directory reported by the capturing tool,
+/// which may be a symlinked or otherwise non-canonical path (for example a
+/// session captured under `/link/repo` when the repo canonicalizes to
+/// `/real/repo`). Matching only the canonical repo path would miss such
+/// sessions, so this scopes against BOTH the repo path as given and its
+/// canonicalized form, ORing the per-variant path-boundary conditions from
+/// [`directory_match_params`]. Variants that resolve to identical conditions
+/// (the common no-symlink case) are deduplicated. Each variant stays anchored
+/// on the root plus a separator, so covering both forms still never matches a
+/// path outside either repo root.
+///
+/// Returns the predicate text (with `?N` placeholders) and the flat bind vector
+/// in placeholder order, for use with [`rusqlite::params_from_iter`]. Callers
+/// wrap the predicate in their own parentheses when combining it with other
+/// conditions.
+///
+/// Residual limitation: layouts where the repo is reached through more than the
+/// as-given and fully canonicalized paths (for example a chain of distinct
+/// symlinks, or sessions captured under an intermediate symlink target) are not
+/// covered; only those two forms are matched.
+fn repo_scope_predicate(repo_path: &Path) -> (String, Vec<String>) {
+    let mut variants: Vec<(String, String, String)> = Vec::new();
+
+    let mut add_variant = |dir: &str| {
+        let params = directory_match_params(dir);
+        if !variants.contains(&params) {
+            variants.push(params);
+        }
+    };
+
+    add_variant(&repo_path.to_string_lossy());
+    if let Ok(canonical) = repo_path.canonicalize() {
+        add_variant(&canonical.to_string_lossy());
+    }
+
+    let mut clauses = Vec::with_capacity(variants.len());
+    let mut binds = Vec::with_capacity(variants.len() * 3);
+    let mut next = 1;
+    for (exact, trailing, like_pattern) in variants {
+        clauses.push(format!(
+            "(working_directory = ?{} OR working_directory = ?{} OR working_directory LIKE ?{} ESCAPE '|')",
+            next,
+            next + 1,
+            next + 2
+        ));
+        binds.push(exact);
+        binds.push(trailing);
+        binds.push(like_pattern);
+        next += 3;
+    }
+
+    (clauses.join(" OR "), binds)
+}
+
 /// Parses a UUID from a string, converting errors to rusqlite errors.
 ///
 /// Used in row mapping functions where we need to return rusqlite::Result.
@@ -1611,31 +1667,52 @@ impl Database {
     /// and cross-tool sessions captured elsewhere are excluded, keeping one
     /// repo's store from leaking a user's entire history to teammates.
     ///
-    /// The repo path is canonicalized when possible so it compares against
-    /// stored paths on the same footing; matching uses the shared path-boundary
-    /// logic in [`directory_match_params`], so a prefix sibling such as
-    /// `/x/foobar` never matches the repo `/x/foo`. Results are ordered oldest
-    /// first to sync in chronological order.
+    /// Matching uses the shared repo-scoping predicate (see
+    /// [`repo_scope_predicate`]), which covers both the repo path as given and
+    /// its canonicalized form so a session captured under a symlinked path still
+    /// syncs, while a prefix sibling such as `/x/foobar` never matches the repo
+    /// `/x/foo`. Results are ordered oldest first to sync in chronological order.
     pub fn get_unsynced_sessions_for_repo(&self, repo_path: &Path) -> Result<Vec<Session>> {
-        let directory = repo_path
-            .canonicalize()
-            .unwrap_or_else(|_| repo_path.to_path_buf());
-        let (exact, trailing, like_pattern) = directory_match_params(&directory.to_string_lossy());
-
-        let mut stmt = self.conn.prepare(
+        let (predicate, binds) = repo_scope_predicate(repo_path);
+        let sql = format!(
             "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
              FROM sessions
              WHERE synced_at IS NULL
-               AND (working_directory = ?1
-                 OR working_directory = ?2
-                 OR working_directory LIKE ?3 ESCAPE '|')
+               AND ({predicate})
              ORDER BY started_at ASC"
-        )?;
+        );
 
-        let rows = stmt.query_map(params![exact, trailing, like_pattern], Self::row_to_session)?;
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(binds.iter()),
+            Self::row_to_session,
+        )?;
 
         rows.collect::<Result<Vec<_>, _>>()
             .context("Failed to get unsynced sessions for repo")
+    }
+
+    /// Returns the ids of ALL sessions (regardless of `synced_at`) whose working
+    /// directory is inside `repo_path`.
+    ///
+    /// Unlike [`Database::get_unsynced_sessions_for_repo`], this ignores the
+    /// synced state: it answers "which session ids belong to this repo", which
+    /// the outbound sync uses to decide whether an already-stored, local-only
+    /// session artifact is in scope to carry forward. It shares the exact same
+    /// directory scoping (see [`repo_scope_predicate`]) so the two agree on what
+    /// "in this repo" means.
+    pub fn get_session_ids_for_repo(&self, repo_path: &Path) -> Result<HashSet<Uuid>> {
+        let (predicate, binds) = repo_scope_predicate(repo_path);
+        let sql = format!("SELECT id FROM sessions WHERE {predicate}");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+            let id: String = row.get(0)?;
+            parse_uuid(&id)
+        })?;
+
+        rows.collect::<rusqlite::Result<HashSet<Uuid>>>()
+            .context("Failed to get session ids for repo")
     }
 
     /// Returns the count of sessions that have not been synced.
@@ -1655,20 +1732,18 @@ impl Database {
     /// same directory scoping as [`Database::get_unsynced_sessions_for_repo`] so
     /// `lore sync status` reports what this repo will actually push.
     pub fn unsynced_session_count_for_repo(&self, repo_path: &Path) -> Result<i32> {
-        let directory = repo_path
-            .canonicalize()
-            .unwrap_or_else(|_| repo_path.to_path_buf());
-        let (exact, trailing, like_pattern) = directory_match_params(&directory.to_string_lossy());
-
-        let count: i32 = self.conn.query_row(
+        let (predicate, binds) = repo_scope_predicate(repo_path);
+        let sql = format!(
             "SELECT COUNT(*) FROM sessions
              WHERE synced_at IS NULL
-               AND (working_directory = ?1
-                 OR working_directory = ?2
-                 OR working_directory LIKE ?3 ESCAPE '|')",
-            params![exact, trailing, like_pattern],
-            |row| row.get(0),
-        )?;
+               AND ({predicate})"
+        );
+
+        let count: i32 =
+            self.conn
+                .query_row(&sql, rusqlite::params_from_iter(binds.iter()), |row| {
+                    row.get(0)
+                })?;
         Ok(count)
     }
 
@@ -4627,6 +4702,131 @@ mod tests {
             count, 2,
             "count must include only in-scope unsynced sessions"
         );
+    }
+
+    #[test]
+    fn test_get_session_ids_for_repo_includes_synced_and_excludes_unrelated() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let unsynced = create_test_session("claude-code", "/home/user/project", now, None);
+        let synced = create_test_session("claude-code", "/home/user/project/src", now, None);
+        let outside = create_test_session("aider", "/home/user/other", now, None);
+        db.insert_session(&unsynced).expect("insert unsynced");
+        db.insert_session(&synced).expect("insert synced");
+        db.insert_session(&outside).expect("insert outside");
+        db.mark_sessions_synced(&[synced.id], now)
+            .expect("mark synced");
+
+        let ids = db
+            .get_session_ids_for_repo(Path::new("/home/user/project"))
+            .expect("scoped ids");
+
+        assert!(
+            ids.contains(&unsynced.id),
+            "an unsynced in-scope id must be included"
+        );
+        assert!(
+            ids.contains(&synced.id),
+            "an already-synced in-scope id must still be included (scope ignores sync state)"
+        );
+        assert!(
+            !ids.contains(&outside.id),
+            "an out-of-scope id must be excluded"
+        );
+    }
+
+    // Fix 2: sessions captured under a non-canonical (symlink) path must still
+    // be scoped to the repo. macOS temp dirs live under a symlinked `/var`, so
+    // this also guards the canonical-path branch there.
+    #[cfg(unix)]
+    #[test]
+    fn test_get_unsynced_sessions_for_repo_matches_both_path_variants() {
+        use std::os::unix::fs::symlink;
+
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let base = tempdir().expect("tempdir");
+        let real = base.path().join("real");
+        std::fs::create_dir(&real).expect("create real dir");
+        let link = base.path().join("link");
+        symlink(&real, &link).expect("create symlink");
+
+        // One session captured under the symlinked (as-given) path, one under the
+        // fully canonicalized path. A repo reported as the symlink form must
+        // select both, since either variant may appear in a stored session.
+        let via_link = create_test_session("claude-code", &link.to_string_lossy(), now, None);
+        let canonical = real.canonicalize().expect("canonicalize real");
+        let via_real = create_test_session("aider", &canonical.to_string_lossy(), now, None);
+        db.insert_session(&via_link).expect("insert via link");
+        db.insert_session(&via_real).expect("insert via real");
+
+        let found = db
+            .get_unsynced_sessions_for_repo(&link)
+            .expect("scoped unsynced");
+        let ids: std::collections::HashSet<Uuid> = found.iter().map(|s| s.id).collect();
+
+        assert!(
+            ids.contains(&via_link.id),
+            "a session captured under the symlinked repo path must match"
+        );
+        assert!(
+            ids.contains(&via_real.id),
+            "a session captured under the canonicalized repo path must match"
+        );
+    }
+
+    // Fix 3: LIKE metacharacters in the repo path must not widen the match.
+    // Regression guard for the ESCAPE '|' logic in directory_match_params.
+    #[test]
+    fn test_repo_scope_escapes_like_metacharacters() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        // A repo path packed with LIKE metacharacters: '_' (single-char
+        // wildcard), '%' (multi-char wildcard), and '|' (the ESCAPE character
+        // itself).
+        let repo = "/home/user/w_%|k";
+
+        let root = create_test_session("claude-code", repo, now, None);
+        let nested = create_test_session("claude-code", "/home/user/w_%|k/deep/file", now, None);
+        // Decoys a selector with broken escaping would wrongly match: each
+        // replaces one metacharacter position with an arbitrary run so it only
+        // matches if that metacharacter is treated as a wildcard.
+        let underscore_decoy = create_test_session("aider", "/home/user/wX%|k/x", now, None);
+        let percent_decoy = create_test_session("aider", "/home/user/w_ANY|k/y", now, None);
+        for s in [&root, &nested, &underscore_decoy, &percent_decoy] {
+            db.insert_session(s).expect("insert session");
+        }
+
+        let found = db
+            .get_unsynced_sessions_for_repo(Path::new(repo))
+            .expect("scoped unsynced");
+        let ids: std::collections::HashSet<Uuid> = found.iter().map(|s| s.id).collect();
+
+        assert!(ids.contains(&root.id), "the repo root must match");
+        assert!(
+            ids.contains(&nested.id),
+            "a nested path must match (| escaping keeps the pattern valid)"
+        );
+        assert!(
+            !ids.contains(&underscore_decoy.id),
+            "'_' must be escaped, not treated as a single-char wildcard"
+        );
+        assert!(
+            !ids.contains(&percent_decoy.id),
+            "'%' must be escaped, not treated as a multi-char wildcard"
+        );
+
+        // The id-scoping selector shares the same predicate, so it must agree.
+        let id_set = db
+            .get_session_ids_for_repo(Path::new(repo))
+            .expect("scoped ids");
+        assert!(id_set.contains(&root.id));
+        assert!(id_set.contains(&nested.id));
+        assert!(!id_set.contains(&underscore_decoy.id));
+        assert!(!id_set.contains(&percent_decoy.id));
     }
 
     #[test]
