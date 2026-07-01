@@ -23,7 +23,7 @@ pub fn repo_info(path: &Path) -> Result<RepoInfo> {
     let head = repo.head().ok();
     let branch = head
         .as_ref()
-        .and_then(|h| h.shorthand())
+        .and_then(|h| h.shorthand().ok())
         .map(|s| s.to_string());
 
     let commit_sha = head
@@ -33,7 +33,7 @@ pub fn repo_info(path: &Path) -> Result<RepoInfo> {
     let remote_url = repo
         .find_remote("origin")
         .ok()
-        .and_then(|r| r.url().map(|s| s.to_string()));
+        .and_then(|r| r.url().ok().map(|s| s.to_string()));
 
     let workdir = repo
         .workdir()
@@ -216,13 +216,13 @@ pub fn get_commits_in_time_range(
         // Try to determine branch name by checking if HEAD points to this commit
         let branch = repo.head().ok().and_then(|h| {
             if h.peel_to_commit().ok()?.id() == commit.id() {
-                h.shorthand().map(|s| s.to_string())
+                h.shorthand().ok().map(|s| s.to_string())
             } else {
                 None
             }
         });
 
-        let summary = commit.summary().unwrap_or("").to_string();
+        let summary = commit.summary().ok().flatten().unwrap_or("").to_string();
 
         commits.push(CommitInfo {
             sha,
@@ -268,13 +268,13 @@ pub fn get_commit_info(repo_path: &Path, commit_ref: &str) -> Result<CommitInfo>
     // Try to get the branch name (check if HEAD points to this commit)
     let branch = repo.head().ok().and_then(|h| {
         if h.peel_to_commit().ok()?.id() == commit.id() {
-            h.shorthand().map(|s| s.to_string())
+            h.shorthand().ok().map(|s| s.to_string())
         } else {
             None
         }
     });
 
-    let summary = commit.summary().unwrap_or("").to_string();
+    let summary = commit.summary().ok().flatten().unwrap_or("").to_string();
 
     Ok(CommitInfo {
         sha,
