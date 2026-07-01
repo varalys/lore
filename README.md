@@ -70,6 +70,10 @@ lore blame src/main.rs:42
 
 # Search across all sessions
 lore search "authentication"
+
+# Sync reasoning history over git (encrypted, serverless)
+lore sync setup
+lore sync
 ```
 
 ### Example: ```lore blame```
@@ -101,8 +105,20 @@ Linked sessions (1):
 | **Git Linking** | Connect sessions to commits |
 | **Full-text Search** | Find any conversation |
 | **Blame Integration** | Trace code to sessions |
+| **Git-ref Sync** | Share and back up reasoning over git, encrypted end to end |
 | **MCP Server** | Let AI tools query your history |
-| **Background Daemon** | Real-time capture |
+| **Background Daemon** | Real-time capture (optional) |
+
+## Sync
+
+Lore syncs reasoning history over git, with no server and no account. Sessions are encrypted on your machine before they touch a remote, so the git host only ever sees ciphertext.
+
+- **Per-repo store**: encrypted sessions ride inside the project's own repo under `refs/lore/sessions`, so reasoning travels with the code. A teammate who clones the repo and knows the shared passphrase can read it and run `lore blame`.
+- **Global store** (`lore sync --global`): a private aggregate of all your sessions across every tool and repo, for multi-machine backup.
+- **Automatic sync**: `lore hooks install` adds a `pre-push` hook that runs `lore sync` on every `git push` (best-effort, never blocks the push).
+- **Team sharing**: share the repo plus the passphrase out of band. No accounts, no seats, serverless.
+
+See the [Sync Guide](https://lore.varalys.com/guides/sync/) for details.
 
 ## Supported Tools
 
@@ -141,7 +157,7 @@ Full documentation at **[lore.varalys.com](https://lore.varalys.com)**:
 └── daemon.log    # Daemon logs
 ```
 
-All data stays on your machine.
+All data stays on your machine by default. Sync is opt-in and encrypted end to end.
 
 ## Contributing
 
