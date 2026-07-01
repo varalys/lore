@@ -297,7 +297,10 @@ fn run_sync(remote: &str) -> Result<()> {
     let (key, salt) = load_store_credentials(&repo, remote, &keystore)?;
 
     let mut db = Database::open_default()?;
-    let summary = perform_sync(&mut db, &repo, remote, &key, &salt, &machine)?;
+    // Push only this repo's own sessions so cross-project history is never
+    // written into (and shared through) this repo's store.
+    let sessions = db.get_unsynced_sessions_for_repo(&repo)?;
+    let summary = perform_sync(&mut db, &repo, remote, &key, &salt, &machine, sessions)?;
 
     println!(
         "{} Pulled {}, pushed {}.",
@@ -377,7 +380,8 @@ fn quiet_sync_with_keystore(
     let mut config = Config::load()?;
     let machine = machine_identity(&mut config)?;
     let mut db = Database::open_default()?;
-    perform_sync(&mut db, repo, remote, &key, salt, &machine)?;
+    let sessions = db.get_unsynced_sessions_for_repo(repo)?;
+    perform_sync(&mut db, repo, remote, &key, salt, &machine, sessions)?;
     Ok(())
 }
 
@@ -417,6 +421,13 @@ fn configured_remotes(repo: &Path) -> Result<Vec<String>> {
 
 /// Fetches, merges remote reasoning into the database, then builds and pushes.
 ///
+/// The caller supplies `sessions`, the exact set of local sessions to push into
+/// this store. For a per-repo store that is the repo-scoped unsynced set (see
+/// [`Database::get_unsynced_sessions_for_repo`]) so cross-project history never
+/// leaks into one repo's store; a future global store can pass all unsynced
+/// sessions without any change here. Inbound merge is independent of this set:
+/// every remote session is pulled regardless of its working directory.
+///
 /// Retries the whole cycle on a compare-and-swap mismatch (a concurrent local
 /// sync moved the ref) or a non-fast-forward push (the remote moved between our
 /// fetch and push), up to [`MAX_SYNC_ATTEMPTS`].
@@ -427,6 +438,7 @@ fn perform_sync(
     key: &[u8],
     salt: &[u8],
     machine: &MachineIdentity,
+    sessions: Vec<Session>,
 ) -> Result<SyncSummary> {
     let mut pulled_total = 0;
 
@@ -449,35 +461,66 @@ fn perform_sync(
         pulled_total += merge_remote(db, repo, &tracking_entries, key)?;
         merge_machines(db, repo, &tracking_entries)?;
 
-        // BUILD the outgoing tree. Base it on the remote commit when present so
-        // the push is a fast-forward and remote-only sessions are preserved;
-        // otherwise base it on the existing local ref.
+        // BUILD the outgoing tree. Separate the TREE BASE (which entries the new
+        // tree inherits) from the COMMIT PARENT (which commit it descends from):
+        //
+        // - Remote present: base the tree on the remote tracking commit so the
+        //   push is a fast-forward and remote-only sessions are preserved. The
+        //   commit descends from that same tracking commit.
+        // - No remote store: base the tree on NOTHING (empty) and make the commit
+        //   an ORPHAN (no parent). The local ref may have been written before
+        //   per-repo scoping and can hold out-of-scope session artifacts; both
+        //   inheriting its tree and descending from its commit would leak that
+        //   history. Descending from the local ref keeps old_local reachable from
+        //   the pushed ref (e.g. `refs/lore/sessions^`), so out-of-scope blobs
+        //   still reach the remote through ancestry even when the tip tree is
+        //   clean. Orphaning drops that ancestry so only the scoped tip tree and
+        //   its blobs are reachable. Only in-scope local-only sessions are carried
+        //   forward below, so no in-scope data is lost by orphaning.
         let tracking_commit = match fetched {
             Some(_) => {
                 gitref::resolve_ref(repo, &gitref::tracking_ref_name(remote, SESSIONS_REF)?)?
             }
             None => None,
         };
-        let base = tracking_commit.clone().or(old_local.clone());
+        let tree_base = tracking_commit.clone();
+        let commit_parent = tracking_commit.clone();
 
-        let unsynced = db.get_unsynced_sessions()?;
-        let mut changes = build_session_changes(db, repo, key, &unsynced)?;
+        let mut changes = build_session_changes(db, repo, key, &sessions)?;
 
-        // When rebasing onto the remote tracking commit, carry forward any
-        // already-stored session artifacts that live only in the local ref (for
-        // example after a remote rewind), so no stored session is silently
-        // dropped from the outgoing tree.
-        if tracking_commit.is_some() {
-            if let Some(local_commit) = &old_local {
-                carry_forward_local_sessions(repo, local_commit, &tracking_entries, &mut changes)?;
-            }
+        // Carry forward already-stored, in-scope session artifacts that live
+        // only in the local ref so no stored in-scope session is silently
+        // dropped from the outgoing tree:
+        //
+        // - Remote present: a remote rewind can leave sessions in the local ref
+        //   that are absent from the fetched remote tree.
+        // - No remote store: the tree base is empty, so every in-scope local-only
+        //   session must be re-added from the local ref.
+        //
+        // Passing an empty tracking set in the no-remote case makes every local
+        // session a candidate; `carry_forward_local_sessions` still re-adds only
+        // in-scope ids, so out-of-scope artifacts are never carried forward.
+        if let Some(local_commit) = &old_local {
+            let in_scope = db.get_session_ids_for_repo(repo)?;
+            let carry_tracking: &[TreeEntry] = if tracking_commit.is_some() {
+                &tracking_entries
+            } else {
+                &[]
+            };
+            carry_forward_local_sessions(
+                repo,
+                local_commit,
+                carry_tracking,
+                &in_scope,
+                &mut changes,
+            )?;
         }
 
-        add_meta_changes(db, repo, base.as_deref(), salt, machine, &mut changes)?;
+        add_meta_changes(db, repo, tree_base.as_deref(), salt, machine, &mut changes)?;
 
-        let tree = gitref::build_tree(repo, base.as_deref(), &changes)?;
-        let message = format!("lore: sync {} session(s)", unsynced.len());
-        let commit = gitref::commit_tree(repo, &tree, base.as_deref(), &message)?;
+        let tree = gitref::build_tree(repo, tree_base.as_deref(), &changes)?;
+        let message = format!("lore: sync {} session(s)", sessions.len());
+        let commit = gitref::commit_tree(repo, &tree, commit_parent.as_deref(), &message)?;
 
         // CAS-update the local ref, guarding against a concurrent local sync.
         match gitref::update_ref_checked(repo, SESSIONS_REF, &commit, old_local.as_deref()) {
@@ -497,12 +540,12 @@ fn perform_sync(
             }
         }
 
-        let ids: Vec<Uuid> = unsynced.iter().map(|s| s.id).collect();
+        let ids: Vec<Uuid> = sessions.iter().map(|s| s.id).collect();
         db.mark_sessions_synced(&ids, Utc::now())?;
 
         return Ok(SyncSummary {
             pulled: pulled_total,
-            pushed: unsynced.len(),
+            pushed: sessions.len(),
         });
     }
 
@@ -686,7 +729,8 @@ fn run_status(remote: &str, format: OutputFormat) -> Result<()> {
     };
     let set_up = salt.is_some();
 
-    let unsynced = db.unsynced_session_count()?;
+    // Scope the pending count to this repo so it reflects what a sync will push.
+    let unsynced = db.unsynced_session_count_for_repo(&repo)?;
     let last_sync = db.last_sync_time()?;
     let remote_exists = gitref::remote_ref_exists(&repo, remote, SESSIONS_REF).unwrap_or(false);
     let local_ref = gitref::resolve_ref(&repo, SESSIONS_REF)?;
@@ -857,7 +901,22 @@ fn is_session_path(path: &str) -> bool {
     path.starts_with("sessions/") && (path.ends_with(".enc") || path.ends_with(".meta.json"))
 }
 
-/// Carries forward local-only session artifacts when rebasing on the remote.
+/// Parses the session UUID from a stored session artifact tree path.
+///
+/// Handles both artifact forms a session contributes to the tree:
+/// `sessions/<uuid>.enc` and `sessions/<uuid>.meta.json`. Returns `None` for any
+/// path that is not a recognizable session artifact or whose stem is not a
+/// UUID, so callers can conservatively skip it.
+fn session_uuid_from_path(path: &str) -> Option<Uuid> {
+    let name = path.strip_prefix("sessions/")?;
+    let stem = name
+        .strip_suffix(".meta.json")
+        .or_else(|| name.strip_suffix(".enc"))?;
+    Uuid::parse_str(stem).ok()
+}
+
+/// Carries forward in-scope, local-only session artifacts when rebasing on the
+/// remote.
 ///
 /// When the outgoing tree is based on the remote tracking commit, any session
 /// entry present in the local ref but absent from the fetched remote tree (a
@@ -865,10 +924,18 @@ fn is_session_path(path: &str) -> bool {
 /// the freshly re-encrypted set) would be dropped. This re-adds each such entry
 /// at its existing blob SHA. A freshly re-encrypted unsynced session already
 /// owns its paths in `changes`, so `or_insert` never overwrites those.
+///
+/// Only artifacts whose session id is in `in_scope` (the ids of this repo's
+/// sessions, from [`Database::get_session_ids_for_repo`]) are carried forward.
+/// A local ref can hold out-of-scope sessions when it was written before per-repo
+/// scoping existed; carrying those forward would re-push another repo's history
+/// and reopen the privacy leak, so any artifact that is out of scope, or whose id
+/// cannot be parsed or is not in the local database, is conservatively skipped.
 fn carry_forward_local_sessions(
     repo: &Path,
     local_commit: &str,
     tracking_entries: &[TreeEntry],
+    in_scope: &HashSet<Uuid>,
     changes: &mut BTreeMap<String, String>,
 ) -> Result<()> {
     let tracking_paths: HashSet<&str> = tracking_entries.iter().map(|e| e.path.as_str()).collect();
@@ -876,6 +943,10 @@ fn carry_forward_local_sessions(
     for entry in gitref::read_tree(repo, local_commit)? {
         if !is_session_path(&entry.path) || tracking_paths.contains(entry.path.as_str()) {
             continue;
+        }
+        match session_uuid_from_path(&entry.path) {
+            Some(id) if in_scope.contains(&id) => {}
+            _ => continue,
         }
         changes.entry(entry.path.clone()).or_insert(entry.sha);
     }
@@ -1034,8 +1105,25 @@ mod tests {
         }
     }
 
+    /// Returns the canonical string form of a repo path.
+    ///
+    /// A session must be seeded with the same path the scoped selector derives
+    /// (which canonicalizes the repo, resolving symlinks such as macOS's
+    /// `/var` -> `/private/var`) so it stays in scope and is actually pushed.
+    fn repo_dir(repo: &Path) -> String {
+        repo.canonicalize().unwrap().to_string_lossy().to_string()
+    }
+
+    /// Returns this repo's unsynced sessions, the set a real sync would push.
+    fn scoped_unsynced(db: &Database, repo: &Path) -> Vec<Session> {
+        db.get_unsynced_sessions_for_repo(repo).unwrap()
+    }
+
     /// Seeds a full unsynced session (messages, link, tag, annotation, summary).
-    fn seed_full_session(db: &mut Database, machine_id: &str) -> Uuid {
+    ///
+    /// `working_directory` must be inside the repo under test for the session to
+    /// be selected by the repo-scoped sync.
+    fn seed_full_session(db: &mut Database, machine_id: &str, working_directory: &str) -> Uuid {
         let id = Uuid::new_v4();
         let session = Session {
             id,
@@ -1044,7 +1132,7 @@ mod tests {
             started_at: Utc::now(),
             ended_at: Some(Utc::now()),
             model: Some("claude-opus".to_string()),
-            working_directory: "/proj".to_string(),
+            working_directory: working_directory.to_string(),
             git_branch: Some("main".to_string()),
             source_path: None,
             message_count: 1,
@@ -1060,7 +1148,7 @@ mod tests {
             content: MessageContent::Text("fix the bug".to_string()),
             model: None,
             git_branch: Some("main".to_string()),
-            cwd: Some("/proj".to_string()),
+            cwd: Some(working_directory.to_string()),
         };
         // synced_at = None so the session is picked up by get_unsynced_sessions.
         db.import_session_with_messages(&session, &[message], None)
@@ -1163,9 +1251,13 @@ mod tests {
         create_store(repo_a, "origin", &keystore_a, &ma, passphrase).unwrap();
 
         let (mut db_a, _da) = open_db();
-        let session_id = seed_full_session(&mut db_a, "machine-a");
+        let session_id = seed_full_session(&mut db_a, "machine-a", &repo_dir(repo_a));
         let (key_a, salt_a) = load_store_credentials(repo_a, "origin", &keystore_a).unwrap();
-        let summary_a = perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, repo_a);
+        let summary_a = perform_sync(
+            &mut db_a, repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
         assert_eq!(summary_a.pushed, 1);
 
         // Machine B: join with the same passphrase, then sync (pull).
@@ -1183,7 +1275,11 @@ mod tests {
         let (key_b, salt_b2) = load_store_credentials(repo_b, "origin", &keystore_b).unwrap();
         // Both machines derive the same key from the shared passphrase and salt.
         assert_eq!(key_a, key_b);
-        let summary_b = perform_sync(&mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb).unwrap();
+        let sessions_b = scoped_unsynced(&db_b, repo_b);
+        let summary_b = perform_sync(
+            &mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb, sessions_b,
+        )
+        .unwrap();
         assert_eq!(summary_b.pulled, 1);
 
         // Machine B now has the full reasoning record, including links, tags,
@@ -1218,15 +1314,17 @@ mod tests {
         create_store(repo, "origin", &keystore, &m, "passphrase one two").unwrap();
 
         let (mut db, _dd) = open_db();
-        seed_full_session(&mut db, "machine-a");
+        seed_full_session(&mut db, "machine-a", &repo_dir(repo));
         let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
 
-        perform_sync(&mut db, repo, "origin", &key, &salt, &m).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
         let sha_first = session_blob_sha(repo);
 
         // A second sync with nothing new must not re-encrypt the session, so its
         // content-addressed blob object stays byte-identical (near-zero growth).
-        let summary = perform_sync(&mut db, repo, "origin", &key, &salt, &m).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        let summary = perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
         assert_eq!(summary.pushed, 0);
         let sha_second = session_blob_sha(repo);
         assert_eq!(
@@ -1264,9 +1362,13 @@ mod tests {
         let ma = machine("machine-a", "Machine A");
         create_store(repo_a, "origin", &keystore_a, &ma, "the real passphrase").unwrap();
         let (mut db_a, _da) = open_db();
-        seed_full_session(&mut db_a, "machine-a");
+        seed_full_session(&mut db_a, "machine-a", &repo_dir(repo_a));
         let (key_a, salt_a) = load_store_credentials(repo_a, "origin", &keystore_a).unwrap();
-        perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, repo_a);
+        perform_sync(
+            &mut db_a, repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
 
         // Machine B tries to join with the wrong passphrase.
         let dir_b = tempfile::tempdir().unwrap();
@@ -1391,9 +1493,13 @@ mod tests {
         create_store(repo_a, "origin", &keystore_a, &ma, passphrase).unwrap();
 
         let (mut db_a, _da) = open_db();
-        let session_id = seed_full_session(&mut db_a, "machine-a");
+        let session_id = seed_full_session(&mut db_a, "machine-a", &repo_dir(repo_a));
         let (key_a, salt_a) = load_store_credentials(repo_a, "origin", &keystore_a).unwrap();
-        let first = perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, repo_a);
+        let first = perform_sync(
+            &mut db_a, repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
         assert_eq!(first.pushed, 1);
 
         // The session is now synced; adding a link locally must re-open it.
@@ -1410,7 +1516,11 @@ mod tests {
         })
         .unwrap();
 
-        let second = perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, repo_a);
+        let second = perform_sync(
+            &mut db_a, repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
         assert_eq!(
             second.pushed, 1,
             "adding a link must re-export the parent session"
@@ -1428,7 +1538,11 @@ mod tests {
         join_store(repo_b, "origin", &keystore_b, &mb, &salt_b, passphrase).unwrap();
         let (mut db_b, _db) = open_db();
         let (key_b, salt_b2) = load_store_credentials(repo_b, "origin", &keystore_b).unwrap();
-        perform_sync(&mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb).unwrap();
+        let sessions_b = scoped_unsynced(&db_b, repo_b);
+        perform_sync(
+            &mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb, sessions_b,
+        )
+        .unwrap();
 
         let links = db_b.get_links_by_session(&session_id).unwrap();
         assert_eq!(links.len(), 2, "both links must reach the teammate");
@@ -1449,9 +1563,13 @@ mod tests {
         let ma = machine("machine-a", "Machine A");
         create_store(repo_a, "origin", &keystore_a, &ma, "the real passphrase").unwrap();
         let (mut db_a, _da) = open_db();
-        seed_full_session(&mut db_a, "machine-a");
+        seed_full_session(&mut db_a, "machine-a", &repo_dir(repo_a));
         let (key_a, salt_a) = load_store_credentials(repo_a, "origin", &keystore_a).unwrap();
-        perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, repo_a);
+        perform_sync(
+            &mut db_a, repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
 
         // Machine B stores a WRONG key for the same store (same salt, bad pass).
         let dir_b = tempfile::tempdir().unwrap();
@@ -1469,9 +1587,13 @@ mod tests {
 
         // Machine B has a local unsynced session that must not be pushed/marked.
         let (mut db_b, _db) = open_db();
-        let local_id = seed_full_session(&mut db_b, "machine-b");
+        let local_id = seed_full_session(&mut db_b, "machine-b", &repo_dir(repo_b));
+        let sessions_b = scoped_unsynced(&db_b, repo_b);
 
-        let err = perform_sync(&mut db_b, repo_b, "origin", &wrong_key, &salt_b, &mb).unwrap_err();
+        let err = perform_sync(
+            &mut db_b, repo_b, "origin", &wrong_key, &salt_b, &mb, sessions_b,
+        )
+        .unwrap_err();
         let msg = err.to_string().to_lowercase();
         assert!(
             msg.contains("passphrase") || msg.contains("decrypt"),
@@ -1494,14 +1616,20 @@ mod tests {
         let repo = dir.path();
         init_repo(repo);
 
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        let a_enc = format!("sessions/{id_a}.enc");
+        let a_meta = format!("sessions/{id_a}.meta.json");
+        let b_enc = format!("sessions/{id_b}.enc");
+
         let enc_sha = gitref::write_blob(repo, b"local-a-enc").unwrap();
         let meta_sha = gitref::write_blob(repo, b"local-a-meta").unwrap();
         let other_sha = gitref::write_blob(repo, b"remote-b-enc").unwrap();
 
         let mut local = BTreeMap::new();
-        local.insert("sessions/a.enc".to_string(), enc_sha.clone());
-        local.insert("sessions/a.meta.json".to_string(), meta_sha.clone());
-        local.insert("sessions/b.enc".to_string(), other_sha.clone());
+        local.insert(a_enc.clone(), enc_sha.clone());
+        local.insert(a_meta.clone(), meta_sha.clone());
+        local.insert(b_enc.clone(), other_sha.clone());
         let local_tree = gitref::build_tree(repo, None, &local).unwrap();
         let local_commit = gitref::commit_tree(repo, &local_tree, None, "lore: local").unwrap();
 
@@ -1509,24 +1637,77 @@ mod tests {
         let tracking = vec![TreeEntry {
             mode: "100644".to_string(),
             sha: other_sha,
-            path: "sessions/b.enc".to_string(),
+            path: b_enc.clone(),
         }];
 
         // A freshly re-encrypted unsynced session owns its own path already.
         let mut changes = BTreeMap::new();
-        changes.insert("sessions/a.enc".to_string(), "fresh-sha".to_string());
+        changes.insert(a_enc.clone(), "fresh-sha".to_string());
 
-        carry_forward_local_sessions(repo, &local_commit, &tracking, &mut changes).unwrap();
+        // Both sessions are in scope for this repo.
+        let in_scope: HashSet<Uuid> = [id_a, id_b].into_iter().collect();
+        carry_forward_local_sessions(repo, &local_commit, &tracking, &in_scope, &mut changes)
+            .unwrap();
 
         // a.meta.json (local-only) is carried forward.
-        assert_eq!(changes.get("sessions/a.meta.json"), Some(&meta_sha));
+        assert_eq!(changes.get(&a_meta), Some(&meta_sha));
         // a.enc keeps the fresh re-encrypted value (or_insert must not override).
-        assert_eq!(
-            changes.get("sessions/a.enc"),
-            Some(&"fresh-sha".to_string())
-        );
+        assert_eq!(changes.get(&a_enc), Some(&"fresh-sha".to_string()));
         // b.enc is in the tracking tree, so it is not re-added.
-        assert!(!changes.contains_key("sessions/b.enc"));
+        assert!(!changes.contains_key(&b_enc));
+    }
+
+    #[test]
+    fn test_carry_forward_skips_out_of_scope_sessions() {
+        // A local-only session artifact whose id is NOT in this repo's scope must
+        // not be carried forward. This is the privacy regression the scoped
+        // carry-forward closes: a local ref written before scoping can hold other
+        // repos' sessions, and re-pushing them would leak that history.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+
+        let id_in = Uuid::new_v4();
+        let id_out = Uuid::new_v4();
+        let in_enc = format!("sessions/{id_in}.enc");
+        let in_meta = format!("sessions/{id_in}.meta.json");
+        let out_enc = format!("sessions/{id_out}.enc");
+        let out_meta = format!("sessions/{id_out}.meta.json");
+
+        let in_enc_sha = gitref::write_blob(repo, b"in-enc").unwrap();
+        let in_meta_sha = gitref::write_blob(repo, b"in-meta").unwrap();
+        let out_enc_sha = gitref::write_blob(repo, b"out-enc").unwrap();
+        let out_meta_sha = gitref::write_blob(repo, b"out-meta").unwrap();
+
+        let mut local = BTreeMap::new();
+        local.insert(in_enc.clone(), in_enc_sha);
+        local.insert(in_meta.clone(), in_meta_sha);
+        local.insert(out_enc.clone(), out_enc_sha);
+        local.insert(out_meta.clone(), out_meta_sha);
+        let local_tree = gitref::build_tree(repo, None, &local).unwrap();
+        let local_commit = gitref::commit_tree(repo, &local_tree, None, "lore: local").unwrap();
+
+        // The remote tree is empty (a rewind), so nothing is already present.
+        let tracking: Vec<TreeEntry> = Vec::new();
+
+        // Only the in-scope session's id is in scope.
+        let in_scope: HashSet<Uuid> = [id_in].into_iter().collect();
+        let mut changes = BTreeMap::new();
+        carry_forward_local_sessions(repo, &local_commit, &tracking, &in_scope, &mut changes)
+            .unwrap();
+
+        // In-scope artifacts are carried forward.
+        assert!(changes.contains_key(&in_enc), "in-scope .enc carried");
+        assert!(changes.contains_key(&in_meta), "in-scope .meta carried");
+        // Out-of-scope artifacts are dropped, not re-pushed.
+        assert!(
+            !changes.contains_key(&out_enc),
+            "out-of-scope .enc must not be carried forward"
+        );
+        assert!(
+            !changes.contains_key(&out_meta),
+            "out-of-scope .meta must not be carried forward"
+        );
     }
 
     #[test]
@@ -1658,9 +1839,10 @@ mod tests {
         let setup_commit = git_out(remote_dir.path(), &["rev-parse", SESSIONS_REF]);
 
         let (mut db, _dd) = open_db();
-        seed_full_session(&mut db, "machine-a");
+        seed_full_session(&mut db, "machine-a", &repo_dir(repo));
         let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
-        perform_sync(&mut db, repo, "origin", &key, &salt, &m).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
 
         let session_enc = session_blob_sha_path(repo);
 
@@ -1672,12 +1854,251 @@ mod tests {
 
         // Sync again. The already-synced session is not rebuilt, so only the
         // carry-forward keeps it in the outgoing tree.
-        perform_sync(&mut db, repo, "origin", &key, &salt, &m).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
 
         let entries = gitref::read_tree(repo, SESSIONS_REF).unwrap();
         assert!(
             entries.iter().any(|e| e.path == session_enc),
             "local-only session must survive a remote rewind"
         );
+    }
+
+    #[test]
+    fn test_sync_only_pushes_in_scope_sessions() {
+        // A per-repo sync must push only sessions whose working directory is
+        // inside this repo. A session captured in an unrelated directory must
+        // stay out of this repo's store (the privacy bug this scoping fixes) and
+        // remain unsynced.
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(repo, &["remote", "add", "origin", &remote_url]);
+
+        let (keystore, _kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(repo, "origin", &keystore, &m, "passphrase abcdefgh").unwrap();
+
+        let (mut db, _dd) = open_db();
+        // One session inside a subdirectory of the repo, one in an unrelated dir.
+        let repo_sub = format!("{}/crate/src", repo_dir(repo));
+        let in_scope = seed_full_session(&mut db, "machine-a", &repo_sub);
+        let out_of_scope = seed_full_session(&mut db, "machine-a", "/somewhere/else/project");
+        let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
+
+        let sessions = scoped_unsynced(&db, repo);
+        let summary = perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
+        assert_eq!(
+            summary.pushed, 1,
+            "only the in-scope session must be pushed"
+        );
+
+        // The store holds exactly the in-scope session's encrypted blob.
+        let entries = gitref::read_tree(repo, SESSIONS_REF).unwrap();
+        let session_blobs = entries.iter().filter(|e| is_session_blob(&e.path)).count();
+        assert_eq!(session_blobs, 1, "store must hold exactly one session blob");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.path == format!("sessions/{in_scope}.enc")),
+            "the in-scope session must be stored"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.path == format!("sessions/{out_of_scope}.enc")),
+            "the out-of-scope session must not reach this repo's store"
+        );
+
+        // The out-of-scope session stays unsynced; the in-scope one is marked
+        // synced.
+        let unsynced = db.get_unsynced_sessions().unwrap();
+        let unsynced_ids: HashSet<Uuid> = unsynced.iter().map(|s| s.id).collect();
+        assert!(
+            unsynced_ids.contains(&out_of_scope),
+            "the out-of-scope session must remain unsynced"
+        );
+        assert!(
+            !unsynced_ids.contains(&in_scope),
+            "the in-scope session must be marked synced after the push"
+        );
+    }
+
+    #[test]
+    fn test_sync_does_not_carry_forward_out_of_scope_local_session() {
+        // A local ref written before per-repo scoping can hold another repo's
+        // session artifact. When such an out-of-scope artifact lives only in the
+        // local ref (absent from the remote), a sync that rebases on the remote
+        // must NOT carry it forward, or it would re-push another repo's history.
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(repo, &["remote", "add", "origin", &remote_url]);
+
+        let (keystore, _kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(repo, "origin", &keystore, &m, "passphrase abcdefgh").unwrap();
+
+        let (mut db, _dd) = open_db();
+        let in_scope = seed_full_session(&mut db, "machine-a", &repo_dir(repo));
+        // An out-of-scope session exists in the database (so its id is known) but
+        // its working directory is outside the repo, so it is out of scope.
+        let out_of_scope = seed_full_session(&mut db, "machine-a", "/somewhere/else/project");
+
+        // Inject the out-of-scope session's artifacts into the LOCAL ref only,
+        // simulating a pre-scoping local store that still holds them.
+        let base = gitref::resolve_ref(repo, SESSIONS_REF).unwrap();
+        let leaked_enc = gitref::write_blob(repo, b"leaked-enc").unwrap();
+        let leaked_meta = gitref::write_blob(repo, b"leaked-meta").unwrap();
+        let mut inject = BTreeMap::new();
+        inject.insert(format!("sessions/{out_of_scope}.enc"), leaked_enc);
+        inject.insert(format!("sessions/{out_of_scope}.meta.json"), leaked_meta);
+        let tree = gitref::build_tree(repo, base.as_deref(), &inject).unwrap();
+        let commit = gitref::commit_tree(repo, &tree, base.as_deref(), "inject leaked").unwrap();
+        gitref::update_ref_checked(repo, SESSIONS_REF, &commit, base.as_deref()).unwrap();
+
+        let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
+
+        let entries = gitref::read_tree(repo, SESSIONS_REF).unwrap();
+        // The in-scope session is stored.
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.path == format!("sessions/{in_scope}.enc")),
+            "the in-scope session must be stored"
+        );
+        // The out-of-scope local-only artifacts must not survive the sync.
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.path == format!("sessions/{out_of_scope}.enc")),
+            "out-of-scope local-only session must not be carried forward or pushed"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.path == format!("sessions/{out_of_scope}.meta.json")),
+            "out-of-scope local-only metadata must not be carried forward or pushed"
+        );
+    }
+
+    #[test]
+    fn test_sync_no_remote_does_not_inherit_out_of_scope_local_artifacts() {
+        // No remote lore ref exists (the remote store was never initialized or was
+        // deleted), so the outgoing tree base is empty rather than the local ref.
+        // A local ref written before per-repo scoping can still hold out-of-scope
+        // session artifacts; the no-remote path must build the tree from an empty
+        // base and carry forward only in-scope local-only sessions, so those
+        // out-of-scope artifacts are neither kept in the new local ref nor pushed.
+        let (remote_dir, remote_url) = init_bare_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(repo, &["remote", "add", "origin", &remote_url]);
+
+        let (keystore, _kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(repo, "origin", &keystore, &m, "passphrase abcdefgh").unwrap();
+
+        let (mut db, _dd) = open_db();
+        let in_scope = seed_full_session(&mut db, "machine-a", &repo_dir(repo));
+        // An out-of-scope session exists in the database (so its id is known) but
+        // its working directory is outside the repo, so it is out of scope.
+        let out_of_scope = seed_full_session(&mut db, "machine-a", "/somewhere/else/project");
+
+        // Inject the out-of-scope session's artifacts into the LOCAL ref only,
+        // simulating a pre-scoping local store that still holds them.
+        let base = gitref::resolve_ref(repo, SESSIONS_REF).unwrap();
+        let leaked_enc = gitref::write_blob(repo, b"leaked-enc").unwrap();
+        let leaked_meta = gitref::write_blob(repo, b"leaked-meta").unwrap();
+        let mut inject = BTreeMap::new();
+        inject.insert(format!("sessions/{out_of_scope}.enc"), leaked_enc.clone());
+        inject.insert(format!("sessions/{out_of_scope}.meta.json"), leaked_meta);
+        let tree = gitref::build_tree(repo, base.as_deref(), &inject).unwrap();
+        let commit = gitref::commit_tree(repo, &tree, base.as_deref(), "inject leaked").unwrap();
+        gitref::update_ref_checked(repo, SESSIONS_REF, &commit, base.as_deref()).unwrap();
+
+        // Remove the remote lore ref so the sync takes the no-remote base path
+        // (fetch returns None and the tree base is empty).
+        git(remote_dir.path(), &["update-ref", "-d", SESSIONS_REF]);
+        assert!(!gitref::remote_ref_exists(repo, "origin", SESSIONS_REF).unwrap());
+
+        let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        let summary = perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
+        assert_eq!(summary.pushed, 1, "only the in-scope session is pushed");
+
+        // The remote ref is created fresh by the push.
+        assert!(gitref::remote_ref_exists(repo, "origin", SESSIONS_REF).unwrap());
+
+        // Refresh the tracking ref so the pushed remote tree can be inspected.
+        gitref::fetch(repo, "origin", SESSIONS_REF).unwrap();
+
+        // The in-scope session is present in the new local ref and on the remote,
+        // while the out-of-scope local-only artifacts are gone from both.
+        let tracking = gitref::tracking_ref_name("origin", SESSIONS_REF).unwrap();
+        for reference in [SESSIONS_REF, tracking.as_str()] {
+            let entries = gitref::read_tree(repo, reference).unwrap();
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.path == format!("sessions/{in_scope}.enc")),
+                "the in-scope session must be present in {reference}"
+            );
+            assert!(
+                !entries
+                    .iter()
+                    .any(|e| e.path == format!("sessions/{out_of_scope}.enc")),
+                "out-of-scope .enc must not survive the no-remote sync in {reference}"
+            );
+            assert!(
+                !entries
+                    .iter()
+                    .any(|e| e.path == format!("sessions/{out_of_scope}.meta.json")),
+                "out-of-scope .meta must not survive the no-remote sync in {reference}"
+            );
+            // The store metadata still lands in the tree in the no-remote case.
+            assert!(
+                entries.iter().any(|e| e.path == "meta/salt"),
+                "meta/salt must be present in {reference}"
+            );
+            assert!(
+                entries.iter().any(|e| e.path == "meta/machines.json"),
+                "meta/machines.json must be present in {reference}"
+            );
+        }
+
+        // A clean tip tree is not enough: the pushed commit must not descend from
+        // the pre-scoping local commit, or the out-of-scope blobs would still
+        // reach the remote through ancestry (e.g. `refs/lore/sessions^`). Assert
+        // the no-remote commit is an ORPHAN on both the local ref and the remote:
+        // exactly one commit is reachable, so it has no parent.
+        for (label, dir) in [("local", repo), ("remote", remote_dir.path())] {
+            assert_eq!(
+                git_out(dir, &["rev-list", "--count", SESSIONS_REF]),
+                "1",
+                "the no-remote sync commit must be an orphan on the {label} ref"
+            );
+        }
+
+        // The out-of-scope blob object must not be reachable from the pushed ref
+        // through any commit in its history. `git rev-list --objects` enumerates
+        // every object reachable from the ref, so the leaked blob oid and its path
+        // must both be absent.
+        for (label, dir) in [("local", repo), ("remote", remote_dir.path())] {
+            let objects = git_out(dir, &["rev-list", "--objects", SESSIONS_REF]);
+            assert!(
+                !objects.contains(&leaked_enc),
+                "out-of-scope blob object must not be reachable from the {label} ref"
+            );
+            assert!(
+                !objects.contains(&format!("sessions/{out_of_scope}.enc")),
+                "out-of-scope .enc path must not be reachable from the {label} ref"
+            );
+        }
     }
 }
