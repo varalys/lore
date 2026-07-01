@@ -15,6 +15,7 @@
 //! - [`git`] - Git repository integration and auto-linking
 //! - [`mcp`] - MCP (Model Context Protocol) server
 //! - [`storage`] - SQLite database operations and data models
+//! - [`sync`] - Serverless git-ref sync (reasoning history in the user's repo)
 
 /// Session capture from AI coding tools like Claude Code and Copilot.
 pub mod capture;
@@ -39,3 +40,6 @@ pub mod storage;
 
 /// LLM-powered session summarization.
 pub mod summarize;
+
+/// Serverless git-ref sync for storing reasoning history in the user's own repo.
+pub mod sync;

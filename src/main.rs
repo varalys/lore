@@ -31,6 +31,13 @@ mod git;
 mod mcp;
 mod storage;
 mod summarize;
+// The sync module is the foundation for git-ref sync. Its public API is consumed
+// by later phases (the `lore sync` command, global store, and daemon wiring) and
+// is not yet called from the binary, so allow dead code here for the binary
+// build only. The library build (`pub mod sync` in lib.rs) keeps full dead-code
+// checking, so genuinely unused internals are still caught.
+#[allow(dead_code)]
+mod sync;
 
 use cli::commands;
 use config::Config;
