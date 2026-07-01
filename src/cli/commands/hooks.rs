@@ -331,47 +331,35 @@ fn run_uninstall() -> Result<()> {
     for hook_type in HookType::all() {
         let hook_path = hooks_dir.join(hook_type.filename());
 
-        if !hook_path.exists() {
-            println!(
-                "  {} {} (not installed)",
-                "Skipped".dimmed(),
-                hook_type.filename()
-            );
-            not_found_count += 1;
-            continue;
-        }
-
-        // Check if it's a Lore hook
-        let content = fs::read_to_string(&hook_path)
-            .with_context(|| format!("Failed to read hook: {}", hook_path.display()))?;
-
-        if !content.contains(LORE_HOOK_MARKER) {
-            println!(
-                "  {} {} (not a Lore hook)",
-                "Skipped".yellow(),
-                hook_type.filename()
-            );
-            continue;
-        }
-
-        // Remove the hook
-        fs::remove_file(&hook_path)
-            .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
-        removed_count += 1;
-
-        // Check for backup to restore
-        let backup_path = hook_path.with_extension("backup");
-        if backup_path.exists() {
-            fs::rename(&backup_path, &hook_path)
-                .with_context(|| format!("Failed to restore backup: {}", backup_path.display()))?;
-            println!(
-                "  {} {} (restored from backup)",
-                "Removed".green(),
-                hook_type.filename()
-            );
-            restored_count += 1;
-        } else {
-            println!("  {} {}", "Removed".green(), hook_type.filename());
+        match uninstall_hook(&hook_path)? {
+            UninstallStatus::NotInstalled => {
+                println!(
+                    "  {} {} (not installed)",
+                    "Skipped".dimmed(),
+                    hook_type.filename()
+                );
+                not_found_count += 1;
+            }
+            UninstallStatus::NotLoreHook => {
+                println!(
+                    "  {} {} (not a Lore hook)",
+                    "Skipped".yellow(),
+                    hook_type.filename()
+                );
+            }
+            UninstallStatus::Removed => {
+                println!("  {} {}", "Removed".green(), hook_type.filename());
+                removed_count += 1;
+            }
+            UninstallStatus::RemovedAndRestored => {
+                println!(
+                    "  {} {} (restored from backup)",
+                    "Removed".green(),
+                    hook_type.filename()
+                );
+                removed_count += 1;
+                restored_count += 1;
+            }
         }
     }
 
@@ -389,6 +377,48 @@ fn run_uninstall() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Status of a hook uninstallation attempt.
+enum UninstallStatus {
+    /// No hook file was present.
+    NotInstalled,
+    /// A hook exists but is not Lore-managed, so it was left untouched.
+    NotLoreHook,
+    /// The Lore hook was removed and no backup existed to restore.
+    Removed,
+    /// The Lore hook was removed and a backed-up original was restored.
+    RemovedAndRestored,
+}
+
+/// Uninstalls a single hook.
+///
+/// Only removes a hook that Lore installed (identified by the marker comment).
+/// When a `<hook>.backup` sibling exists, the original hook is restored from it.
+/// A non-Lore hook is left in place so third-party hooks are never destroyed.
+fn uninstall_hook(hook_path: &Path) -> Result<UninstallStatus> {
+    if !hook_path.exists() {
+        return Ok(UninstallStatus::NotInstalled);
+    }
+
+    let content = fs::read_to_string(hook_path)
+        .with_context(|| format!("Failed to read hook: {}", hook_path.display()))?;
+
+    if !content.contains(LORE_HOOK_MARKER) {
+        return Ok(UninstallStatus::NotLoreHook);
+    }
+
+    fs::remove_file(hook_path)
+        .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
+
+    let backup_path = hook_path.with_extension("backup");
+    if backup_path.exists() {
+        fs::rename(&backup_path, hook_path)
+            .with_context(|| format!("Failed to restore backup: {}", backup_path.display()))?;
+        Ok(UninstallStatus::RemovedAndRestored)
+    } else {
+        Ok(UninstallStatus::Removed)
+    }
 }
 
 /// Shows the status of Lore git hooks.
@@ -690,10 +720,68 @@ mod tests {
         assert!(hook_path.exists());
         assert_eq!(fs::read_to_string(&hook_path)?, PRE_PUSH_HOOK);
 
-        // Uninstall removes only the Lore-managed hook file.
+        // Uninstall through the real code path removes the Lore-managed hook.
         assert!(matches!(get_hook_status(&hook_path)?, HookStatus::Lore));
-        fs::remove_file(&hook_path)?;
+        let status = uninstall_hook(&hook_path)?;
+        assert!(matches!(status, UninstallStatus::Removed));
+        assert!(!hook_path.exists());
         assert!(matches!(get_hook_status(&hook_path)?, HookStatus::None));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_uninstall_hook_leaves_non_lore_hook() -> Result<()> {
+        let (_temp_dir, hooks_dir) = create_test_repo()?;
+        let hook_path = hooks_dir.join("pre-push");
+
+        // A third-party pre-push hook must never be removed by uninstall.
+        let foreign = "#!/bin/sh\necho 'someone elses hook'\n";
+        fs::write(&hook_path, foreign)?;
+
+        let status = uninstall_hook(&hook_path)?;
+        assert!(matches!(status, UninstallStatus::NotLoreHook));
+        assert!(hook_path.exists());
+        assert_eq!(fs::read_to_string(&hook_path)?, foreign);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_uninstall_hook_not_installed() -> Result<()> {
+        let (_temp_dir, hooks_dir) = create_test_repo()?;
+        let hook_path = hooks_dir.join("pre-push");
+
+        let status = uninstall_hook(&hook_path)?;
+        assert!(matches!(status, UninstallStatus::NotInstalled));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pre_push_force_install_then_uninstall_restores_backup() -> Result<()> {
+        let (_temp_dir, hooks_dir) = create_test_repo()?;
+        let hook_path = hooks_dir.join("pre-push");
+        let backup_path = hooks_dir.join("pre-push.backup");
+
+        // A pre-existing NON-Lore pre-push hook.
+        let original = "#!/bin/sh\necho 'original pre-push'\nexit 0\n";
+        fs::write(&hook_path, original)?;
+
+        // Force-install backs up the original and writes the Lore hook.
+        let status = install_hook(&hook_path, HookType::PrePush, true)?;
+        assert!(matches!(status, InstallStatus::Replaced));
+        assert!(backup_path.exists());
+        assert_eq!(fs::read_to_string(&backup_path)?, original);
+        assert_eq!(fs::read_to_string(&hook_path)?, PRE_PUSH_HOOK);
+
+        // Uninstall through the real path removes the Lore hook and restores the
+        // original from the backup, consuming the backup file.
+        let status = uninstall_hook(&hook_path)?;
+        assert!(matches!(status, UninstallStatus::RemovedAndRestored));
+        assert!(!backup_path.exists());
+        assert_eq!(fs::read_to_string(&hook_path)?, original);
+        assert!(matches!(get_hook_status(&hook_path)?, HookStatus::Other));
 
         Ok(())
     }

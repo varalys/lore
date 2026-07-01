@@ -340,20 +340,44 @@ fn sync_quiet_in_repo(repo: &Path, remote: &str) -> Result<()> {
         None => return Ok(()),
     };
 
-    let mut config = Config::load()?;
-    let machine = machine_identity(&mut config)?;
-    let keystore = KeyStore::with_keychain(config.use_keychain);
+    // Resolve the key store read-only. `Config::load` never writes, so this
+    // reads `use_keychain` without persisting anything; the mutating machine-id
+    // step is deferred to after a key is confirmed present.
+    let keystore = KeyStore::with_keychain(Config::load()?.use_keychain);
 
+    quiet_sync_with_keystore(repo, &remote, &salt, &keystore)
+}
+
+/// Runs a quiet sync for a set-up store, given an already-resolved key store.
+///
+/// Returns Ok without mutating the config or opening the database when no key is
+/// stored on this machine. Only after a key is confirmed present does it persist
+/// this machine's id (the first mutating step), open the database, and sync.
+/// Split from [`sync_quiet_in_repo`] so it can be exercised with a key store
+/// isolated to a temp directory.
+fn quiet_sync_with_keystore(
+    repo: &Path,
+    remote: &str,
+    salt: &[u8],
+    keystore: &KeyStore,
+) -> Result<()> {
     // Skip silently when no key is stored on this machine. Quiet mode never
     // prompts for a passphrase; the user runs 'lore sync setup' interactively.
-    let store_id = store_id_from_salt(&salt);
+    // This precedes every mutating step, so a set-up-but-unkeyed repo never
+    // writes the config or opens the database.
+    let store_id = store_id_from_salt(salt);
     let key = match keystore.load_key(&store_id)? {
         Some(key) => key,
         None => return Ok(()),
     };
 
+    // A key is present: now perform the mutating work. `machine_identity`
+    // persists a generated machine id to the config, so it must not run on the
+    // no-key path above.
+    let mut config = Config::load()?;
+    let machine = machine_identity(&mut config)?;
     let mut db = Database::open_default()?;
-    perform_sync(&mut db, repo, &remote, &key, &salt, &machine)?;
+    perform_sync(&mut db, repo, remote, &key, salt, &machine)?;
     Ok(())
 }
 
@@ -1527,6 +1551,40 @@ mod tests {
         init_repo(repo);
 
         sync_quiet_in_repo(repo, "origin").expect("quiet sync must no-op without a remote");
+    }
+
+    #[test]
+    fn test_quiet_sync_no_key_returns_ok_without_mutating() {
+        // Set up a store (salt in the ref) but present a key store that holds no
+        // key for it. The quiet path must return Ok before reaching the mutating
+        // machine-id step or opening the database. The key store is isolated to a
+        // temp dir, so load_key resolves to None deterministically.
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(repo, &["remote", "add", "origin", &remote_url]);
+
+        // Create the store with one key store, then run the quiet sync against a
+        // different, empty key store to model "set up elsewhere, no key here".
+        let (setup_keystore, _sk) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(repo, "origin", &setup_keystore, &m, "passphrase abcdefgh").unwrap();
+
+        let salt = read_store_salt(repo, "origin")
+            .unwrap()
+            .expect("salt present");
+        let (empty_keystore, _ek) = test_keystore();
+        assert!(
+            empty_keystore
+                .load_key(&store_id_from_salt(&salt))
+                .unwrap()
+                .is_none(),
+            "the isolated key store must have no key for this store"
+        );
+
+        quiet_sync_with_keystore(repo, "origin", &salt, &empty_keystore)
+            .expect("quiet sync must no-op when no key is stored on this machine");
     }
 
     #[test]
