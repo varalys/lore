@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -62,13 +62,6 @@ const MIN_PASSPHRASE_LEN: usize = 8;
 /// Holds the JSON array of child-record deletions ({child_id, kind, session_id,
 /// deleted_at}) so a deletion on one machine suppresses that record everywhere.
 const TOMBSTONES_PATH: &str = "meta/tombstones";
-
-/// Age past which a tombstone is garbage-collected during sync.
-///
-/// A deletion older than this is assumed to have reached every machine, so
-/// dropping its tombstone can no longer resurrect the deleted child. Bounds the
-/// tombstone set so it does not grow without limit.
-const TOMBSTONE_GC_DAYS: i64 = 90;
 
 /// Maximum number of fetch/merge/build/push attempts before giving up.
 ///
@@ -579,12 +572,14 @@ fn perform_sync_in_store(
 
         // TOMBSTONES: union the remote deletion set into the local table BEFORE
         // the merge so the merge suppresses re-adding any child that was deleted
-        // on another machine, then GC entries older than the retention window.
-        // A wrong key makes the remote tombstones undecryptable; that is treated
-        // as an empty set here (the merge below surfaces the wrong-key error).
+        // on another machine. Tombstones are never pruned during sync: they are
+        // tiny (a few ids plus a timestamp) and dropping one that is still needed
+        // for suppression would resurrect the deleted child, so the full set is
+        // kept indefinitely. A wrong key makes the remote tombstones
+        // undecryptable; that is treated as an empty set here (the merge below
+        // surfaces the wrong-key error).
         let remote_tombstones = read_remote_tombstones(repo, &tracking_entries, key)?;
         db.add_tombstones(&remote_tombstones)?;
-        db.prune_tombstones(Utc::now() - Duration::days(TOMBSTONE_GC_DAYS))?;
 
         // MERGE remote -> local database (full records, newer-wins). A wrong key
         // surfaces here and aborts before anything is built or pushed. The store
@@ -660,8 +655,8 @@ fn perform_sync_in_store(
 
         add_meta_changes(db, repo, tree_base.as_deref(), salt, machine, &mut changes)?;
 
-        // Write the unioned, GC'd tombstone set back to the store, but only when
-        // it differs from what the base tree already holds so an unchanged set
+        // Write the unioned tombstone set back to the store, but only when it
+        // differs from what the base tree already holds so an unchanged set
         // keeps its existing content-addressed blob (no churn from re-encrypting
         // with a fresh nonce every sync).
         add_tombstone_changes(db, repo, &remote_tombstones, key, &mut changes)?;
@@ -912,7 +907,7 @@ fn read_remote_tombstones(
 /// (`remote_tombstones`) by their `(child_id, kind)` keys. When the keys match,
 /// nothing is written so the base's existing blob is preserved verbatim
 /// (content-addressed dedup). Otherwise the full local set is re-encrypted and
-/// written, which also shrinks the stored set after garbage collection.
+/// written.
 fn add_tombstone_changes(
     db: &Database,
     repo: &Path,
@@ -3124,6 +3119,75 @@ mod tests {
         assert!(
             db.get_links_by_session(&session_id).unwrap().is_empty(),
             "a stale remote blob must not resurrect a tombstoned link"
+        );
+    }
+
+    #[test]
+    fn test_old_remote_tombstone_suppresses_stale_blob_through_sync() {
+        // The exact resurrection repro from the review: the remote store holds a
+        // tombstone older than the former 90-day GC window alongside a stale
+        // session blob that still contains the deleted child. A fresh machine
+        // must keep the child deleted after a full sync. The sync path no longer
+        // prunes tombstones, so the old tombstone survives the union and
+        // suppresses the stale blob during the merge instead of being dropped
+        // first (which would resurrect the child).
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let passphrase = "shared team passphrase";
+
+        // Machine A: set up, seed a session with a link, sync so the remote
+        // holds the session blob (still containing the link).
+        let (_da, repo_a, keystore_a, _ka, ma) = setup_repo_with_store(&remote_url, passphrase);
+        let (mut db_a, _dba) = open_db();
+        let session_id = seed_full_session(&mut db_a, "machine-a", &repo_dir(&repo_a));
+        let link = db_a.get_links_by_session(&session_id).unwrap()[0].clone();
+        let (key_a, salt_a) = load_store_credentials(&repo_a, "origin", &keystore_a).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, &repo_a);
+        perform_sync(
+            &mut db_a, &repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
+
+        // Machine A: record a tombstone for the link backdated well past the
+        // former 90-day window, then sync again. The session blob is already
+        // synced so it is carried forward unchanged (still holding the link),
+        // making the remote store deliberately stale. Only the tombstone blob is
+        // written.
+        db_a.add_tombstones(&[Tombstone {
+            child_id: link.id.to_string(),
+            kind: "link".to_string(),
+            session_id: Some(session_id.to_string()),
+            deleted_at: Utc::now() - chrono::Duration::days(120),
+        }])
+        .unwrap();
+        let sessions_a = scoped_unsynced(&db_a, &repo_a);
+        perform_sync(
+            &mut db_a, &repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
+
+        // Machine B: fresh clone, join, sync. It fetches the stale session blob
+        // and the 120-day-old tombstone together. The old tombstone must
+        // suppress the stale blob so the link is never resurrected.
+        let dir_b = tempfile::tempdir().unwrap();
+        let repo_b = dir_b.path();
+        init_repo(repo_b);
+        git(repo_b, &["remote", "add", "origin", &remote_url]);
+        let (keystore_b, _kb) = test_keystore();
+        let mb = machine("machine-b", "Machine B");
+        gitref::fetch(repo_b, "origin", SESSIONS_REF).unwrap();
+        let salt_b = read_store_salt(repo_b, "origin").unwrap().unwrap();
+        join_store(repo_b, "origin", &keystore_b, &mb, &salt_b, passphrase).unwrap();
+        let (mut db_b, _dbb) = open_db();
+        let (key_b, salt_b2) = load_store_credentials(repo_b, "origin", &keystore_b).unwrap();
+        let sessions_b = scoped_unsynced(&db_b, repo_b);
+        perform_sync(
+            &mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb, sessions_b,
+        )
+        .unwrap();
+
+        assert!(
+            db_b.get_links_by_session(&session_id).unwrap().is_empty(),
+            "an old remote tombstone must still suppress a stale session blob"
         );
     }
 

@@ -1093,10 +1093,15 @@ impl Database {
 
     /// Prunes tombstones deleted before the given cutoff.
     ///
-    /// Bounds the tombstone set so it does not grow without limit. A tombstone
-    /// older than the cutoff is assumed to have propagated to every machine, so
-    /// dropping it can no longer resurrect the deleted child. Returns the number
-    /// of tombstones removed.
+    /// Returns the number of tombstones removed. This is NOT called during sync:
+    /// an age-based prune there could drop a tombstone still needed to suppress a
+    /// stale session blob, resurrecting the deleted child. Tombstones are tiny, so
+    /// the sync path keeps the full set indefinitely. This method is retained for
+    /// a possible future safe garbage collection that only prunes tombstones
+    /// proven to have propagated to every machine.
+    // Retained for that future safe GC and covered by a direct unit test; it has
+    // no non-test caller today now that the sync path never prunes.
+    #[allow(dead_code)]
     pub fn prune_tombstones(&self, before: DateTime<Utc>) -> Result<usize> {
         let rows = self.conn.execute(
             "DELETE FROM tombstones WHERE deleted_at < ?1",
