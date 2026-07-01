@@ -2,8 +2,12 @@
 //!
 //! Provides functionality to install, uninstall, and check the status of
 //! git hooks that integrate Lore with the git workflow. The hooks enable
-//! automatic session linking after commits and session references in commit
-//! messages.
+//! automatic session linking after commits, session references in commit
+//! messages, and best-effort reasoning-history sync when you push.
+//!
+//! The pre-push hook is the recommended way to automate `lore sync`: reasoning
+//! rides on the git pushes you already do, so the background daemon is optional
+//! for sync.
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -50,6 +54,47 @@ if [ "$COMMIT_SOURCE" = "" ] || [ "$COMMIT_SOURCE" = "message" ]; then
 fi
 "#;
 
+/// Pre-push hook script content.
+///
+/// This hook runs before each `git push` and best-effort syncs the repo's
+/// encrypted reasoning history (`refs/lore/sessions`) alongside the code you are
+/// pushing. It never blocks the push: a sync failure prints a brief warning and
+/// the hook still exits 0.
+///
+/// Re-entry guard: `lore sync` internally runs `git push` to publish the lore
+/// refs, which would fire this pre-push hook again and loop forever. The hook
+/// exports `LORE_SYNC_HOOK=1` before invoking `lore sync`, and exits early if
+/// that variable is already set. Because it is exported, the guard is inherited
+/// by `lore sync` and by the nested `git push` it spawns, so that inner push's
+/// pre-push hook sees the guard and skips.
+const PRE_PUSH_HOOK: &str = r#"#!/bin/sh
+# Lore pre-push hook - sync reasoning history when you push code
+# Lore hook - managed by lore hooks install
+
+# Re-entry guard: lore sync runs `git push` internally to publish refs/lore/*,
+# which fires this same pre-push hook again. If the guard is already set we are
+# inside that nested push, so skip to avoid an infinite loop. It is exported so
+# the guard is inherited by lore sync and by the git push it spawns.
+if [ -n "$LORE_SYNC_HOOK" ]; then
+    exit 0
+fi
+export LORE_SYNC_HOOK=1
+
+# git passes the pushed remote's name as $1 (and its URL as $2).
+remote="$1"
+
+# Best-effort: a sync failure (network, merge, or unconfigured store) must never
+# block the push. The --quiet mode no-ops when this repo's lore store is not set
+# up and never prompts for a passphrase.
+if command -v lore >/dev/null 2>&1; then
+    if ! lore sync --remote "$remote" --quiet; then
+        echo "lore: sync failed; your git push was not affected" >&2
+    fi
+fi
+
+exit 0
+"#;
+
 /// Hook types that Lore manages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookType {
@@ -57,6 +102,8 @@ pub enum HookType {
     PostCommit,
     /// Runs before commit message editor to add session references.
     PrepareCommitMsg,
+    /// Runs before each push to best-effort sync reasoning history.
+    PrePush,
 }
 
 impl HookType {
@@ -65,6 +112,7 @@ impl HookType {
         match self {
             HookType::PostCommit => "post-commit",
             HookType::PrepareCommitMsg => "prepare-commit-msg",
+            HookType::PrePush => "pre-push",
         }
     }
 
@@ -73,12 +121,17 @@ impl HookType {
         match self {
             HookType::PostCommit => POST_COMMIT_HOOK,
             HookType::PrepareCommitMsg => PREPARE_COMMIT_MSG_HOOK,
+            HookType::PrePush => PRE_PUSH_HOOK,
         }
     }
 
     /// Returns all managed hook types.
     fn all() -> &'static [HookType] {
-        &[HookType::PostCommit, HookType::PrepareCommitMsg]
+        &[
+            HookType::PostCommit,
+            HookType::PrepareCommitMsg,
+            HookType::PrePush,
+        ]
     }
 }
 
@@ -88,7 +141,9 @@ pub enum HooksCommand {
     /// Install git hooks in the current repository
     #[command(long_about = "Installs Lore's git hooks in the current repository's\n\
         .git/hooks directory. The post-commit hook automatically\n\
-        links sessions to commits using time and file overlap.\n\
+        links sessions to commits using time and file overlap. The\n\
+        pre-push hook best-effort syncs reasoning history when you push\n\
+        (no daemon required); it never blocks the push.\n\
         Existing hooks are backed up before being replaced.")]
     Install {
         /// Overwrite existing hooks (backs up originals)
@@ -276,47 +331,35 @@ fn run_uninstall() -> Result<()> {
     for hook_type in HookType::all() {
         let hook_path = hooks_dir.join(hook_type.filename());
 
-        if !hook_path.exists() {
-            println!(
-                "  {} {} (not installed)",
-                "Skipped".dimmed(),
-                hook_type.filename()
-            );
-            not_found_count += 1;
-            continue;
-        }
-
-        // Check if it's a Lore hook
-        let content = fs::read_to_string(&hook_path)
-            .with_context(|| format!("Failed to read hook: {}", hook_path.display()))?;
-
-        if !content.contains(LORE_HOOK_MARKER) {
-            println!(
-                "  {} {} (not a Lore hook)",
-                "Skipped".yellow(),
-                hook_type.filename()
-            );
-            continue;
-        }
-
-        // Remove the hook
-        fs::remove_file(&hook_path)
-            .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
-        removed_count += 1;
-
-        // Check for backup to restore
-        let backup_path = hook_path.with_extension("backup");
-        if backup_path.exists() {
-            fs::rename(&backup_path, &hook_path)
-                .with_context(|| format!("Failed to restore backup: {}", backup_path.display()))?;
-            println!(
-                "  {} {} (restored from backup)",
-                "Removed".green(),
-                hook_type.filename()
-            );
-            restored_count += 1;
-        } else {
-            println!("  {} {}", "Removed".green(), hook_type.filename());
+        match uninstall_hook(&hook_path)? {
+            UninstallStatus::NotInstalled => {
+                println!(
+                    "  {} {} (not installed)",
+                    "Skipped".dimmed(),
+                    hook_type.filename()
+                );
+                not_found_count += 1;
+            }
+            UninstallStatus::NotLoreHook => {
+                println!(
+                    "  {} {} (not a Lore hook)",
+                    "Skipped".yellow(),
+                    hook_type.filename()
+                );
+            }
+            UninstallStatus::Removed => {
+                println!("  {} {}", "Removed".green(), hook_type.filename());
+                removed_count += 1;
+            }
+            UninstallStatus::RemovedAndRestored => {
+                println!(
+                    "  {} {} (restored from backup)",
+                    "Removed".green(),
+                    hook_type.filename()
+                );
+                removed_count += 1;
+                restored_count += 1;
+            }
         }
     }
 
@@ -334,6 +377,48 @@ fn run_uninstall() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Status of a hook uninstallation attempt.
+enum UninstallStatus {
+    /// No hook file was present.
+    NotInstalled,
+    /// A hook exists but is not Lore-managed, so it was left untouched.
+    NotLoreHook,
+    /// The Lore hook was removed and no backup existed to restore.
+    Removed,
+    /// The Lore hook was removed and a backed-up original was restored.
+    RemovedAndRestored,
+}
+
+/// Uninstalls a single hook.
+///
+/// Only removes a hook that Lore installed (identified by the marker comment).
+/// When a `<hook>.backup` sibling exists, the original hook is restored from it.
+/// A non-Lore hook is left in place so third-party hooks are never destroyed.
+fn uninstall_hook(hook_path: &Path) -> Result<UninstallStatus> {
+    if !hook_path.exists() {
+        return Ok(UninstallStatus::NotInstalled);
+    }
+
+    let content = fs::read_to_string(hook_path)
+        .with_context(|| format!("Failed to read hook: {}", hook_path.display()))?;
+
+    if !content.contains(LORE_HOOK_MARKER) {
+        return Ok(UninstallStatus::NotLoreHook);
+    }
+
+    fs::remove_file(hook_path)
+        .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
+
+    let backup_path = hook_path.with_extension("backup");
+    if backup_path.exists() {
+        fs::rename(&backup_path, hook_path)
+            .with_context(|| format!("Failed to restore backup: {}", backup_path.display()))?;
+        Ok(UninstallStatus::RemovedAndRestored)
+    } else {
+        Ok(UninstallStatus::Removed)
+    }
 }
 
 /// Shows the status of Lore git hooks.
@@ -585,6 +670,208 @@ mod tests {
         assert!(matches!(status, HookStatus::Other));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_pre_push_hook_included_in_all() {
+        assert!(
+            HookType::all().contains(&HookType::PrePush),
+            "pre-push hook must be part of the managed set"
+        );
+        assert_eq!(HookType::PrePush.filename(), "pre-push");
+    }
+
+    #[test]
+    fn test_pre_push_hook_content() {
+        let content = HookType::PrePush.content();
+        // Best-effort sync via the quiet mode, passing the pushed remote through.
+        assert!(
+            content.contains(r#"lore sync --remote "$remote" --quiet"#),
+            "pre-push hook must call quiet sync with the pushed remote"
+        );
+        // git provides the remote name as the first argument.
+        assert!(
+            content.contains(r#"remote="$1""#),
+            "pre-push hook must read the remote name from $1"
+        );
+        // Re-entry guard export and early-exit check.
+        assert!(
+            content.contains("export LORE_SYNC_HOOK=1"),
+            "pre-push hook must export the re-entry guard"
+        );
+        assert!(
+            content.contains(r#"if [ -n "$LORE_SYNC_HOOK" ]; then"#),
+            "pre-push hook must skip when the guard is already set"
+        );
+        // Best-effort: it always exits 0 so it never blocks the push.
+        assert!(
+            content.trim_end().ends_with("exit 0"),
+            "pre-push hook must exit 0 so it never blocks the push"
+        );
+    }
+
+    #[test]
+    fn test_pre_push_install_uninstall_round_trip() -> Result<()> {
+        let (_temp_dir, hooks_dir) = create_test_repo()?;
+        let hook_path = hooks_dir.join("pre-push");
+
+        let status = install_hook(&hook_path, HookType::PrePush, false)?;
+        assert!(matches!(status, InstallStatus::Installed));
+        assert!(hook_path.exists());
+        assert_eq!(fs::read_to_string(&hook_path)?, PRE_PUSH_HOOK);
+
+        // Uninstall through the real code path removes the Lore-managed hook.
+        assert!(matches!(get_hook_status(&hook_path)?, HookStatus::Lore));
+        let status = uninstall_hook(&hook_path)?;
+        assert!(matches!(status, UninstallStatus::Removed));
+        assert!(!hook_path.exists());
+        assert!(matches!(get_hook_status(&hook_path)?, HookStatus::None));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_uninstall_hook_leaves_non_lore_hook() -> Result<()> {
+        let (_temp_dir, hooks_dir) = create_test_repo()?;
+        let hook_path = hooks_dir.join("pre-push");
+
+        // A third-party pre-push hook must never be removed by uninstall.
+        let foreign = "#!/bin/sh\necho 'someone elses hook'\n";
+        fs::write(&hook_path, foreign)?;
+
+        let status = uninstall_hook(&hook_path)?;
+        assert!(matches!(status, UninstallStatus::NotLoreHook));
+        assert!(hook_path.exists());
+        assert_eq!(fs::read_to_string(&hook_path)?, foreign);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_uninstall_hook_not_installed() -> Result<()> {
+        let (_temp_dir, hooks_dir) = create_test_repo()?;
+        let hook_path = hooks_dir.join("pre-push");
+
+        let status = uninstall_hook(&hook_path)?;
+        assert!(matches!(status, UninstallStatus::NotInstalled));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pre_push_force_install_then_uninstall_restores_backup() -> Result<()> {
+        let (_temp_dir, hooks_dir) = create_test_repo()?;
+        let hook_path = hooks_dir.join("pre-push");
+        let backup_path = hooks_dir.join("pre-push.backup");
+
+        // A pre-existing NON-Lore pre-push hook.
+        let original = "#!/bin/sh\necho 'original pre-push'\nexit 0\n";
+        fs::write(&hook_path, original)?;
+
+        // Force-install backs up the original and writes the Lore hook.
+        let status = install_hook(&hook_path, HookType::PrePush, true)?;
+        assert!(matches!(status, InstallStatus::Replaced));
+        assert!(backup_path.exists());
+        assert_eq!(fs::read_to_string(&backup_path)?, original);
+        assert_eq!(fs::read_to_string(&hook_path)?, PRE_PUSH_HOOK);
+
+        // Uninstall through the real path removes the Lore hook and restores the
+        // original from the backup, consuming the backup file.
+        let status = uninstall_hook(&hook_path)?;
+        assert!(matches!(status, UninstallStatus::RemovedAndRestored));
+        assert!(!backup_path.exists());
+        assert_eq!(fs::read_to_string(&hook_path)?, original);
+        assert!(matches!(get_hook_status(&hook_path)?, HookStatus::Other));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pre_push_install_is_idempotent() -> Result<()> {
+        let (_temp_dir, hooks_dir) = create_test_repo()?;
+        let hook_path = hooks_dir.join("pre-push");
+
+        install_hook(&hook_path, HookType::PrePush, false)?;
+        let first = fs::read_to_string(&hook_path)?;
+
+        // A second install recognizes the existing Lore hook and rewrites the
+        // canonical content rather than skipping or duplicating it.
+        let status = install_hook(&hook_path, HookType::PrePush, false)?;
+        assert!(matches!(status, InstallStatus::AlreadyInstalled));
+        let second = fs::read_to_string(&hook_path)?;
+        assert_eq!(first, second, "reinstall must be idempotent");
+        assert_eq!(second, PRE_PUSH_HOOK);
+
+        Ok(())
+    }
+
+    /// Runs the pre-push hook script under `sh` with a fake `lore` on `PATH`.
+    ///
+    /// The fake `lore` touches `marker` when invoked. Returns whether the marker
+    /// was created (whether the hook actually called `lore sync`). `guard_set`
+    /// controls whether `LORE_SYNC_HOOK` is already exported when the hook runs.
+    #[cfg(unix)]
+    fn run_pre_push_hook(guard_set: bool) -> bool {
+        use std::process::Command;
+
+        let dir = TempDir::new().unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+
+        let marker = dir.path().join("lore-was-called");
+        let fake_lore = bin.join("lore");
+        fs::write(
+            &fake_lore,
+            format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&fake_lore).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_lore, perms).unwrap();
+
+        let hook_path = dir.path().join("pre-push");
+        write_hook(&hook_path, HookType::PrePush).unwrap();
+
+        // PATH contains the fake lore first, plus system dirs for `sh`/`touch`.
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        let mut cmd = Command::new("sh");
+        cmd.arg(&hook_path)
+            .arg("origin")
+            .arg("https://example.com/repo.git")
+            .env("PATH", path);
+        if guard_set {
+            cmd.env("LORE_SYNC_HOOK", "1");
+        } else {
+            cmd.env_remove("LORE_SYNC_HOOK");
+        }
+
+        let status = cmd.status().unwrap();
+        assert!(status.success(), "pre-push hook must always exit 0");
+
+        marker.exists()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pre_push_hook_runs_sync_when_guard_unset() {
+        assert!(
+            run_pre_push_hook(false),
+            "pre-push hook must invoke lore sync when the guard is not set"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pre_push_hook_skips_when_guard_set() {
+        assert!(
+            !run_pre_push_hook(true),
+            "pre-push hook must skip when the re-entry guard is already set"
+        );
     }
 
     #[cfg(unix)]
