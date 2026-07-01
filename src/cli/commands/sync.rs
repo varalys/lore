@@ -461,41 +461,63 @@ fn perform_sync(
         pulled_total += merge_remote(db, repo, &tracking_entries, key)?;
         merge_machines(db, repo, &tracking_entries)?;
 
-        // BUILD the outgoing tree. Base it on the remote commit when present so
-        // the push is a fast-forward and remote-only sessions are preserved;
-        // otherwise base it on the existing local ref.
+        // BUILD the outgoing tree. Separate the TREE BASE (which entries the new
+        // tree inherits) from the COMMIT PARENT (which commit it descends from):
+        //
+        // - Remote present: base the tree on the remote tracking commit so the
+        //   push is a fast-forward and remote-only sessions are preserved. The
+        //   commit descends from that same tracking commit.
+        // - No remote store: base the tree on NOTHING (empty). The local ref may
+        //   have been written before per-repo scoping and can hold out-of-scope
+        //   session artifacts; inheriting it wholesale would re-push another
+        //   repo's history. Only in-scope local-only sessions are carried
+        //   forward below. The commit still descends from the local ref (when it
+        //   exists) so the local ref update stays a fast-forward and history is
+        //   continuous.
         let tracking_commit = match fetched {
             Some(_) => {
                 gitref::resolve_ref(repo, &gitref::tracking_ref_name(remote, SESSIONS_REF)?)?
             }
             None => None,
         };
-        let base = tracking_commit.clone().or(old_local.clone());
+        let tree_base = tracking_commit.clone();
+        let commit_parent = tracking_commit.clone().or(old_local.clone());
 
         let mut changes = build_session_changes(db, repo, key, &sessions)?;
 
-        // When rebasing onto the remote tracking commit, carry forward any
-        // already-stored session artifacts that live only in the local ref (for
-        // example after a remote rewind), so no stored session is silently
-        // dropped from the outgoing tree.
-        if tracking_commit.is_some() {
-            if let Some(local_commit) = &old_local {
-                let in_scope = db.get_session_ids_for_repo(repo)?;
-                carry_forward_local_sessions(
-                    repo,
-                    local_commit,
-                    &tracking_entries,
-                    &in_scope,
-                    &mut changes,
-                )?;
-            }
+        // Carry forward already-stored, in-scope session artifacts that live
+        // only in the local ref so no stored in-scope session is silently
+        // dropped from the outgoing tree:
+        //
+        // - Remote present: a remote rewind can leave sessions in the local ref
+        //   that are absent from the fetched remote tree.
+        // - No remote store: the tree base is empty, so every in-scope local-only
+        //   session must be re-added from the local ref.
+        //
+        // Passing an empty tracking set in the no-remote case makes every local
+        // session a candidate; `carry_forward_local_sessions` still re-adds only
+        // in-scope ids, so out-of-scope artifacts are never carried forward.
+        if let Some(local_commit) = &old_local {
+            let in_scope = db.get_session_ids_for_repo(repo)?;
+            let carry_tracking: &[TreeEntry] = if tracking_commit.is_some() {
+                &tracking_entries
+            } else {
+                &[]
+            };
+            carry_forward_local_sessions(
+                repo,
+                local_commit,
+                carry_tracking,
+                &in_scope,
+                &mut changes,
+            )?;
         }
 
-        add_meta_changes(db, repo, base.as_deref(), salt, machine, &mut changes)?;
+        add_meta_changes(db, repo, tree_base.as_deref(), salt, machine, &mut changes)?;
 
-        let tree = gitref::build_tree(repo, base.as_deref(), &changes)?;
+        let tree = gitref::build_tree(repo, tree_base.as_deref(), &changes)?;
         let message = format!("lore: sync {} session(s)", sessions.len());
-        let commit = gitref::commit_tree(repo, &tree, base.as_deref(), &message)?;
+        let commit = gitref::commit_tree(repo, &tree, commit_parent.as_deref(), &message)?;
 
         // CAS-update the local ref, guarding against a concurrent local sync.
         match gitref::update_ref_checked(repo, SESSIONS_REF, &commit, old_local.as_deref()) {
@@ -1959,5 +1981,92 @@ mod tests {
                 .any(|e| e.path == format!("sessions/{out_of_scope}.meta.json")),
             "out-of-scope local-only metadata must not be carried forward or pushed"
         );
+    }
+
+    #[test]
+    fn test_sync_no_remote_does_not_inherit_out_of_scope_local_artifacts() {
+        // No remote lore ref exists (the remote store was never initialized or was
+        // deleted), so the outgoing tree base is empty rather than the local ref.
+        // A local ref written before per-repo scoping can still hold out-of-scope
+        // session artifacts; the no-remote path must build the tree from an empty
+        // base and carry forward only in-scope local-only sessions, so those
+        // out-of-scope artifacts are neither kept in the new local ref nor pushed.
+        let (remote_dir, remote_url) = init_bare_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(repo, &["remote", "add", "origin", &remote_url]);
+
+        let (keystore, _kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(repo, "origin", &keystore, &m, "passphrase abcdefgh").unwrap();
+
+        let (mut db, _dd) = open_db();
+        let in_scope = seed_full_session(&mut db, "machine-a", &repo_dir(repo));
+        // An out-of-scope session exists in the database (so its id is known) but
+        // its working directory is outside the repo, so it is out of scope.
+        let out_of_scope = seed_full_session(&mut db, "machine-a", "/somewhere/else/project");
+
+        // Inject the out-of-scope session's artifacts into the LOCAL ref only,
+        // simulating a pre-scoping local store that still holds them.
+        let base = gitref::resolve_ref(repo, SESSIONS_REF).unwrap();
+        let leaked_enc = gitref::write_blob(repo, b"leaked-enc").unwrap();
+        let leaked_meta = gitref::write_blob(repo, b"leaked-meta").unwrap();
+        let mut inject = BTreeMap::new();
+        inject.insert(format!("sessions/{out_of_scope}.enc"), leaked_enc);
+        inject.insert(format!("sessions/{out_of_scope}.meta.json"), leaked_meta);
+        let tree = gitref::build_tree(repo, base.as_deref(), &inject).unwrap();
+        let commit = gitref::commit_tree(repo, &tree, base.as_deref(), "inject leaked").unwrap();
+        gitref::update_ref_checked(repo, SESSIONS_REF, &commit, base.as_deref()).unwrap();
+
+        // Remove the remote lore ref so the sync takes the no-remote base path
+        // (fetch returns None and the tree base is empty).
+        git(remote_dir.path(), &["update-ref", "-d", SESSIONS_REF]);
+        assert!(!gitref::remote_ref_exists(repo, "origin", SESSIONS_REF).unwrap());
+
+        let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        let summary = perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
+        assert_eq!(summary.pushed, 1, "only the in-scope session is pushed");
+
+        // The remote ref is created fresh by the push.
+        assert!(gitref::remote_ref_exists(repo, "origin", SESSIONS_REF).unwrap());
+
+        // Refresh the tracking ref so the pushed remote tree can be inspected.
+        gitref::fetch(repo, "origin", SESSIONS_REF).unwrap();
+
+        // The in-scope session is present in the new local ref and on the remote,
+        // while the out-of-scope local-only artifacts are gone from both.
+        let tracking = gitref::tracking_ref_name("origin", SESSIONS_REF).unwrap();
+        for reference in [SESSIONS_REF, tracking.as_str()] {
+            let entries = gitref::read_tree(repo, reference).unwrap();
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.path == format!("sessions/{in_scope}.enc")),
+                "the in-scope session must be present in {reference}"
+            );
+            assert!(
+                !entries
+                    .iter()
+                    .any(|e| e.path == format!("sessions/{out_of_scope}.enc")),
+                "out-of-scope .enc must not survive the no-remote sync in {reference}"
+            );
+            assert!(
+                !entries
+                    .iter()
+                    .any(|e| e.path == format!("sessions/{out_of_scope}.meta.json")),
+                "out-of-scope .meta must not survive the no-remote sync in {reference}"
+            );
+            // The store metadata still lands in the tree in the no-remote case.
+            assert!(
+                entries.iter().any(|e| e.path == "meta/salt"),
+                "meta/salt must be present in {reference}"
+            );
+            assert!(
+                entries.iter().any(|e| e.path == "meta/machines.json"),
+                "meta/machines.json must be present in {reference}"
+            );
+        }
     }
 }
