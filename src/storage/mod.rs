@@ -33,7 +33,7 @@ pub use models::{Message, Session};
 /// Returns the machine UUID for the current machine.
 ///
 /// Loads the config and returns the machine_id (UUID), generating one if needed.
-/// Used to populate the `machine_id` field on sessions, allowing cloud sync
+/// Used to populate the `machine_id` field on sessions, allowing sync
 /// to identify which machine created a session. Returns `None` if the config
 /// cannot be loaded or the machine ID cannot be determined.
 pub fn get_machine_id() -> Option<String> {

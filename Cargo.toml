@@ -51,13 +51,13 @@ regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Cloud sync
+# HTTP client for LLM summary providers
 reqwest = { version = "0.13", features = ["json", "rustls", "blocking"], default-features = false }
+
+# Sync encryption and key storage
 aes-gcm = "0.10"
 argon2 = "0.5"
 keyring = { version = "3", features = ["apple-native", "sync-secret-service", "windows-native"] }
-base64 = "0.22"
-webbrowser = "1"
 rpassword = "7"
 rand = "0.8"
 

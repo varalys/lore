@@ -30,7 +30,7 @@ pub struct Config {
     /// Whether to append session references to commit messages.
     pub commit_footer: bool,
 
-    /// Unique machine identifier (UUID) for cloud sync deduplication.
+    /// Unique machine identifier (UUID) for sync deduplication.
     ///
     /// Auto-generated on first access via `get_or_create_machine_id()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,25 +42,18 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_name: Option<String>,
 
-    /// Cloud service URL for sync operations.
-    ///
-    /// Defaults to the official Lore cloud service. Can be customized for
-    /// self-hosted deployments.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cloud_url: Option<String>,
-
     /// Salt for encryption key derivation (base64-encoded).
     ///
-    /// Generated on first cloud push and stored for consistent key derivation.
+    /// Generated on first sync setup and stored for consistent key derivation.
     /// This is NOT secret - only the passphrase needs to be kept private.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption_salt: Option<String>,
 
     /// Whether to use the OS keychain for credential storage.
     ///
-    /// When false (default), credentials are stored in ~/.lore/credentials.json.
-    /// When true, uses macOS Keychain, GNOME Keyring, or Windows Credential Manager.
-    /// Note: Keychain may prompt for permission on first access.
+    /// When false (default), the sync passphrase key is stored in a file under
+    /// ~/.lore. When true, uses macOS Keychain, GNOME Keyring, or Windows
+    /// Credential Manager. Note: Keychain may prompt for permission on first access.
     #[serde(default)]
     pub use_keychain: bool,
 
@@ -119,7 +112,6 @@ impl Default for Config {
             commit_footer: false,
             machine_id: None,
             machine_name: None,
-            cloud_url: None,
             encryption_salt: None,
             use_keychain: false,
             summary_provider: None,
@@ -196,7 +188,7 @@ impl Config {
     ///
     /// If no machine_id exists in config, generates a new UUIDv4 and saves
     /// it to the config file. This ensures a consistent machine identifier
-    /// across sessions for cloud sync deduplication.
+    /// across sessions for sync deduplication.
     pub fn get_or_create_machine_id(&mut self) -> Result<String> {
         if let Some(ref id) = self.machine_id {
             return Ok(id.clone());
@@ -233,45 +225,6 @@ impl Config {
         self.save()
     }
 
-    /// Returns the cloud service URL.
-    ///
-    /// If a custom cloud_url is set, returns that. Otherwise returns
-    /// the default Lore cloud service URL.
-    pub fn get_cloud_url(&self) -> String {
-        self.cloud_url
-            .clone()
-            .unwrap_or_else(|| "https://app.lore.varalys.com".to_string())
-    }
-
-    /// Sets the cloud service URL and saves the configuration.
-    #[allow(dead_code)]
-    pub fn set_cloud_url(&mut self, url: &str) -> Result<()> {
-        self.cloud_url = Some(url.to_string());
-        self.save()
-    }
-
-    /// Returns the encryption salt (base64-encoded), generating one if needed.
-    ///
-    /// The salt is stored in the config file and used for deriving the
-    /// encryption key from the user's passphrase.
-    pub fn get_or_create_encryption_salt(&mut self) -> Result<String> {
-        if let Some(ref salt) = self.encryption_salt {
-            return Ok(salt.clone());
-        }
-
-        // Generate a new random salt
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        use rand::RngCore;
-
-        let mut salt_bytes = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut salt_bytes);
-        let salt_b64 = BASE64.encode(salt_bytes);
-
-        self.encryption_salt = Some(salt_b64.clone());
-        self.save()?;
-        Ok(salt_b64)
-    }
-
     /// Gets a configuration value by key.
     ///
     /// Supported keys:
@@ -281,7 +234,6 @@ impl Config {
     /// - `commit_footer` - "true" or "false"
     /// - `machine_id` - the machine UUID (read-only, auto-generated)
     /// - `machine_name` - human-readable machine name
-    /// - `cloud_url` - cloud service URL
     /// - `encryption_salt` - salt for encryption key derivation (read-only)
     /// - `summary_provider` - LLM provider for summaries
     /// - `summary_api_key_anthropic` - Anthropic API key
@@ -303,7 +255,6 @@ impl Config {
             "commit_footer" => Some(self.commit_footer.to_string()),
             "machine_id" => self.machine_id.clone(),
             "machine_name" => Some(self.get_machine_name()),
-            "cloud_url" => Some(self.get_cloud_url()),
             "encryption_salt" => self.encryption_salt.clone(),
             "use_keychain" => Some(self.use_keychain.to_string()),
             "summary_provider" => self.summary_provider.clone(),
@@ -328,7 +279,6 @@ impl Config {
     /// - `auto_link_threshold` - float between 0.0 and 1.0 (inclusive)
     /// - `commit_footer` - "true" or "false"
     /// - `machine_name` - human-readable machine name
-    /// - `cloud_url` - cloud service URL
     /// - `summary_provider` - "anthropic", "openai", or "openrouter"
     /// - `summary_api_key_anthropic` - Anthropic API key
     /// - `summary_api_key_openai` - OpenAI API key
@@ -371,9 +321,6 @@ impl Config {
             }
             "machine_name" => {
                 self.machine_name = Some(value.to_string());
-            }
-            "cloud_url" => {
-                self.cloud_url = Some(value.to_string());
             }
             "machine_id" => {
                 bail!("machine_id cannot be set manually; it is auto-generated");
@@ -461,7 +408,6 @@ impl Config {
             "commit_footer",
             "machine_id",
             "machine_name",
-            "cloud_url",
             "encryption_salt",
             "use_keychain",
             "summary_provider",
@@ -495,32 +441,6 @@ impl Config {
             "openrouter" => self.summary_model_openrouter.clone(),
             _ => None,
         }
-    }
-
-    /// Checks if use_keychain was explicitly set in the config file.
-    ///
-    /// Returns true if the config file exists and contains a use_keychain key,
-    /// false if the file does not exist or does not contain the key (meaning
-    /// the default value is being used).
-    pub fn is_use_keychain_configured() -> Result<bool> {
-        let path = Self::config_path()?;
-        if !path.exists() {
-            return Ok(false);
-        }
-
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-
-        if content.trim().is_empty() {
-            return Ok(false);
-        }
-
-        // Check if the YAML content contains use_keychain key
-        // We look for the key at the start of a line (not in comments)
-        Ok(content.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with("use_keychain:")
-        }))
     }
 }
 
@@ -615,7 +535,6 @@ mod tests {
             commit_footer: true,
             machine_id: Some("test-uuid".to_string()),
             machine_name: Some("test-machine".to_string()),
-            cloud_url: None,
             encryption_salt: None,
             use_keychain: false,
             ..Default::default()
@@ -748,64 +667,6 @@ mod tests {
         let yaml = serde_saphyr::to_string(&config).unwrap();
         assert!(yaml.contains("machine_id"));
         assert!(yaml.contains("machine_name"));
-    }
-
-    #[test]
-    fn test_is_use_keychain_configured_with_default_config() {
-        // Test the detection logic by checking serialized config content.
-        // The function checks the default config path, not a custom one,
-        // so we test the behavior through the serialization logic.
-        let temp_dir = TempDir::new().unwrap();
-
-        let config_path = temp_dir.path().join("config.yaml");
-        let config = Config::default();
-        config.save_to_path(&config_path).unwrap();
-
-        // Read the saved content - default config should contain use_keychain
-        // since serde serializes all fields by default
-        let content = fs::read_to_string(&config_path).unwrap();
-        let has_use_keychain = content.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with("use_keychain:")
-        });
-        // serde includes all fields by default, so this will be true
-        assert!(has_use_keychain);
-    }
-
-    #[test]
-    fn test_is_use_keychain_configured_detects_explicit_setting() {
-        let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join("config.yaml");
-
-        // Write config with explicit use_keychain: true
-        let config = Config {
-            use_keychain: true,
-            ..Default::default()
-        };
-        config.save_to_path(&config_path).unwrap();
-
-        let content = fs::read_to_string(&config_path).unwrap();
-        let has_use_keychain = content.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with("use_keychain:")
-        });
-        assert!(has_use_keychain);
-    }
-
-    #[test]
-    fn test_is_use_keychain_configured_returns_false_for_empty_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join("config.yaml");
-
-        // Write empty file
-        fs::write(&config_path, "").unwrap();
-
-        let content = fs::read_to_string(&config_path).unwrap();
-        let has_use_keychain = content.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with("use_keychain:")
-        });
-        assert!(!has_use_keychain);
     }
 
     #[test]

@@ -2,9 +2,9 @@
 //!
 //! A [`SessionRecord`] holds the complete reasoning record for a single
 //! session: the session row itself plus its messages, commit links, tags,
-//! annotations, and optional summary. Unlike the legacy cloud sync (which only
-//! synced messages), encrypting the full record means a teammate who pulls the
-//! repo can run `lore blame` and recover the commit-to-reasoning linkage.
+//! annotations, and optional summary. Encrypting the full record means a
+//! teammate who pulls the repo can run `lore blame` and recover the
+//! commit-to-reasoning linkage.
 //!
 //! The on-disk blob pipeline is `serde_json -> gzip -> encrypt`. Compression
 //! happens before encryption because ciphertext does not compress. The output
