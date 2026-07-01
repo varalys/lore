@@ -99,6 +99,15 @@ pub struct Config {
     /// Minimum message count to trigger auto-summary generation.
     #[serde(default = "default_summary_auto_threshold")]
     pub summary_auto_threshold: usize,
+
+    /// Remote URL of the user's private global personal store repository.
+    ///
+    /// The global store (`lore sync --global`) is a managed git repo at
+    /// `~/.lore/sync` whose `origin` remote points at this URL. It holds the
+    /// user's cross-tool, cross-repo aggregate of encrypted sessions for
+    /// personal multi-machine backup and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_global_remote: Option<String>,
 }
 
 impl Default for Config {
@@ -122,6 +131,7 @@ impl Default for Config {
             summary_model_openrouter: None,
             summary_auto: false,
             summary_auto_threshold: 4,
+            sync_global_remote: None,
         }
     }
 }
@@ -282,6 +292,7 @@ impl Config {
     /// - `summary_model_openrouter` - OpenRouter model override
     /// - `summary_auto` - "true" or "false"
     /// - `summary_auto_threshold` - minimum messages for auto-summary
+    /// - `sync_global_remote` - remote URL of the global personal store repo
     ///
     /// Returns `None` if the key is not recognized.
     pub fn get(&self, key: &str) -> Option<String> {
@@ -304,6 +315,7 @@ impl Config {
             "summary_model_openrouter" => self.summary_model_openrouter.clone(),
             "summary_auto" => Some(self.summary_auto.to_string()),
             "summary_auto_threshold" => Some(self.summary_auto_threshold.to_string()),
+            "sync_global_remote" => self.sync_global_remote.clone(),
             _ => None,
         }
     }
@@ -326,6 +338,7 @@ impl Config {
     /// - `summary_model_openrouter` - OpenRouter model override
     /// - `summary_auto` - "true" or "false"
     /// - `summary_auto_threshold` - positive integer
+    /// - `sync_global_remote` - remote URL of the global personal store repo
     ///
     /// Note: `machine_id` and `encryption_salt` cannot be set manually.
     ///
@@ -418,6 +431,9 @@ impl Config {
                 }
                 self.summary_auto_threshold = threshold;
             }
+            "sync_global_remote" => {
+                self.sync_global_remote = Some(value.to_string());
+            }
             _ => {
                 bail!("Unknown configuration key: '{key}'");
             }
@@ -457,6 +473,7 @@ impl Config {
             "summary_model_openrouter",
             "summary_auto",
             "summary_auto_threshold",
+            "sync_global_remote",
         ]
     }
 

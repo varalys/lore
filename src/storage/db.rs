@@ -16,6 +16,31 @@ use super::models::{
     Summary, Tag,
 };
 
+/// Which sync-tracking column a merge or import marks on write.
+///
+/// A session carries two independent sync tracks: the per-repo store
+/// (`synced_at`) and the global personal store (`global_synced_at`). A local
+/// content change invalidates BOTH tracks, but each store syncs and marks its
+/// own column so a push to one store never marks a session as synced for the
+/// other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncTrack {
+    /// The per-repo store's `synced_at` column.
+    PerRepo,
+    /// The global personal store's `global_synced_at` column.
+    Global,
+}
+
+impl SyncTrack {
+    /// Returns the sessions column name this track marks.
+    fn column(self) -> &'static str {
+        match self {
+            SyncTrack::PerRepo => "synced_at",
+            SyncTrack::Global => "global_synced_at",
+        }
+    }
+}
+
 /// Builds the SQL parameters for a path-boundary directory match.
 ///
 /// Returns `(exact, trailing, like_pattern)` for matching a
@@ -338,6 +363,9 @@ impl Database {
         // Migration: Add synced_at column for cloud sync tracking.
         self.migrate_add_synced_at()?;
 
+        // Migration: Add global_synced_at column for the global personal store.
+        self.migrate_add_global_synced_at()?;
+
         Ok(())
     }
 
@@ -402,14 +430,37 @@ impl Database {
         Ok(())
     }
 
+    /// Adds the global_synced_at column to the sessions table if it does not exist.
+    ///
+    /// This column tracks when each session was last synced to the global
+    /// personal store, independently of the per-repo `synced_at` column. A NULL
+    /// value indicates the session has never been synced to the global store.
+    fn migrate_add_global_synced_at(&self) -> Result<()> {
+        let columns: Vec<String> = self
+            .conn
+            .prepare("PRAGMA table_info(sessions)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if !columns.iter().any(|c| c == "global_synced_at") {
+            self.conn
+                .execute("ALTER TABLE sessions ADD COLUMN global_synced_at TEXT", [])?;
+        }
+
+        Ok(())
+    }
+
     // ==================== Sessions ====================
 
     /// Inserts a new session or updates an existing one.
     ///
     /// If a session with the same ID already exists, updates the `ended_at`
-    /// and `message_count` fields. Resets `synced_at` to NULL if either the
-    /// message_count or ended_at has changed (indicating updates that need re-sync).
-    /// Also updates the sessions_fts index for full-text search on session metadata.
+    /// and `message_count` fields. Resets both `synced_at` and
+    /// `global_synced_at` to NULL if either the message_count or ended_at has
+    /// changed (a local content change invalidates both the per-repo and global
+    /// sync tracks, so the session is re-exported to each store on the next
+    /// sync). Also updates the sessions_fts index for full-text search on
+    /// session metadata.
     pub fn insert_session(&self, session: &Session) -> Result<()> {
         let rows_changed = self.conn.execute(
             r#"
@@ -424,6 +475,13 @@ impl Database {
                     WHEN (ended_at IS NOT NULL AND ?5 IS NULL) THEN NULL
                     WHEN ended_at != ?5 THEN NULL
                     ELSE synced_at
+                END,
+                global_synced_at = CASE
+                    WHEN message_count != ?10 THEN NULL
+                    WHEN (ended_at IS NULL AND ?5 IS NOT NULL) THEN NULL
+                    WHEN (ended_at IS NOT NULL AND ?5 IS NULL) THEN NULL
+                    WHEN ended_at != ?5 THEN NULL
+                    ELSE global_synced_at
                 END
             "#,
             params![
@@ -733,7 +791,7 @@ impl Database {
         synced_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        Self::write_session_with_messages(&tx, session, messages, synced_at)?;
+        Self::write_session_with_messages(&tx, session, messages, synced_at, SyncTrack::PerRepo)?;
         tx.commit()?;
         Ok(())
     }
@@ -744,22 +802,31 @@ impl Database {
     /// [`Self::merge_remote_record`] so both the plain import and the atomic
     /// remote-merge transaction apply identical session and message SQL. The
     /// caller owns the transaction boundary; this function never commits.
+    ///
+    /// `track` selects which sync-tracking column the supplied timestamp is
+    /// written into: the per-repo `synced_at` or the global `global_synced_at`.
+    /// Only that column is touched, so marking a session synced for one store
+    /// never affects the other store's track.
     fn write_session_with_messages(
         conn: &Connection,
         session: &Session,
         messages: &[Message],
         synced_at: Option<DateTime<Utc>>,
+        track: SyncTrack,
     ) -> Result<()> {
-        // Insert session
-        conn.execute(
-            r#"
-            INSERT INTO sessions (id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id, synced_at)
+        // Insert session. The tracking column is chosen by `track`; the SQL is
+        // otherwise identical for both stores.
+        let col = track.column();
+        let insert_sql = format!(
+            "INSERT INTO sessions (id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id, {col})
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(id) DO UPDATE SET
                 ended_at = ?5,
                 message_count = ?10,
-                synced_at = COALESCE(?12, synced_at)
-            "#,
+                {col} = COALESCE(?12, {col})"
+        );
+        conn.execute(
+            &insert_sql,
             params![
                 session.id.to_string(),
                 session.tool,
@@ -833,18 +900,20 @@ impl Database {
         Ok(())
     }
 
-    /// Resets a session's `synced_at` to NULL so a later sync re-exports it.
+    /// Resets a session's `synced_at` and `global_synced_at` to NULL so a later
+    /// sync re-exports it to both the per-repo and global stores.
     ///
     /// Called after any local edit to a session's child records (links, tags,
     /// annotations, summary). Auto-linking and auto-summarizing frequently happen
-    /// after a session has already synced, so without clearing `synced_at` the
-    /// added child would never be re-encrypted and pushed. The remote-merge path
+    /// after a session has already synced, so without clearing both columns the
+    /// added child would never be re-encrypted and pushed. A local content change
+    /// invalidates both sync tracks, so both are cleared. The remote-merge path
     /// (the `upsert_*` methods and [`Self::merge_remote_record`]) deliberately
     /// does NOT call this: marking a just-pulled session as needing a push would
     /// bounce the same record back to the remote in a sync loop.
     fn mark_session_unsynced(&self, session_id: &Uuid) -> Result<()> {
         self.conn.execute(
-            "UPDATE sessions SET synced_at = NULL WHERE id = ?1",
+            "UPDATE sessions SET synced_at = NULL, global_synced_at = NULL WHERE id = ?1",
             params![session_id.to_string()],
         )?;
         Ok(())
@@ -876,6 +945,10 @@ impl Database {
     ///
     /// Returns `true` when the session row and messages were written (the
     /// newer-wins branch ran), which callers use for the pulled count.
+    ///
+    /// This marks imported sessions on the per-repo `synced_at` track. The
+    /// global store uses [`Self::merge_remote_record_global`], which shares the
+    /// identical merge logic but marks the `global_synced_at` track.
     #[allow(clippy::too_many_arguments)]
     pub fn merge_remote_record(
         &mut self,
@@ -886,6 +959,63 @@ impl Database {
         annotations: &[Annotation],
         summary: Option<&Summary>,
         synced_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.merge_remote_record_tracked(
+            session,
+            messages,
+            links,
+            tags,
+            annotations,
+            summary,
+            synced_at,
+            SyncTrack::PerRepo,
+        )
+    }
+
+    /// Global-store counterpart of [`Self::merge_remote_record`].
+    ///
+    /// Applies the identical newer-wins and additive-child merge, but marks an
+    /// imported session on the global `global_synced_at` track so a global pull
+    /// does not affect the per-repo `synced_at` track (and vice versa).
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_remote_record_global(
+        &mut self,
+        session: &Session,
+        messages: &[Message],
+        links: &[SessionLink],
+        tags: &[Tag],
+        annotations: &[Annotation],
+        summary: Option<&Summary>,
+        synced_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.merge_remote_record_tracked(
+            session,
+            messages,
+            links,
+            tags,
+            annotations,
+            summary,
+            synced_at,
+            SyncTrack::Global,
+        )
+    }
+
+    /// Shared implementation for the per-repo and global merge paths.
+    ///
+    /// `track` selects which sync-tracking column an imported session row is
+    /// marked on. Everything else (newer-wins session/message import plus
+    /// additive, idempotent child merges) is identical across both stores.
+    #[allow(clippy::too_many_arguments)]
+    fn merge_remote_record_tracked(
+        &mut self,
+        session: &Session,
+        messages: &[Message],
+        links: &[SessionLink],
+        tags: &[Tag],
+        annotations: &[Annotation],
+        summary: Option<&Summary>,
+        synced_at: DateTime<Utc>,
+        track: SyncTrack,
     ) -> Result<bool> {
         let tx = self.conn.transaction()?;
 
@@ -907,7 +1037,7 @@ impl Database {
         };
 
         if import_session {
-            Self::write_session_with_messages(&tx, session, messages, Some(synced_at))?;
+            Self::write_session_with_messages(&tx, session, messages, Some(synced_at), track)?;
         }
 
         // Child records are additive and idempotent by id: always merge them so a
@@ -1713,6 +1843,101 @@ impl Database {
 
         rows.collect::<rusqlite::Result<HashSet<Uuid>>>()
             .context("Failed to get session ids for repo")
+    }
+
+    /// Returns the ids of ALL sessions in the database, regardless of sync state.
+    ///
+    /// The global personal store aggregates every session across all repos and
+    /// tools, so its carry-forward scope is the entire session set (the global
+    /// analogue of [`Database::get_session_ids_for_repo`], which scopes to one
+    /// repo). Used by the global sync to decide which already-stored, local-only
+    /// session artifacts to carry forward.
+    pub fn get_all_session_ids(&self) -> Result<HashSet<Uuid>> {
+        let mut stmt = self.conn.prepare("SELECT id FROM sessions")?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            parse_uuid(&id)
+        })?;
+
+        rows.collect::<rusqlite::Result<HashSet<Uuid>>>()
+            .context("Failed to get all session ids")
+    }
+
+    /// Returns sessions that have not been synced to the global personal store.
+    ///
+    /// Unsynced-global sessions are those where `global_synced_at` is NULL. Unlike
+    /// [`Database::get_unsynced_sessions_for_repo`], this is not scoped to any
+    /// repository: the global store holds every session regardless of working
+    /// directory. Returns sessions ordered by start time (oldest first).
+    pub fn get_unsynced_global_sessions(&self) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
+             FROM sessions
+             WHERE global_synced_at IS NULL
+             ORDER BY started_at ASC"
+        )?;
+
+        let rows = stmt.query_map([], Self::row_to_session)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to get unsynced global sessions")
+    }
+
+    /// Returns the count of sessions not yet synced to the global personal store.
+    pub fn unsynced_global_count(&self) -> Result<i32> {
+        let count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE global_synced_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Marks sessions as synced to the global personal store.
+    ///
+    /// Updates the `global_synced_at` column for all specified session IDs,
+    /// leaving the per-repo `synced_at` track untouched.
+    pub fn mark_global_synced(
+        &self,
+        session_ids: &[Uuid],
+        synced_at: DateTime<Utc>,
+    ) -> Result<usize> {
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let synced_at_str = synced_at.to_rfc3339();
+        let mut total_updated = 0;
+
+        for id in session_ids {
+            let updated = self.conn.execute(
+                "UPDATE sessions SET global_synced_at = ?1 WHERE id = ?2",
+                params![synced_at_str, id.to_string()],
+            )?;
+            total_updated += updated;
+        }
+
+        Ok(total_updated)
+    }
+
+    /// Returns the most recent global-store sync timestamp across all sessions.
+    ///
+    /// Returns None if no session has been synced to the global store yet.
+    pub fn last_global_sync_time(&self) -> Result<Option<DateTime<Utc>>> {
+        let result: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT MAX(global_synced_at) FROM sessions WHERE global_synced_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        match result {
+            Some(s) => Ok(Some(parse_datetime(&s)?)),
+            None => Ok(None),
+        }
     }
 
     /// Returns the count of sessions that have not been synced.
@@ -7120,5 +7345,197 @@ mod tests {
             db.get_unsynced_sessions().unwrap().is_empty(),
             "a merged session must be marked synced"
         );
+    }
+
+    // ==================== Global Store Track Tests ====================
+
+    #[test]
+    fn test_new_session_is_unsynced_on_both_tracks() {
+        // A freshly imported session (synced_at = None) is pending on both the
+        // per-repo and global tracks.
+        let (mut db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.import_session_with_messages(&session, &[], None)
+            .unwrap();
+
+        assert_eq!(db.get_unsynced_sessions().unwrap().len(), 1);
+        let global = db.get_unsynced_global_sessions().unwrap();
+        assert_eq!(global.len(), 1);
+        assert_eq!(global[0].id, session.id);
+        assert_eq!(db.unsynced_global_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_per_repo_and_global_tracks_are_independent() {
+        // Marking one track must not affect the other: a per-repo sync leaves the
+        // global track pending, and a global sync leaves the per-repo track
+        // pending.
+        let (mut db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.import_session_with_messages(&session, &[], None)
+            .unwrap();
+
+        // Mark only the per-repo track.
+        db.mark_sessions_synced(&[session.id], Utc::now()).unwrap();
+        assert!(
+            db.get_unsynced_sessions().unwrap().is_empty(),
+            "per-repo track must be marked synced"
+        );
+        assert_eq!(
+            db.get_unsynced_global_sessions().unwrap().len(),
+            1,
+            "global track must stay pending after a per-repo sync"
+        );
+
+        // Now mark only the global track.
+        db.mark_global_synced(&[session.id], Utc::now()).unwrap();
+        assert!(
+            db.get_unsynced_global_sessions().unwrap().is_empty(),
+            "global track must be marked synced"
+        );
+    }
+
+    #[test]
+    fn test_global_only_sync_leaves_per_repo_pending() {
+        // The reverse independence direction: marking the global track first must
+        // not touch the per-repo track.
+        let (mut db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.import_session_with_messages(&session, &[], None)
+            .unwrap();
+
+        db.mark_global_synced(&[session.id], Utc::now()).unwrap();
+        assert!(
+            db.get_unsynced_global_sessions().unwrap().is_empty(),
+            "global track must be marked synced"
+        );
+        assert_eq!(
+            db.get_unsynced_sessions().unwrap().len(),
+            1,
+            "per-repo track must stay pending after a global sync"
+        );
+    }
+
+    #[test]
+    fn test_insert_link_clears_both_sync_tracks() {
+        // A local child change (adding a link) must re-open the session on BOTH
+        // the per-repo and global tracks.
+        let (mut db, _dir) = create_test_db();
+        let mut session = create_test_session("claude-code", "/project", Utc::now(), None);
+        session.message_count = 0;
+        db.import_session_with_messages(&session, &[], Some(Utc::now()))
+            .unwrap();
+        db.mark_global_synced(&[session.id], Utc::now()).unwrap();
+        assert!(db.get_unsynced_sessions().unwrap().is_empty());
+        assert!(db.get_unsynced_global_sessions().unwrap().is_empty());
+
+        db.insert_link(&create_test_link(
+            session.id,
+            Some("abcdef"),
+            LinkType::Commit,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            db.get_unsynced_sessions().unwrap().len(),
+            1,
+            "adding a link must re-open the per-repo track"
+        );
+        assert_eq!(
+            db.get_unsynced_global_sessions().unwrap().len(),
+            1,
+            "adding a link must re-open the global track"
+        );
+    }
+
+    #[test]
+    fn test_insert_session_content_change_clears_both_tracks() {
+        // A message-count change through insert_session must invalidate both the
+        // per-repo and global sync tracks.
+        let (mut db, _dir) = create_test_db();
+        let mut session = create_test_session("claude-code", "/project", Utc::now(), None);
+        session.message_count = 1;
+        db.import_session_with_messages(&session, &[], Some(Utc::now()))
+            .unwrap();
+        db.mark_global_synced(&[session.id], Utc::now()).unwrap();
+        assert!(db.get_unsynced_sessions().unwrap().is_empty());
+        assert!(db.get_unsynced_global_sessions().unwrap().is_empty());
+
+        // Re-insert with a higher message count (a content change).
+        session.message_count = 2;
+        db.insert_session(&session).unwrap();
+
+        assert_eq!(
+            db.get_unsynced_sessions().unwrap().len(),
+            1,
+            "a content change must re-open the per-repo track"
+        );
+        assert_eq!(
+            db.get_unsynced_global_sessions().unwrap().len(),
+            1,
+            "a content change must re-open the global track"
+        );
+    }
+
+    #[test]
+    fn test_merge_remote_record_global_marks_only_global_track() {
+        // The global merge path must mark global_synced_at and leave synced_at
+        // NULL, so a pulled global session is still pending for the per-repo store.
+        let (mut db, _dir) = create_test_db();
+        let mut session = create_test_session("claude-code", "/project", Utc::now(), None);
+        session.message_count = 1;
+
+        let imported = db
+            .merge_remote_record_global(&session, &[], &[], &[], &[], None, Utc::now())
+            .unwrap();
+        assert!(imported, "a new session must count as pulled");
+
+        assert!(
+            db.get_unsynced_global_sessions().unwrap().is_empty(),
+            "global merge must mark the global track synced"
+        );
+        assert_eq!(
+            db.get_unsynced_sessions().unwrap().len(),
+            1,
+            "global merge must leave the per-repo track pending"
+        );
+    }
+
+    #[test]
+    fn test_get_all_session_ids_returns_every_session_regardless_of_sync() {
+        let (mut db, _dir) = create_test_db();
+        let a = create_test_session("claude-code", "/a", Utc::now(), None);
+        let b = create_test_session("claude-code", "/b", Utc::now(), None);
+        db.import_session_with_messages(&a, &[], None).unwrap();
+        db.import_session_with_messages(&b, &[], Some(Utc::now()))
+            .unwrap();
+        db.mark_global_synced(&[b.id], Utc::now()).unwrap();
+
+        let ids = db.get_all_session_ids().unwrap();
+        assert!(ids.contains(&a.id));
+        assert!(ids.contains(&b.id));
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn test_last_global_sync_time_tracks_global_column() {
+        let (mut db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.import_session_with_messages(&session, &[], None)
+            .unwrap();
+
+        assert!(
+            db.last_global_sync_time().unwrap().is_none(),
+            "no global sync yet"
+        );
+
+        let when = Utc::now();
+        db.mark_global_synced(&[session.id], when).unwrap();
+        let last = db
+            .last_global_sync_time()
+            .unwrap()
+            .expect("global sync time recorded");
+        // Compare at second granularity to avoid RFC3339 sub-second rounding.
+        assert_eq!(last.timestamp(), when.timestamp());
     }
 }

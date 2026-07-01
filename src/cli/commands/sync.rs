@@ -44,6 +44,13 @@ use crate::sync::SyncError;
 /// Lives outside `refs/heads/*` so it never checks out into the working tree.
 const SESSIONS_REF: &str = "refs/lore/sessions";
 
+/// Remote name used inside the managed global store repo (`~/.lore/sync`).
+///
+/// The global store is a dedicated repository whose single remote always points
+/// at the user's configured `sync_global_remote` URL, so every gitref operation
+/// on the global store uses this fixed remote name.
+const GLOBAL_REMOTE: &str = "origin";
+
 /// Minimum passphrase length for a newly created store.
 const MIN_PASSPHRASE_LEN: usize = 8;
 
@@ -65,8 +72,19 @@ pub struct Args {
     pub command: Option<SyncSubcommand>,
 
     /// Remote to sync the lore store with (default: origin).
+    ///
+    /// Ignored in the global path (`--global`), which always uses the global
+    /// store's own `origin` remote configured from `sync_global_remote`.
     #[arg(long, global = true, default_value = "origin")]
     pub remote: String,
+
+    /// Sync the global personal store instead of this repo's store.
+    ///
+    /// The global store is a managed git repo at `~/.lore/sync` holding the
+    /// user's cross-tool, cross-repo aggregate of encrypted sessions, synced to
+    /// a private remote the user owns (configured via `sync_global_remote`).
+    #[arg(long, global = true)]
+    pub global: bool,
 
     /// Hook-friendly mode used by the pre-push hook.
     ///
@@ -153,8 +171,45 @@ struct StatusOutput {
     remote: String,
 }
 
+/// JSON output for `lore sync --global status`.
+#[derive(Serialize)]
+struct GlobalStatusOutput {
+    set_up: bool,
+    keyed: bool,
+    unsynced_sessions: i32,
+    last_sync_at: Option<String>,
+    remote_store_exists: bool,
+    local_ref: Option<String>,
+    tracking_ref: Option<String>,
+    remote: Option<String>,
+    store_path: String,
+}
+
+/// Identifies which lore store a sync operates on.
+///
+/// Both stores share the identical on-disk format and the same `refs/lore/sessions`
+/// ref name; they differ only in which git repository holds the ref, which
+/// sessions are pushed, and which sync-tracking column marks progress. Threading
+/// this enum through [`perform_sync_in_store`] lets the per-repo and global paths
+/// share all fetch, merge, orphan, carry-forward, CAS, and push machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncStore {
+    /// This repository's store under `refs/lore/sessions` in the repo itself.
+    PerRepo,
+    /// The global personal store under `refs/lore/sessions` in `~/.lore/sync`.
+    Global,
+}
+
 /// Executes the sync command.
 pub fn run(args: Args) -> Result<()> {
+    if args.global {
+        return match args.command {
+            Some(SyncSubcommand::Setup) => run_global_setup(),
+            Some(SyncSubcommand::Status { format }) => run_global_status(format),
+            None => run_global_sync(),
+        };
+    }
+
     match args.command {
         Some(SyncSubcommand::Setup) => run_setup(&args.remote),
         Some(SyncSubcommand::Status { format }) => run_status(&args.remote, format),
@@ -169,36 +224,48 @@ pub fn run(args: Args) -> Result<()> {
 fn run_setup(remote: &str) -> Result<()> {
     let repo = current_repo()?;
     let mut config = Config::load()?;
-    let machine = machine_identity(&mut config)?;
+    create_or_join_store(&repo, remote, &mut config)?;
+    println!("Run 'lore sync' to push your reasoning history.");
+    Ok(())
+}
+
+/// Creates a new store or joins an existing one at `repo`/`remote`.
+///
+/// Shared by the per-repo ([`run_setup`]) and global ([`run_global_setup`])
+/// setup paths: it fetches the remote-tracking ref to detect an existing store,
+/// then either joins it (single passphrase prompt, verified by decrypting an
+/// existing session) or creates a new one (confirmed passphrase, minimum
+/// length). The derived key is stored locally so later syncs do not prompt.
+fn create_or_join_store(repo: &Path, remote: &str, config: &mut Config) -> Result<()> {
+    let machine = machine_identity(config)?;
     let keystore = KeyStore::with_keychain(config.use_keychain);
 
     // Populate the remote-tracking ref so we can tell whether a store already
     // exists on the remote (and read its salt) without touching the local ref.
-    gitref::fetch(&repo, remote, SESSIONS_REF)
+    gitref::fetch(repo, remote, SESSIONS_REF)
         .with_context(|| format!("Failed to reach remote '{remote}'"))?;
 
-    match read_store_salt(&repo, remote)? {
+    match read_store_salt(repo, remote)? {
         Some(salt) => {
             println!("{}", "An existing lore store was found. Joining it.".bold());
-            println!("Enter the shared passphrase for this repo's lore store.");
+            println!("Enter the shared passphrase for this lore store.");
             let passphrase = prompt_passphrase()?;
-            join_store(&repo, remote, &keystore, &machine, &salt, &passphrase)?;
+            join_store(repo, remote, &keystore, &machine, &salt, &passphrase)?;
             println!("{} Joined the lore store.", "Success!".green().bold());
         }
         None => {
-            println!("{}", "Setting up a new lore store for this repo.".bold());
+            println!("{}", "Setting up a new lore store.".bold());
             println!(
-                "Your reasoning history is encrypted with a passphrase only you and\n\
-                 your teammates know. Share it out of band; the git host never sees it."
+                "Your reasoning history is encrypted with a passphrase only you\n\
+                 (and any teammates) know. It is never sent to the git host."
             );
             println!();
             let passphrase = prompt_new_passphrase()?;
-            create_store(&repo, remote, &keystore, &machine, &passphrase)?;
+            create_store(repo, remote, &keystore, &machine, &passphrase)?;
             println!("{} Created the lore store.", "Success!".green().bold());
         }
     }
 
-    println!("Run 'lore sync' to push your reasoning history.");
     Ok(())
 }
 
@@ -440,6 +507,44 @@ fn perform_sync(
     machine: &MachineIdentity,
     sessions: Vec<Session>,
 ) -> Result<SyncSummary> {
+    perform_sync_in_store(
+        SyncStore::PerRepo,
+        db,
+        repo,
+        remote,
+        key,
+        salt,
+        machine,
+        sessions,
+    )
+}
+
+/// Store-parameterized core of [`perform_sync`].
+///
+/// `store` selects the three store-specific behaviors while every other step is
+/// shared verbatim between the per-repo and global paths:
+///
+/// - Carry-forward scope: [`SyncStore::PerRepo`] uses this repo's session ids
+///   ([`Database::get_session_ids_for_repo`]); [`SyncStore::Global`] uses every
+///   session id ([`Database::get_all_session_ids`]).
+/// - Merge import marking: per-repo marks the `synced_at` track; global marks the
+///   `global_synced_at` track (see [`merge_remote_in_store`]).
+/// - Post-push marking: per-repo calls [`Database::mark_sessions_synced`]; global
+///   calls [`Database::mark_global_synced`].
+///
+/// The caller supplies `sessions`, the exact set to push (per-repo passes the
+/// repo-scoped unsynced set; global passes all unsynced-global sessions).
+#[allow(clippy::too_many_arguments)]
+fn perform_sync_in_store(
+    store: SyncStore,
+    db: &mut Database,
+    repo: &Path,
+    remote: &str,
+    key: &[u8],
+    salt: &[u8],
+    machine: &MachineIdentity,
+    sessions: Vec<Session>,
+) -> Result<SyncSummary> {
     let mut pulled_total = 0;
 
     for attempt in 0..MAX_SYNC_ATTEMPTS {
@@ -457,8 +562,9 @@ fn perform_sync(
         };
 
         // MERGE remote -> local database (full records, newer-wins). A wrong key
-        // surfaces here and aborts before anything is built or pushed.
-        pulled_total += merge_remote(db, repo, &tracking_entries, key)?;
+        // surfaces here and aborts before anything is built or pushed. The store
+        // selects which sync-tracking column an imported session is marked on.
+        pulled_total += merge_remote_in_store(store, db, repo, &tracking_entries, key)?;
         merge_machines(db, repo, &tracking_entries)?;
 
         // BUILD the outgoing tree. Separate the TREE BASE (which entries the new
@@ -501,7 +607,12 @@ fn perform_sync(
         // session a candidate; `carry_forward_local_sessions` still re-adds only
         // in-scope ids, so out-of-scope artifacts are never carried forward.
         if let Some(local_commit) = &old_local {
-            let in_scope = db.get_session_ids_for_repo(repo)?;
+            // Carry-forward scope: the per-repo store is limited to this repo's
+            // sessions, while the global store spans every session.
+            let in_scope = match store {
+                SyncStore::PerRepo => db.get_session_ids_for_repo(repo)?,
+                SyncStore::Global => db.get_all_session_ids()?,
+            };
             let carry_tracking: &[TreeEntry] = if tracking_commit.is_some() {
                 &tracking_entries
             } else {
@@ -541,7 +652,10 @@ fn perform_sync(
         }
 
         let ids: Vec<Uuid> = sessions.iter().map(|s| s.id).collect();
-        db.mark_sessions_synced(&ids, Utc::now())?;
+        match store {
+            SyncStore::PerRepo => db.mark_sessions_synced(&ids, Utc::now())?,
+            SyncStore::Global => db.mark_global_synced(&ids, Utc::now())?,
+        };
 
         return Ok(SyncSummary {
             pulled: pulled_total,
@@ -552,21 +666,41 @@ fn perform_sync(
     bail!("Sync did not converge after {MAX_SYNC_ATTEMPTS} attempts due to concurrent updates")
 }
 
+/// Merges every encrypted session in `entries` into the database (per-repo).
+///
+/// Thin per-repo wrapper over [`merge_remote_in_store`], retained for tests.
+#[cfg(test)]
+fn merge_remote(
+    db: &mut Database,
+    repo: &Path,
+    entries: &[TreeEntry],
+    key: &[u8],
+) -> Result<usize> {
+    merge_remote_in_store(SyncStore::PerRepo, db, repo, entries, key)
+}
+
 /// Merges every encrypted session in `entries` into the database.
 ///
-/// Each record is applied atomically by [`Database::merge_remote_record`]: the
-/// session row and messages follow newer-wins (by message_count then ended_at)
-/// while links, tags, and annotations are always merged (additive, idempotent by
-/// id) so a remote addition to an already-synced session is not lost, and the
-/// summary is kept only when strictly newer. Returns the number of sessions
-/// whose row was imported or updated (the newer-wins branch ran).
+/// Each record is applied atomically by the merge writer: the session row and
+/// messages follow newer-wins (by message_count then ended_at) while links,
+/// tags, and annotations are always merged (additive, idempotent by id) so a
+/// remote addition to an already-synced session is not lost, and the summary is
+/// kept only when strictly newer. Returns the number of sessions whose row was
+/// imported or updated (the newer-wins branch ran).
+///
+/// `store` selects which sync-tracking column an imported session is marked on:
+/// [`SyncStore::PerRepo`] marks `synced_at` (via [`Database::merge_remote_record`])
+/// and [`SyncStore::Global`] marks `global_synced_at` (via
+/// [`Database::merge_remote_record_global`]). Marking only the merging store's
+/// column keeps the two sync tracks independent.
 ///
 /// A blob that cannot be decrypted is normally skipped (corruption or a single
 /// stray entry). But if the store held session blobs and NONE of them decrypted,
 /// the stored key is wrong for this store, so this returns an error rather than
 /// letting the caller push locally re-encrypted sessions under the wrong key and
 /// mark them synced (which would poison the store).
-fn merge_remote(
+fn merge_remote_in_store(
+    store: SyncStore,
     db: &mut Database,
     repo: &Path,
     entries: &[TreeEntry],
@@ -595,15 +729,27 @@ fn merge_remote(
         };
         decrypted += 1;
 
-        let imported = db.merge_remote_record(
-            &record.session,
-            &record.messages,
-            &record.links,
-            &record.tags,
-            &record.annotations,
-            record.summary.as_ref(),
-            Utc::now(),
-        )?;
+        let now = Utc::now();
+        let imported = match store {
+            SyncStore::PerRepo => db.merge_remote_record(
+                &record.session,
+                &record.messages,
+                &record.links,
+                &record.tags,
+                &record.annotations,
+                record.summary.as_ref(),
+                now,
+            )?,
+            SyncStore::Global => db.merge_remote_record_global(
+                &record.session,
+                &record.messages,
+                &record.links,
+                &record.tags,
+                &record.annotations,
+                record.summary.as_ref(),
+                now,
+            )?,
+        };
         if imported {
             pulled += 1;
         }
@@ -789,6 +935,269 @@ fn run_status(remote: &str, format: OutputFormat) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ==================== global store ====================
+
+/// Sets up the global personal store.
+///
+/// Prompts for and stores the remote URL when unset, initializes and configures
+/// the managed repo at `~/.lore/sync`, then creates or joins the store there
+/// using the same machinery as the per-repo path (against the store's `origin`
+/// remote).
+fn run_global_setup() -> Result<()> {
+    let mut config = Config::load()?;
+
+    let remote_url = match config.sync_global_remote.clone() {
+        Some(url) => url,
+        None => {
+            let url = prompt_global_remote_url()?;
+            config.sync_global_remote = Some(url.clone());
+            config.save()?;
+            url
+        }
+    };
+
+    let repo = global_store_path()?;
+    ensure_global_repo(&repo, &remote_url)?;
+    create_or_join_store(&repo, GLOBAL_REMOTE, &mut config)?;
+
+    println!("Run 'lore sync --global' to push your reasoning history.");
+    Ok(())
+}
+
+/// Performs a full sync of the global personal store, pushing all unsynced-global
+/// sessions regardless of their working directory.
+fn run_global_sync() -> Result<()> {
+    let mut config = Config::load()?;
+    let remote_url = config.sync_global_remote.clone().ok_or_else(|| {
+        anyhow!("The global store is not set up. Run 'lore sync --global setup' first.")
+    })?;
+    let machine = machine_identity(&mut config)?;
+    let keystore = KeyStore::with_keychain(config.use_keychain);
+
+    let repo = global_store_path()?;
+    ensure_global_repo(&repo, &remote_url)?;
+    let (key, salt) = load_store_credentials(&repo, GLOBAL_REMOTE, &keystore)?;
+
+    let mut db = Database::open_default()?;
+    // The global store aggregates every session, so push all unsynced-global
+    // sessions rather than scoping to a repository.
+    let sessions = db.get_unsynced_global_sessions()?;
+    let summary = perform_sync_in_store(
+        SyncStore::Global,
+        &mut db,
+        &repo,
+        GLOBAL_REMOTE,
+        &key,
+        &salt,
+        &machine,
+        sessions,
+    )?;
+
+    println!(
+        "{} Pulled {}, pushed {}.",
+        "Global sync complete.".green().bold(),
+        summary.pulled,
+        summary.pushed
+    );
+    Ok(())
+}
+
+/// Shows sync status for the global personal store.
+fn run_global_status(format: OutputFormat) -> Result<()> {
+    let config = Config::load()?;
+    let keystore = KeyStore::with_keychain(config.use_keychain);
+    let db = Database::open_default()?;
+
+    let remote_url = config.sync_global_remote.clone();
+    let repo = global_store_path()?;
+    // The managed repo may not exist yet if setup was never run; guard every
+    // git access so status never errors on an unconfigured global store.
+    let repo_ready = repo.join(".git").exists();
+
+    let salt = if repo_ready {
+        read_store_salt(&repo, GLOBAL_REMOTE)?
+    } else {
+        None
+    };
+    let keyed = match &salt {
+        Some(salt) => keystore.load_key(&store_id_from_salt(salt))?.is_some(),
+        None => false,
+    };
+    let set_up = salt.is_some();
+
+    let unsynced = db.unsynced_global_count()?;
+    let last_sync = db.last_global_sync_time()?;
+    let (remote_exists, local_ref, tracking_ref) = if repo_ready {
+        (
+            gitref::remote_ref_exists(&repo, GLOBAL_REMOTE, SESSIONS_REF).unwrap_or(false),
+            gitref::resolve_ref(&repo, SESSIONS_REF)?,
+            gitref::resolve_ref(
+                &repo,
+                &gitref::tracking_ref_name(GLOBAL_REMOTE, SESSIONS_REF)?,
+            )?,
+        )
+    } else {
+        (false, None, None)
+    };
+
+    match format {
+        OutputFormat::Json => {
+            let output = GlobalStatusOutput {
+                set_up,
+                keyed,
+                unsynced_sessions: unsynced,
+                last_sync_at: last_sync.map(|t| t.to_rfc3339()),
+                remote_store_exists: remote_exists,
+                local_ref: local_ref.clone(),
+                tracking_ref: tracking_ref.clone(),
+                remote: remote_url.clone(),
+                store_path: repo.display().to_string(),
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        OutputFormat::Text | OutputFormat::Markdown => {
+            println!("{}", "Lore Global Sync".bold());
+            println!();
+            if set_up && keyed {
+                println!("  Store:          {}", "set up".green());
+            } else if set_up {
+                println!(
+                    "  Store:          {} (run 'lore sync --global setup')",
+                    "no key on this machine".yellow()
+                );
+            } else {
+                println!(
+                    "  Store:          {} (run 'lore sync --global setup')",
+                    "not set up".yellow()
+                );
+            }
+            match &remote_url {
+                Some(url) => println!("  Remote:         {url}"),
+                None => println!("  Remote:         {}", "not configured".yellow()),
+            }
+            println!("  Store path:     {}", repo.display());
+            println!(
+                "  Remote store:   {}",
+                if remote_exists { "present" } else { "none" }
+            );
+            println!("  Pending sync:   {unsynced}");
+            match last_sync {
+                Some(t) => println!("  Last sync:      {}", t.to_rfc3339()),
+                None => println!("  Last sync:      {}", "never".dimmed()),
+            }
+            println!(
+                "  Local ref:      {}",
+                local_ref.as_deref().unwrap_or("none")
+            );
+            println!(
+                "  Tracking ref:   {}",
+                tracking_ref.as_deref().unwrap_or("none")
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns the path to the managed global store repository (`~/.lore/sync`).
+fn global_store_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not find home directory"))?;
+    Ok(home.join(".lore").join("sync"))
+}
+
+/// Ensures the managed global store repo exists and is configured.
+///
+/// Creates the directory and runs `git init` if absent, configures a local
+/// committer identity so `commit-tree` works without relying on the user's
+/// global git config, disables commit signing so it never blocks on a GPG
+/// prompt, and adds or updates the `origin` remote to point at `remote_url`.
+/// Idempotent: safe to call on every setup and sync.
+fn ensure_global_repo(repo: &Path, remote_url: &str) -> Result<()> {
+    std::fs::create_dir_all(repo).with_context(|| {
+        format!(
+            "Failed to create the global store directory: {}",
+            repo.display()
+        )
+    })?;
+
+    if !repo.join(".git").exists() {
+        run_git_checked(repo, &["init", "-q"], "initialize the global store repo")?;
+    }
+
+    run_git_checked(
+        repo,
+        &["config", "user.name", "lore"],
+        "configure the global store committer name",
+    )?;
+    run_git_checked(
+        repo,
+        &["config", "user.email", "lore@localhost"],
+        "configure the global store committer email",
+    )?;
+    run_git_checked(
+        repo,
+        &["config", "commit.gpgsign", "false"],
+        "disable commit signing for the global store",
+    )?;
+
+    configure_origin_remote(repo, remote_url)?;
+    Ok(())
+}
+
+/// Adds the `origin` remote, or updates its URL if it already exists.
+fn configure_origin_remote(repo: &Path, remote_url: &str) -> Result<()> {
+    let has_origin = Command::new("git")
+        .current_dir(repo)
+        .args(["remote", "get-url", GLOBAL_REMOTE])
+        .output()
+        .context("Failed to run git remote get-url")?
+        .status
+        .success();
+
+    let args: [&str; 4] = if has_origin {
+        ["remote", "set-url", GLOBAL_REMOTE, remote_url]
+    } else {
+        ["remote", "add", GLOBAL_REMOTE, remote_url]
+    };
+    run_git_checked(repo, &args, "configure the global store remote")?;
+    Ok(())
+}
+
+/// Runs a git command in `repo`, returning a contextual error on failure.
+fn run_git_checked(repo: &Path, args: &[&str], action: &str) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .with_context(|| format!("Failed to run git to {action}"))?;
+    if !output.status.success() {
+        bail!(
+            "Failed to {action}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Prompts for the git remote URL of the user's private global store repo.
+fn prompt_global_remote_url() -> Result<String> {
+    println!("{}", "Set up your global personal store.".bold());
+    println!(
+        "Enter the git remote URL of a private repository only you can access.\n\
+         It holds your cross-tool, cross-repo reasoning history for personal\n\
+         multi-machine backup and search."
+    );
+    print!("Remote URL: ");
+    io::stdout().flush()?;
+    let mut url = String::new();
+    io::stdin().read_line(&mut url)?;
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        bail!("A remote URL is required to set up the global store.");
+    }
+    Ok(url)
 }
 
 // ==================== helpers ====================
@@ -2100,5 +2509,282 @@ mod tests {
                 "out-of-scope .enc path must not be reachable from the {label} ref"
             );
         }
+    }
+
+    // ==================== global store ====================
+
+    /// Initializes a managed global-store repo in a temp dir wired to `remote_url`.
+    ///
+    /// Mirrors the real `~/.lore/sync` setup ([`ensure_global_repo`]) but on an
+    /// injectable path so the user's real global store is never touched.
+    fn init_global_store(remote_url: &str) -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().to_path_buf();
+        ensure_global_repo(&store, remote_url).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn test_global_create_store_writes_salt_and_pushes() {
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let (_store_dir, store) = init_global_store(&remote_url);
+
+        let (keystore, _kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+
+        create_store(
+            &store,
+            GLOBAL_REMOTE,
+            &keystore,
+            &m,
+            "correct horse battery",
+        )
+        .unwrap();
+
+        // The local ref exists and holds the salt.
+        assert!(gitref::ref_exists(&store, SESSIONS_REF).unwrap());
+        let salt = read_store_salt(&store, GLOBAL_REMOTE)
+            .unwrap()
+            .expect("salt written");
+        // The derived key is stored under the salt-derived store id.
+        assert!(keystore
+            .load_key(&store_id_from_salt(&salt))
+            .unwrap()
+            .is_some());
+        // The store was pushed to the global remote.
+        assert!(gitref::remote_ref_exists(&store, GLOBAL_REMOTE, SESSIONS_REF).unwrap());
+    }
+
+    #[test]
+    fn test_ensure_global_repo_is_idempotent_and_updates_remote() {
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("sync");
+
+        // First call creates the repo and configures origin.
+        ensure_global_repo(&store, &remote_url).unwrap();
+        assert!(store.join(".git").exists());
+        assert_eq!(
+            git_out(&store, &["remote", "get-url", "origin"]),
+            remote_url
+        );
+        assert_eq!(git_out(&store, &["config", "user.name"]), "lore");
+
+        // A second call with a new URL updates the remote without failing.
+        let (_remote_dir2, remote_url2) = init_bare_remote();
+        ensure_global_repo(&store, &remote_url2).unwrap();
+        assert_eq!(
+            git_out(&store, &["remote", "get-url", "origin"]),
+            remote_url2
+        );
+    }
+
+    #[test]
+    fn test_global_sync_round_trip_between_machines() {
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let passphrase = "shared global passphrase";
+
+        // Machine A: set up the global store, seed sessions in UNRELATED
+        // directories (the global store aggregates across repos), and sync.
+        let (_store_a, store_a) = init_global_store(&remote_url);
+        let (keystore_a, _ka) = test_keystore();
+        let ma = machine("machine-a", "Machine A");
+        create_store(&store_a, GLOBAL_REMOTE, &keystore_a, &ma, passphrase).unwrap();
+
+        let (mut db_a, _da) = open_db();
+        let id_one = seed_full_session(&mut db_a, "machine-a", "/projects/repo-one");
+        let id_two = seed_full_session(&mut db_a, "machine-a", "/elsewhere/repo-two");
+        let (key_a, salt_a) = load_store_credentials(&store_a, GLOBAL_REMOTE, &keystore_a).unwrap();
+        let sessions_a = db_a.get_unsynced_global_sessions().unwrap();
+        assert_eq!(sessions_a.len(), 2);
+        let summary_a = perform_sync_in_store(
+            SyncStore::Global,
+            &mut db_a,
+            &store_a,
+            GLOBAL_REMOTE,
+            &key_a,
+            &salt_a,
+            &ma,
+            sessions_a,
+        )
+        .unwrap();
+        assert_eq!(summary_a.pushed, 2, "global sync pushes all sessions");
+
+        // Both sessions are now marked synced on the global track.
+        assert!(db_a.get_unsynced_global_sessions().unwrap().is_empty());
+
+        // Machine B: join the global store and sync (pull).
+        let (_store_b, store_b) = init_global_store(&remote_url);
+        let (keystore_b, _kb) = test_keystore();
+        let mb = machine("machine-b", "Machine B");
+        gitref::fetch(&store_b, GLOBAL_REMOTE, SESSIONS_REF).unwrap();
+        let salt_b = read_store_salt(&store_b, GLOBAL_REMOTE).unwrap().unwrap();
+        join_store(
+            &store_b,
+            GLOBAL_REMOTE,
+            &keystore_b,
+            &mb,
+            &salt_b,
+            passphrase,
+        )
+        .unwrap();
+
+        let (mut db_b, _db) = open_db();
+        let (key_b, salt_b2) =
+            load_store_credentials(&store_b, GLOBAL_REMOTE, &keystore_b).unwrap();
+        let sessions_b = db_b.get_unsynced_global_sessions().unwrap();
+        let summary_b = perform_sync_in_store(
+            SyncStore::Global,
+            &mut db_b,
+            &store_b,
+            GLOBAL_REMOTE,
+            &key_b,
+            &salt_b2,
+            &mb,
+            sessions_b,
+        )
+        .unwrap();
+        assert_eq!(summary_b.pulled, 2, "both sessions must be pulled");
+
+        // Machine B has both sessions with their full reasoning records.
+        for id in [id_one, id_two] {
+            assert!(
+                db_b.get_session(&id).unwrap().is_some(),
+                "session {id} must be pulled"
+            );
+            assert_eq!(db_b.get_messages(&id).unwrap().len(), 1);
+            assert_eq!(db_b.get_links_by_session(&id).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_global_sync_pushes_all_sessions_regardless_of_directory() {
+        // The global store pushes every unsynced-global session no matter its
+        // working directory, in contrast to the repo-scoped per-repo path which
+        // would push none of these (none live inside the store repo).
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let (_store_dir, store) = init_global_store(&remote_url);
+
+        let (keystore, _kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(&store, GLOBAL_REMOTE, &keystore, &m, "passphrase abcdefgh").unwrap();
+
+        let (mut db, _dd) = open_db();
+        let id_a = seed_full_session(&mut db, "machine-a", "/somewhere/project-a");
+        let id_b = seed_full_session(&mut db, "machine-a", "/totally/other/project-b");
+
+        // The per-repo scope for the store repo captures neither session.
+        assert!(
+            db.get_unsynced_sessions_for_repo(&store)
+                .unwrap()
+                .is_empty(),
+            "no session lives inside the store repo, so per-repo scope is empty"
+        );
+
+        let (key, salt) = load_store_credentials(&store, GLOBAL_REMOTE, &keystore).unwrap();
+        let sessions = db.get_unsynced_global_sessions().unwrap();
+        let summary = perform_sync_in_store(
+            SyncStore::Global,
+            &mut db,
+            &store,
+            GLOBAL_REMOTE,
+            &key,
+            &salt,
+            &m,
+            sessions,
+        )
+        .unwrap();
+        assert_eq!(summary.pushed, 2, "global sync pushes both sessions");
+
+        // Both encrypted blobs are present in the store.
+        let entries = gitref::read_tree(&store, SESSIONS_REF).unwrap();
+        for id in [id_a, id_b] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.path == format!("sessions/{id}.enc")),
+                "session {id} must be stored in the global store"
+            );
+        }
+    }
+
+    #[test]
+    fn test_per_repo_sync_does_not_mark_global_track() {
+        // A per-repo sync marks only the synced_at track; the session stays
+        // pending for the global store (and vice versa is covered by the DB tests).
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(repo, &["remote", "add", "origin", &remote_url]);
+
+        let (keystore, _kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(repo, "origin", &keystore, &m, "passphrase abcdefgh").unwrap();
+
+        let (mut db, _dd) = open_db();
+        let id = seed_full_session(&mut db, "machine-a", &repo_dir(repo));
+        let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
+
+        // Per-repo track is synced, global track is still pending.
+        assert!(
+            !db.get_unsynced_sessions()
+                .unwrap()
+                .iter()
+                .any(|s| s.id == id),
+            "per-repo sync must mark the per-repo track"
+        );
+        assert!(
+            db.get_unsynced_global_sessions()
+                .unwrap()
+                .iter()
+                .any(|s| s.id == id),
+            "per-repo sync must NOT mark the global track"
+        );
+    }
+
+    #[test]
+    fn test_global_sync_does_not_mark_per_repo_track() {
+        // The reverse direction at the sync level: a global sync marks only the
+        // global track, leaving the per-repo track pending.
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let (_store_dir, store) = init_global_store(&remote_url);
+
+        let (keystore, _kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(&store, GLOBAL_REMOTE, &keystore, &m, "passphrase abcdefgh").unwrap();
+
+        let (mut db, _dd) = open_db();
+        let id = seed_full_session(&mut db, "machine-a", "/some/project");
+        let (key, salt) = load_store_credentials(&store, GLOBAL_REMOTE, &keystore).unwrap();
+        let sessions = db.get_unsynced_global_sessions().unwrap();
+        perform_sync_in_store(
+            SyncStore::Global,
+            &mut db,
+            &store,
+            GLOBAL_REMOTE,
+            &key,
+            &salt,
+            &m,
+            sessions,
+        )
+        .unwrap();
+
+        assert!(
+            !db.get_unsynced_global_sessions()
+                .unwrap()
+                .iter()
+                .any(|s| s.id == id),
+            "global sync must mark the global track"
+        );
+        assert!(
+            db.get_unsynced_sessions()
+                .unwrap()
+                .iter()
+                .any(|s| s.id == id),
+            "global sync must NOT mark the per-repo track"
+        );
     }
 }
