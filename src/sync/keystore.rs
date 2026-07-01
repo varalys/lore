@@ -7,14 +7,9 @@
 //! caller (read from the ref by the [`gitref`](super::gitref) layer) and
 //! produces a fresh salt when a store is first initialized.
 //!
-//! Unlike the legacy cloud module, sync keys do NOT share the single
-//! `encryption.key` file / `encryption-key` keychain entry. Each repo or store
-//! has its own passphrase plus salt and therefore its own derived key, so the
-//! storage is namespaced by a store identifier derived from the salt. Reusing
-//! the cloud slot would both corrupt the live cloud key and make it impossible
-//! to hold more than one store key at a time. The file/keychain abstraction here
-//! mirrors the pattern in [`crate::cloud::credentials`] but is kept self
-//! contained and never touches the cloud credentials.
+//! Each repo or store has its own passphrase plus salt and therefore its own
+//! derived key, so the storage is namespaced by a store identifier derived from
+//! the salt. This lets a single machine hold more than one store key at a time.
 
 use keyring::Entry;
 use sha2::{Digest, Sha256};
@@ -26,9 +21,8 @@ use super::SyncError;
 
 /// Keychain service name for sync store keys.
 ///
-/// Deliberately distinct from the cloud module's `lore-cloud` service so the two
-/// never collide. Each store's key is stored under this service with the
-/// store-id as the account/user.
+/// Each store's key is stored under this service with the store-id as the
+/// account/user.
 const SYNC_KEYRING_SERVICE: &str = "lore-sync";
 
 /// Derives the store encryption key from a passphrase and a salt.
@@ -61,10 +55,10 @@ pub fn store_id_from_salt(salt: &[u8]) -> String {
 
 /// Persists the derived encryption key for a lore store, keyed by store-id.
 ///
-/// Keys live in a dedicated namespace so the cloud encryption key and any other
-/// store's key are never touched. Depending on `use_keychain`, the key lands in
-/// the OS keychain (service `lore-sync`, account = store-id) or a
-/// permission-restricted file at `~/.lore/sync-keys/<store-id>.key`.
+/// Keys live in a dedicated per-store namespace so one store's key never touches
+/// another's. Depending on `use_keychain`, the key lands in the OS keychain
+/// (service `lore-sync`, account = store-id) or a permission-restricted file at
+/// `~/.lore/sync-keys/<store-id>.key`.
 pub struct KeyStore {
     /// Whether to use the OS keychain (config-driven and available on system).
     use_keyring: bool,
@@ -83,8 +77,7 @@ impl KeyStore {
 
     /// Creates a key store, using the OS keychain when requested and available.
     ///
-    /// Falls back to file storage when the keychain is unavailable, matching the
-    /// behavior of the cloud credentials store.
+    /// Falls back to file storage when the keychain is unavailable.
     pub fn with_keychain(use_keychain: bool) -> Self {
         Self {
             use_keyring: use_keychain && Self::is_keyring_available(),

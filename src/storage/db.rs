@@ -360,7 +360,7 @@ impl Database {
         // This handles upgrades from databases created before machine_id was added.
         self.migrate_add_machine_id()?;
 
-        // Migration: Add synced_at column for cloud sync tracking.
+        // Migration: Add synced_at column for sync tracking.
         self.migrate_add_synced_at()?;
 
         // Migration: Add global_synced_at column for the global personal store.
@@ -413,8 +413,8 @@ impl Database {
 
     /// Adds the synced_at column to the sessions table if it does not exist.
     ///
-    /// This column tracks when each session was last synced to the cloud.
-    /// A NULL value indicates the session has never been synced.
+    /// This column tracks when each session was last synced to its per-repo
+    /// store. A NULL value indicates the session has never been synced.
     fn migrate_add_synced_at(&self) -> Result<()> {
         let columns: Vec<String> = self
             .conn
@@ -784,6 +784,10 @@ impl Database {
     /// This is much faster than calling `insert_session` and `insert_message`
     /// separately for each message, as it batches all operations into one
     /// database transaction. Optionally marks the session as synced.
+    ///
+    /// Note: retained as public API and used as the storage tests' fixture
+    /// builder; production import paths write sessions incrementally.
+    #[allow(dead_code)]
     pub fn import_session_with_messages(
         &mut self,
         session: &Session,
@@ -1769,12 +1773,18 @@ impl Database {
             || (session_count > 0 && session_fts_count == 0))
     }
 
-    // ==================== Cloud Sync ====================
+    // ==================== Sync ====================
 
-    /// Returns sessions that have not been synced to the cloud.
+    /// Returns sessions that have not been synced.
     ///
     /// Unsynced sessions are those where `synced_at` is NULL. Returns sessions
     /// ordered by start time (oldest first) to sync in chronological order.
+    ///
+    /// Note: production sync scopes pushes with
+    /// [`Database::get_unsynced_sessions_for_repo`] (per-repo) or
+    /// [`Database::get_unsynced_global_sessions`] (global). This unscoped
+    /// accessor is retained as public API and is exercised by the storage tests.
+    #[allow(dead_code)]
     pub fn get_unsynced_sessions(&self) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
@@ -1940,22 +1950,12 @@ impl Database {
         }
     }
 
-    /// Returns the count of sessions that have not been synced.
-    pub fn unsynced_session_count(&self) -> Result<i32> {
-        let count: i32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE synced_at IS NULL",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(count)
-    }
-
     /// Returns the count of unsynced sessions whose working directory is inside
     /// `repo_path`.
     ///
-    /// Repo-scoped counterpart of [`Database::unsynced_session_count`], using the
-    /// same directory scoping as [`Database::get_unsynced_sessions_for_repo`] so
-    /// `lore sync status` reports what this repo will actually push.
+    /// Uses the same directory scoping as
+    /// [`Database::get_unsynced_sessions_for_repo`] so `lore sync status` reports
+    /// what this repo will actually push.
     pub fn unsynced_session_count_for_repo(&self, repo_path: &Path) -> Result<i32> {
         let (predicate, binds) = repo_scope_predicate(repo_path);
         let sql = format!(
@@ -2016,47 +2016,6 @@ impl Database {
             Some(s) => Ok(Some(parse_datetime(&s)?)),
             None => Ok(None),
         }
-    }
-
-    /// Clears the synced_at timestamp for all sessions.
-    ///
-    /// This effectively marks all sessions as unsynced and is useful
-    /// for resetting sync state when switching cloud environments.
-    pub fn clear_sync_status(&self) -> Result<usize> {
-        let updated = self
-            .conn
-            .execute("UPDATE sessions SET synced_at = NULL", [])?;
-        Ok(updated)
-    }
-
-    /// Clears the synced_at timestamp for specific sessions.
-    ///
-    /// This marks only the specified sessions as unsynced, useful for
-    /// selectively re-uploading sessions to the cloud.
-    ///
-    /// # Arguments
-    ///
-    /// * `session_ids` - The UUIDs of sessions to clear sync status for
-    ///
-    /// # Returns
-    ///
-    /// The number of sessions that were updated.
-    pub fn clear_sync_status_for_sessions(&self, session_ids: &[Uuid]) -> Result<usize> {
-        if session_ids.is_empty() {
-            return Ok(0);
-        }
-
-        let mut total_updated = 0;
-
-        for id in session_ids {
-            let updated = self.conn.execute(
-                "UPDATE sessions SET synced_at = NULL WHERE id = ?1",
-                params![id.to_string()],
-            )?;
-            total_updated += updated;
-        }
-
-        Ok(total_updated)
     }
 
     // ==================== Stats ====================
@@ -2687,7 +2646,7 @@ impl Database {
 
     /// Registers a machine or updates its name if it already exists.
     ///
-    /// Used to store machine identity information for cloud sync.
+    /// Used to store machine identity information for sync deduplication.
     /// If a machine with the given ID already exists, updates the name.
     pub fn upsert_machine(&self, machine: &Machine) -> Result<()> {
         self.conn.execute(
@@ -6699,109 +6658,6 @@ mod tests {
             retrieved.message_count, 10,
             "Message count should be updated"
         );
-    }
-
-    #[test]
-    fn test_clear_sync_status_all_sessions() {
-        let (db, _dir) = create_test_db();
-
-        // Create and insert multiple sessions
-        let session1 = create_test_session("claude-code", "/home/user/project1", Utc::now(), None);
-        let session2 = create_test_session("aider", "/home/user/project2", Utc::now(), None);
-        let session3 = create_test_session("cline", "/home/user/project3", Utc::now(), None);
-
-        db.insert_session(&session1)
-            .expect("Failed to insert session1");
-        db.insert_session(&session2)
-            .expect("Failed to insert session2");
-        db.insert_session(&session3)
-            .expect("Failed to insert session3");
-
-        // Mark all as synced
-        db.mark_sessions_synced(&[session1.id, session2.id, session3.id], Utc::now())
-            .expect("Failed to mark synced");
-
-        // Verify all are synced
-        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
-        assert_eq!(unsynced.len(), 0, "All sessions should be synced");
-
-        // Clear sync status for all
-        let count = db.clear_sync_status().expect("Failed to clear sync status");
-        assert_eq!(count, 3, "Should have cleared 3 sessions");
-
-        // Verify all are now unsynced
-        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
-        assert_eq!(unsynced.len(), 3, "All sessions should be unsynced now");
-    }
-
-    #[test]
-    fn test_clear_sync_status_for_specific_sessions() {
-        let (db, _dir) = create_test_db();
-
-        // Create and insert multiple sessions
-        let session1 = create_test_session("claude-code", "/home/user/project1", Utc::now(), None);
-        let session2 = create_test_session("aider", "/home/user/project2", Utc::now(), None);
-        let session3 = create_test_session("cline", "/home/user/project3", Utc::now(), None);
-
-        db.insert_session(&session1)
-            .expect("Failed to insert session1");
-        db.insert_session(&session2)
-            .expect("Failed to insert session2");
-        db.insert_session(&session3)
-            .expect("Failed to insert session3");
-
-        // Mark all as synced
-        db.mark_sessions_synced(&[session1.id, session2.id, session3.id], Utc::now())
-            .expect("Failed to mark synced");
-
-        // Verify all are synced
-        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
-        assert_eq!(unsynced.len(), 0, "All sessions should be synced");
-
-        // Clear sync status for only session1 and session3
-        let count = db
-            .clear_sync_status_for_sessions(&[session1.id, session3.id])
-            .expect("Failed to clear sync status");
-        assert_eq!(count, 2, "Should have cleared 2 sessions");
-
-        // Verify only session2 is still synced
-        let unsynced = db.get_unsynced_sessions().expect("Failed to get unsynced");
-        assert_eq!(unsynced.len(), 2, "Two sessions should be unsynced");
-        assert!(
-            unsynced.iter().any(|s| s.id == session1.id),
-            "session1 should be unsynced"
-        );
-        assert!(
-            !unsynced.iter().any(|s| s.id == session2.id),
-            "session2 should still be synced"
-        );
-        assert!(
-            unsynced.iter().any(|s| s.id == session3.id),
-            "session3 should be unsynced"
-        );
-    }
-
-    #[test]
-    fn test_clear_sync_status_for_sessions_empty_list() {
-        let (db, _dir) = create_test_db();
-
-        // Clear sync status with empty list should return 0
-        let count = db
-            .clear_sync_status_for_sessions(&[])
-            .expect("Failed to clear sync status");
-        assert_eq!(count, 0, "Should return 0 for empty list");
-    }
-
-    #[test]
-    fn test_clear_sync_status_for_nonexistent_session() {
-        let (db, _dir) = create_test_db();
-
-        // Try to clear sync status for a session that does not exist
-        let fake_id = Uuid::new_v4();
-        let count = db
-            .clear_sync_status_for_sessions(&[fake_id])
-            .expect("Failed to clear sync status");
-        assert_eq!(count, 0, "Should return 0 for nonexistent session");
     }
 
     // ==================== Insights Tests ====================

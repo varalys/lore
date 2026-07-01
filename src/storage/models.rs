@@ -42,7 +42,7 @@ pub struct Session {
     pub message_count: i32,
 
     /// Machine identifier (hostname) where the session was captured.
-    /// Used for cloud sync to identify which machine created the session.
+    /// Used for sync to identify which machine created the session.
     /// Optional for backwards compatibility with existing sessions.
     pub machine_id: Option<String>,
 }
@@ -452,7 +452,7 @@ pub struct Summary {
 
 /// Represents a machine that has captured sessions.
 ///
-/// Used for cloud sync to map machine UUIDs to friendly names. Each machine
+/// Used for sync to map machine UUIDs to friendly names. Each machine
 /// has a unique identifier (UUID) and a human-readable name that can be
 /// customized by the user.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

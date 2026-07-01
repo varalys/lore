@@ -193,7 +193,7 @@ pub fn run(args: Args) -> Result<()> {
         println!("  Created: {}", db_path.display());
     }
 
-    // Register this machine in the machines table for cloud sync
+    // Register this machine in the machines table for sync deduplication
     let machine = Machine {
         id: machine_id.clone(),
         name: machine_name.clone(),

@@ -24,7 +24,6 @@ fn reset_sigpipe() {
 
 mod capture;
 mod cli;
-mod cloud;
 mod config;
 mod daemon;
 mod git;
@@ -263,29 +262,6 @@ enum Commands {
     )]
     Db(commands::db::Args),
 
-    /// Authenticate with the Lore cloud service
-    #[command(
-        long_about = "Opens a browser to authenticate with the Lore cloud service.\n\
-        After authentication, your API key is stored securely in the\n\
-        OS keychain (or a fallback file if keychain is unavailable)."
-    )]
-    Login(commands::login::Args),
-
-    /// Log out from the Lore cloud service
-    #[command(
-        long_about = "Removes stored credentials and encryption keys from the keychain\n\
-        and any fallback files."
-    )]
-    Logout(commands::logout::Args),
-
-    /// Sync sessions with Lore cloud
-    #[command(
-        long_about = "Cloud sync commands for backing up sessions and syncing across\n\
-        machines. Session content is encrypted end-to-end using a\n\
-        passphrase that only you know."
-    )]
-    Cloud(commands::cloud::Args),
-
     /// Sync reasoning history over git (serverless, per-repo)
     #[command(
         long_about = "Serverless sync that stores encrypted reasoning history in this\n\
@@ -339,8 +315,6 @@ fn is_configured() -> bool {
 /// - `completions` (should work without init for shell setup)
 /// - `doctor` (diagnostic command should work without init)
 /// - `mcp` (MCP server should work without init for tool integration)
-/// - `login` (should work to set up cloud before init)
-/// - `logout` (should work to clean up cloud state)
 fn should_skip_first_run_prompt(command: &Commands) -> bool {
     matches!(
         command,
@@ -349,8 +323,6 @@ fn should_skip_first_run_prompt(command: &Commands) -> bool {
             | Commands::Completions(_)
             | Commands::Doctor(_)
             | Commands::Mcp(_)
-            | Commands::Login(_)
-            | Commands::Logout(_)
     )
 }
 
@@ -469,9 +441,6 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Hooks(_) => "hooks",
         Commands::Daemon(_) => "daemon",
         Commands::Db(_) => "db",
-        Commands::Login(_) => "login",
-        Commands::Logout(_) => "logout",
-        Commands::Cloud(_) => "cloud",
         Commands::Sync(_) => "sync",
         Commands::Doctor(_) => "doctor",
         Commands::Mcp(_) => "mcp",
@@ -557,9 +526,6 @@ fn main() -> Result<()> {
         Commands::Hooks(args) => commands::hooks::run(args),
         Commands::Daemon(args) => commands::daemon::run(args),
         Commands::Db(args) => commands::db::run(args),
-        Commands::Login(args) => commands::login::run(args),
-        Commands::Logout(args) => commands::logout::run(args),
-        Commands::Cloud(args) => commands::cloud::run(args),
         Commands::Sync(args) => commands::sync::run(args),
         Commands::Doctor(args) => commands::doctor::run(args),
         Commands::Mcp(args) => commands::mcp::run(args),

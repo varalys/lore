@@ -6,17 +6,13 @@
 //! ensuring that anyone with repository access but without the passphrase
 //! cannot read the reasoning history.
 //!
-//! This module was moved verbatim from the legacy cloud module; the only
-//! change is that it now reports failures via [`SyncError`] rather than the
-//! cloud error type. The cloud module re-exports these functions so existing
-//! call sites keep working until the cloud path is decommissioned.
+//! Failures are reported via [`SyncError`].
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
 use argon2::{password_hash::SaltString, Argon2, PasswordHasher};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use rand::RngCore;
 
 use super::SyncError;
@@ -165,18 +161,6 @@ pub fn decrypt_data(data: &[u8], key: &[u8]) -> Result<Vec<u8>, SyncError> {
         .map_err(|e| SyncError::Encryption(format!("Decryption failed: {e}")))?;
 
     Ok(plaintext)
-}
-
-/// Encodes binary data as base64.
-pub fn encode_base64(data: &[u8]) -> String {
-    BASE64.encode(data)
-}
-
-/// Decodes base64 data to binary.
-pub fn decode_base64(data: &str) -> Result<Vec<u8>, SyncError> {
-    BASE64
-        .decode(data)
-        .map_err(|e| SyncError::Encryption(format!("Base64 decode failed: {e}")))
 }
 
 /// Encodes a key as hexadecimal for storage.
@@ -329,14 +313,6 @@ mod tests {
         let short_data = vec![0u8; 5]; // Shorter than nonce
         let result = decrypt_data(&short_data, &key);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_base64_roundtrip() {
-        let data = b"test binary data \x00\x01\x02";
-        let encoded = encode_base64(data);
-        let decoded = decode_base64(&encoded).unwrap();
-        assert_eq!(decoded, data);
     }
 
     #[test]

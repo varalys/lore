@@ -1,14 +1,14 @@
 //! Serverless git-ref sync for Lore.
 //!
 //! This module stores AI reasoning history in the user's own git repository
-//! under `refs/lore/*` instead of a hosted cloud service. A lore store ref
-//! points at a commit whose tree holds one encrypted blob per session plus a
-//! plaintext salt, so the reasoning rides along with the code over plain git.
+//! under `refs/lore/*`, with no hosted service. A lore store ref points at a
+//! commit whose tree holds one encrypted blob per session plus a plaintext
+//! salt, so the reasoning rides along with the code over plain git.
 //!
 //! The module is intentionally split into focused submodules:
 //!
 //! - [`encryption`] - Argon2id key derivation and AES-256-GCM encryption on
-//!   raw bytes (moved from the legacy cloud module, shared by both).
+//!   raw bytes.
 //! - [`keystore`] - passphrase-to-key derivation, salt generation, and
 //!   persistence of the derived key (file or OS keychain).
 //! - [`store`] - the consolidated session-blob pipeline: serialize a full
