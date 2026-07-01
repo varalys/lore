@@ -467,13 +467,16 @@ fn perform_sync(
         // - Remote present: base the tree on the remote tracking commit so the
         //   push is a fast-forward and remote-only sessions are preserved. The
         //   commit descends from that same tracking commit.
-        // - No remote store: base the tree on NOTHING (empty). The local ref may
-        //   have been written before per-repo scoping and can hold out-of-scope
-        //   session artifacts; inheriting it wholesale would re-push another
-        //   repo's history. Only in-scope local-only sessions are carried
-        //   forward below. The commit still descends from the local ref (when it
-        //   exists) so the local ref update stays a fast-forward and history is
-        //   continuous.
+        // - No remote store: base the tree on NOTHING (empty) and make the commit
+        //   an ORPHAN (no parent). The local ref may have been written before
+        //   per-repo scoping and can hold out-of-scope session artifacts; both
+        //   inheriting its tree and descending from its commit would leak that
+        //   history. Descending from the local ref keeps old_local reachable from
+        //   the pushed ref (e.g. `refs/lore/sessions^`), so out-of-scope blobs
+        //   still reach the remote through ancestry even when the tip tree is
+        //   clean. Orphaning drops that ancestry so only the scoped tip tree and
+        //   its blobs are reachable. Only in-scope local-only sessions are carried
+        //   forward below, so no in-scope data is lost by orphaning.
         let tracking_commit = match fetched {
             Some(_) => {
                 gitref::resolve_ref(repo, &gitref::tracking_ref_name(remote, SESSIONS_REF)?)?
@@ -481,7 +484,7 @@ fn perform_sync(
             None => None,
         };
         let tree_base = tracking_commit.clone();
-        let commit_parent = tracking_commit.clone().or(old_local.clone());
+        let commit_parent = tracking_commit.clone();
 
         let mut changes = build_session_changes(db, repo, key, &sessions)?;
 
@@ -2013,7 +2016,7 @@ mod tests {
         let leaked_enc = gitref::write_blob(repo, b"leaked-enc").unwrap();
         let leaked_meta = gitref::write_blob(repo, b"leaked-meta").unwrap();
         let mut inject = BTreeMap::new();
-        inject.insert(format!("sessions/{out_of_scope}.enc"), leaked_enc);
+        inject.insert(format!("sessions/{out_of_scope}.enc"), leaked_enc.clone());
         inject.insert(format!("sessions/{out_of_scope}.meta.json"), leaked_meta);
         let tree = gitref::build_tree(repo, base.as_deref(), &inject).unwrap();
         let commit = gitref::commit_tree(repo, &tree, base.as_deref(), "inject leaked").unwrap();
@@ -2066,6 +2069,35 @@ mod tests {
             assert!(
                 entries.iter().any(|e| e.path == "meta/machines.json"),
                 "meta/machines.json must be present in {reference}"
+            );
+        }
+
+        // A clean tip tree is not enough: the pushed commit must not descend from
+        // the pre-scoping local commit, or the out-of-scope blobs would still
+        // reach the remote through ancestry (e.g. `refs/lore/sessions^`). Assert
+        // the no-remote commit is an ORPHAN on both the local ref and the remote:
+        // exactly one commit is reachable, so it has no parent.
+        for (label, dir) in [("local", repo), ("remote", remote_dir.path())] {
+            assert_eq!(
+                git_out(dir, &["rev-list", "--count", SESSIONS_REF]),
+                "1",
+                "the no-remote sync commit must be an orphan on the {label} ref"
+            );
+        }
+
+        // The out-of-scope blob object must not be reachable from the pushed ref
+        // through any commit in its history. `git rev-list --objects` enumerates
+        // every object reachable from the ref, so the leaked blob oid and its path
+        // must both be absent.
+        for (label, dir) in [("local", repo), ("remote", remote_dir.path())] {
+            let objects = git_out(dir, &["rev-list", "--objects", SESSIONS_REF]);
+            assert!(
+                !objects.contains(&leaked_enc),
+                "out-of-scope blob object must not be reachable from the {label} ref"
+            );
+            assert!(
+                !objects.contains(&format!("sessions/{out_of_scope}.enc")),
+                "out-of-scope .enc path must not be reachable from the {label} ref"
             );
         }
     }
