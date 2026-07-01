@@ -7,7 +7,7 @@
 
 **Reasoning history for code.**
 
-Lore records your AI coding sessions and links them to git commits. Run `lore blame` on any line to see the conversation that produced it. Sessions sync over git, encrypted, with no server and no account.
+Lore records your AI coding sessions and links them to git commits. Run `lore blame` on any line to see the conversation that produced it. Sessions sync through your existing git remotes, encrypted, with no server and no account.
 
 **Documentation:** [lore.varalys.com](https://lore.varalys.com)
 
@@ -102,7 +102,7 @@ Linked sessions (1):
 | Feature | Description |
 |---------|-------------|
 | **Blame** | Trace any line of code to the AI session that produced it |
-| **Git-ref Sync** | Sync reasoning over git, encrypted, no server; share by passphrase |
+| **Git-ref Sync** | Sync reasoning through your existing git remotes, encrypted; share by passphrase |
 | **Session Capture** | One history across 10+ AI coding tools |
 | **Git Linking** | Connect sessions to commits |
 | **Full-text Search** | Find any past conversation |
@@ -111,7 +111,7 @@ Linked sessions (1):
 
 ## Sync
 
-Lore syncs reasoning history over git, with no server and no account. Sessions are encrypted on your machine before they touch a remote, so the git host only ever sees ciphertext.
+Lore syncs reasoning history through your existing git remotes, with no server and no account. Sessions are encrypted on your machine before they touch a remote, so the git host only ever sees ciphertext.
 
 - **Per-repo store**: encrypted sessions ride inside the project's own repo under `refs/lore/sessions`, so reasoning travels with the code. A teammate who clones the repo and knows the shared passphrase can read it and run `lore blame`.
 - **Global store** (`lore sync --global`): a private aggregate of all your sessions across every tool and repo, for multi-machine backup.
