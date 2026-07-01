@@ -231,6 +231,12 @@ pub fn resolve_ref(repo: &Path, ref_name: &str) -> Result<Option<String>, SyncEr
 }
 
 /// Resolves a ref to its tree SHA, or `None` if the ref does not exist.
+///
+/// Part of the git-ref sync foundation's public API. Retained for the global
+/// store and daemon wiring in later phases; the per-repo command resolves
+/// commits via [`resolve_ref`] and reads trees via [`read_tree`], so the binary
+/// does not yet call this directly.
+#[allow(dead_code)]
 pub fn resolve_tree(repo: &Path, ref_name: &str) -> Result<Option<String>, SyncError> {
     resolve_revision(repo, &format!("{ref_name}^{{tree}}"))
 }

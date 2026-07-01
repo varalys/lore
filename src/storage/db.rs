@@ -632,9 +632,25 @@ impl Database {
         synced_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
+        Self::write_session_with_messages(&tx, session, messages, synced_at)?;
+        tx.commit()?;
+        Ok(())
+    }
 
+    /// Writes a session and its messages using the given connection.
+    ///
+    /// Shared by [`Self::import_session_with_messages`] and
+    /// [`Self::merge_remote_record`] so both the plain import and the atomic
+    /// remote-merge transaction apply identical session and message SQL. The
+    /// caller owns the transaction boundary; this function never commits.
+    fn write_session_with_messages(
+        conn: &Connection,
+        session: &Session,
+        messages: &[Message],
+        synced_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
         // Insert session
-        tx.execute(
+        conn.execute(
             r#"
             INSERT INTO sessions (id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id, synced_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
@@ -660,13 +676,13 @@ impl Database {
         )?;
 
         // Insert into sessions_fts for metadata search
-        let fts_count: i32 = tx.query_row(
+        let fts_count: i32 = conn.query_row(
             "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
             params![session.id.to_string()],
             |row| row.get(0),
         )?;
         if fts_count == 0 {
-            tx.execute(
+            conn.execute(
                 "INSERT INTO sessions_fts (session_id, tool, working_directory, git_branch) VALUES (?1, ?2, ?3, ?4)",
                 params![
                     session.id.to_string(),
@@ -681,7 +697,7 @@ impl Database {
         for message in messages {
             let content_json = serde_json::to_string(&message.content)?;
 
-            let rows_changed = tx.execute(
+            let rows_changed = conn.execute(
                 r#"
                 INSERT INTO messages (id, session_id, parent_id, idx, timestamp, role, content, model, git_branch, cwd)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -705,7 +721,7 @@ impl Database {
             if rows_changed > 0 {
                 let text_content = message.content.text();
                 if !text_content.is_empty() {
-                    tx.execute(
+                    conn.execute(
                         "INSERT INTO messages_fts (message_id, text_content) VALUES (?1, ?2)",
                         params![message.id.to_string(), text_content],
                     )?;
@@ -713,8 +729,128 @@ impl Database {
             }
         }
 
-        tx.commit()?;
         Ok(())
+    }
+
+    /// Resets a session's `synced_at` to NULL so a later sync re-exports it.
+    ///
+    /// Called after any local edit to a session's child records (links, tags,
+    /// annotations, summary). Auto-linking and auto-summarizing frequently happen
+    /// after a session has already synced, so without clearing `synced_at` the
+    /// added child would never be re-encrypted and pushed. The remote-merge path
+    /// (the `upsert_*` methods and [`Self::merge_remote_record`]) deliberately
+    /// does NOT call this: marking a just-pulled session as needing a push would
+    /// bounce the same record back to the remote in a sync loop.
+    fn mark_session_unsynced(&self, session_id: &Uuid) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET synced_at = NULL WHERE id = ?1",
+            params![session_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Merges a full remote reasoning record into the database atomically.
+    ///
+    /// Used by git-ref sync when pulling a remote store. The session row,
+    /// messages, and every child record are persisted inside a single
+    /// transaction, so a crash can never leave child data missing while the
+    /// session already looks synced and current. Merge rules:
+    ///
+    /// - Session row and messages use newer-wins: they are written only when
+    ///   there is no local session yet or the remote session is newer (more
+    ///   messages, or an equal message count with a later `ended_at`). When
+    ///   written, the session is marked synced with `synced_at`.
+    /// - Links, tags, and annotations are additive and idempotent by id, so they
+    ///   are always merged regardless of which session row is newer. This lets a
+    ///   remote that added a child to an already-synced (equal or older) session
+    ///   still deliver that child locally.
+    /// - The summary is applied through the newer-wins writer, so an older remote
+    ///   summary never clobbers a newer local one.
+    ///
+    /// Known limitation: child merges are additive, so a link/tag/annotation
+    /// DELETED on another machine is not removed here (and can be resurrected on a
+    /// later export). Propagating deletions needs tombstones; tracked as a Phase
+    /// 29.8 follow-up. This is intentional for the first sync release: additive
+    /// merge never loses or corrupts data.
+    ///
+    /// Returns `true` when the session row and messages were written (the
+    /// newer-wins branch ran), which callers use for the pulled count.
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_remote_record(
+        &mut self,
+        session: &Session,
+        messages: &[Message],
+        links: &[SessionLink],
+        tags: &[Tag],
+        annotations: &[Annotation],
+        summary: Option<&Summary>,
+        synced_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+
+        // Read the local session's newer-wins keys (if it exists) inside the
+        // transaction so the decision and the writes are one atomic unit.
+        let existing: Option<(i32, Option<String>)> = tx
+            .query_row(
+                "SELECT message_count, ended_at FROM sessions WHERE id = ?1",
+                params![session.id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        let import_session = match &existing {
+            None => true,
+            Some((local_count, local_ended)) => {
+                Self::remote_row_is_newer(session, *local_count, local_ended.as_deref())?
+            }
+        };
+
+        if import_session {
+            Self::write_session_with_messages(&tx, session, messages, Some(synced_at))?;
+        }
+
+        // Child records are additive and idempotent by id: always merge them so a
+        // remote addition to an equal-or-older session is not lost.
+        for link in links {
+            Self::write_link(&tx, link, true)?;
+        }
+        for tag in tags {
+            Self::write_tag(&tx, tag, true)?;
+        }
+        for annotation in annotations {
+            Self::write_annotation(&tx, annotation, true)?;
+        }
+        if let Some(summary) = summary {
+            Self::write_summary_newer(&tx, summary)?;
+        }
+
+        tx.commit()?;
+        Ok(import_session)
+    }
+
+    /// Newer-wins comparison for a remote session against a local row.
+    ///
+    /// Mirrors the historical sync rule: a strictly higher remote message count
+    /// wins outright; otherwise a later `ended_at` wins (a remote `ended_at`
+    /// against a local NULL also wins). `local_ended` is the stored RFC3339
+    /// string, parsed for the comparison.
+    fn remote_row_is_newer(
+        remote: &Session,
+        local_count: i32,
+        local_ended: Option<&str>,
+    ) -> Result<bool> {
+        if remote.message_count > local_count {
+            return Ok(true);
+        }
+        let local_ended = match local_ended {
+            Some(s) => Some(parse_datetime(s)?),
+            None => None,
+        };
+        Ok(match (remote.ended_at, local_ended) {
+            (Some(r), Some(l)) => r > l,
+            (Some(_), None) => true,
+            _ => false,
+        })
     }
 
     /// Retrieves all messages for a session, ordered by index.
@@ -801,11 +937,33 @@ impl Database {
     /// Links can be created manually by users or automatically by
     /// the auto-linking system based on time and file overlap heuristics.
     pub fn insert_link(&self, link: &SessionLink) -> Result<()> {
-        self.conn.execute(
+        Self::write_link(&self.conn, link, false)?;
+        // Local edit: re-open the parent session for the next sync.
+        self.mark_session_unsynced(&link.session_id)?;
+        Ok(())
+    }
+
+    /// Writes a session link using the given connection.
+    ///
+    /// When `ignore_conflict` is true an existing id is left untouched
+    /// (`ON CONFLICT DO NOTHING`), which the remote-merge path needs for
+    /// idempotency. Shared by [`Self::insert_link`] (local edit) and
+    /// [`Self::merge_remote_record`] (merge path) so both use identical SQL.
+    fn write_link(conn: &Connection, link: &SessionLink, ignore_conflict: bool) -> Result<()> {
+        let sql = if ignore_conflict {
             r#"
             INSERT INTO session_links (id, session_id, link_type, commit_sha, branch, remote, created_at, created_by, confidence)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-            "#,
+            ON CONFLICT(id) DO NOTHING
+            "#
+        } else {
+            r#"
+            INSERT INTO session_links (id, session_id, link_type, commit_sha, branch, remote, created_at, created_by, confidence)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#
+        };
+        conn.execute(
+            sql,
             params![
                 link.id.to_string(),
                 link.session_id.to_string(),
@@ -891,10 +1049,25 @@ impl Database {
     /// though the CLI currently uses session/commit-based deletion.
     #[allow(dead_code)]
     pub fn delete_link(&self, link_id: &Uuid) -> Result<bool> {
+        // Look up the parent session before deleting so the removal can be
+        // reflected on the next sync.
+        let session_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT session_id FROM session_links WHERE id = ?1",
+                params![link_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
         let rows_affected = self.conn.execute(
             "DELETE FROM session_links WHERE id = ?1",
             params![link_id.to_string()],
         )?;
+        if rows_affected > 0 {
+            if let Some(sid) = session_id {
+                self.mark_session_unsynced(&parse_uuid(&sid)?)?;
+            }
+        }
         Ok(rows_affected > 0)
     }
 
@@ -906,6 +1079,10 @@ impl Database {
             "DELETE FROM session_links WHERE session_id = ?1",
             params![session_id.to_string()],
         )?;
+        if rows_affected > 0 {
+            // Local edit: re-open the parent session for the next sync.
+            self.mark_session_unsynced(session_id)?;
+        }
         Ok(rows_affected)
     }
 
@@ -923,6 +1100,10 @@ impl Database {
             "DELETE FROM session_links WHERE session_id = ?1 AND commit_sha LIKE ?2",
             params![session_id.to_string(), pattern],
         )?;
+        if rows_affected > 0 {
+            // Local edit: re-open the parent session for the next sync.
+            self.mark_session_unsynced(session_id)?;
+        }
         Ok(rows_affected > 0)
     }
 
@@ -1745,11 +1926,36 @@ impl Database {
     ///
     /// Annotations are user-created bookmarks or notes attached to sessions.
     pub fn insert_annotation(&self, annotation: &Annotation) -> Result<()> {
-        self.conn.execute(
+        Self::write_annotation(&self.conn, annotation, false)?;
+        // Local edit: re-open the parent session for the next sync.
+        self.mark_session_unsynced(&annotation.session_id)?;
+        Ok(())
+    }
+
+    /// Writes an annotation using the given connection.
+    ///
+    /// When `ignore_conflict` is true an existing id is left untouched, which the
+    /// merge path needs for idempotency. Shared by [`Self::insert_annotation`]
+    /// (local edit) and [`Self::merge_remote_record`] (merge path).
+    fn write_annotation(
+        conn: &Connection,
+        annotation: &Annotation,
+        ignore_conflict: bool,
+    ) -> Result<()> {
+        let sql = if ignore_conflict {
             r#"
             INSERT INTO annotations (id, session_id, content, created_at)
             VALUES (?1, ?2, ?3, ?4)
-            "#,
+            ON CONFLICT(id) DO NOTHING
+            "#
+        } else {
+            r#"
+            INSERT INTO annotations (id, session_id, content, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#
+        };
+        conn.execute(
+            sql,
             params![
                 annotation.id.to_string(),
                 annotation.session_id.to_string(),
@@ -1763,7 +1969,6 @@ impl Database {
     /// Retrieves all annotations for a session.
     ///
     /// Annotations are returned in order of creation (oldest first).
-    #[allow(dead_code)]
     pub fn get_annotations(&self, session_id: &Uuid) -> Result<Vec<Annotation>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, content, created_at
@@ -1790,10 +1995,25 @@ impl Database {
     /// Returns `true` if an annotation was deleted, `false` if not found.
     #[allow(dead_code)]
     pub fn delete_annotation(&self, annotation_id: &Uuid) -> Result<bool> {
+        // Look up the parent session before deleting so the removal can be
+        // reflected on the next sync.
+        let session_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT session_id FROM annotations WHERE id = ?1",
+                params![annotation_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
         let rows_affected = self.conn.execute(
             "DELETE FROM annotations WHERE id = ?1",
             params![annotation_id.to_string()],
         )?;
+        if rows_affected > 0 {
+            if let Some(sid) = session_id {
+                self.mark_session_unsynced(&parse_uuid(&sid)?)?;
+            }
+        }
         Ok(rows_affected > 0)
     }
 
@@ -1806,6 +2026,10 @@ impl Database {
             "DELETE FROM annotations WHERE session_id = ?1",
             params![session_id.to_string()],
         )?;
+        if rows_affected > 0 {
+            // Local edit: re-open the parent session for the next sync.
+            self.mark_session_unsynced(session_id)?;
+        }
         Ok(rows_affected)
     }
 
@@ -1816,11 +2040,33 @@ impl Database {
     /// Tags are unique per session, so attempting to add a duplicate
     /// tag label to the same session will fail with a constraint error.
     pub fn insert_tag(&self, tag: &Tag) -> Result<()> {
-        self.conn.execute(
+        Self::write_tag(&self.conn, tag, false)?;
+        // Local edit: re-open the parent session for the next sync.
+        self.mark_session_unsynced(&tag.session_id)?;
+        Ok(())
+    }
+
+    /// Writes a tag using the given connection.
+    ///
+    /// When `ignore_conflict` is true, both the primary key and the
+    /// `UNIQUE(session_id, label)` conflicts are ignored, which the merge path
+    /// needs for idempotency. Shared by [`Self::insert_tag`] (local edit) and
+    /// [`Self::merge_remote_record`] (merge path).
+    fn write_tag(conn: &Connection, tag: &Tag, ignore_conflict: bool) -> Result<()> {
+        let sql = if ignore_conflict {
             r#"
             INSERT INTO tags (id, session_id, label, created_at)
             VALUES (?1, ?2, ?3, ?4)
-            "#,
+            ON CONFLICT DO NOTHING
+            "#
+        } else {
+            r#"
+            INSERT INTO tags (id, session_id, label, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#
+        };
+        conn.execute(
+            sql,
             params![
                 tag.id.to_string(),
                 tag.session_id.to_string(),
@@ -1873,6 +2119,10 @@ impl Database {
             "DELETE FROM tags WHERE session_id = ?1 AND label = ?2",
             params![session_id.to_string(), label],
         )?;
+        if rows_affected > 0 {
+            // Local edit: re-open the parent session for the next sync.
+            self.mark_session_unsynced(session_id)?;
+        }
         Ok(rows_affected > 0)
     }
 
@@ -1885,6 +2135,10 @@ impl Database {
             "DELETE FROM tags WHERE session_id = ?1",
             params![session_id.to_string()],
         )?;
+        if rows_affected > 0 {
+            // Local edit: re-open the parent session for the next sync.
+            self.mark_session_unsynced(session_id)?;
+        }
         Ok(rows_affected)
     }
 
@@ -1919,6 +2173,36 @@ impl Database {
             r#"
             INSERT INTO summaries (id, session_id, content, generated_at)
             VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                summary.id.to_string(),
+                summary.session_id.to_string(),
+                summary.content,
+                summary.generated_at.to_rfc3339(),
+            ],
+        )?;
+        // Local edit: re-open the parent session for the next sync.
+        self.mark_session_unsynced(&summary.session_id)?;
+        Ok(())
+    }
+
+    /// Writes a summary using the given connection, keeping the newer of the two.
+    ///
+    /// On a `session_id` conflict the existing row is updated only when the
+    /// incoming `generated_at` is strictly greater. RFC3339 UTC timestamps sort
+    /// lexicographically, so the string comparison matches chronological order.
+    /// Comparing timestamps (rather than blindly overwriting) means an older
+    /// remote summary can never clobber a newer local one. Used by the merge path
+    /// [`Self::merge_remote_record`].
+    fn write_summary_newer(conn: &Connection, summary: &Summary) -> Result<()> {
+        conn.execute(
+            r#"
+            INSERT INTO summaries (id, session_id, content, generated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(session_id) DO UPDATE SET
+                content = excluded.content,
+                generated_at = excluded.generated_at
+            WHERE excluded.generated_at > generated_at
             "#,
             params![
                 summary.id.to_string(),
@@ -1997,6 +2281,10 @@ impl Database {
             "UPDATE summaries SET content = ?1, generated_at = ?2 WHERE session_id = ?3",
             params![content, now, session_id.to_string()],
         )?;
+        if rows_affected > 0 {
+            // Local edit: re-open the parent session for the next sync.
+            self.mark_session_unsynced(session_id)?;
+        }
         Ok(rows_affected > 0)
     }
 
@@ -2009,6 +2297,10 @@ impl Database {
             "DELETE FROM summaries WHERE session_id = ?1",
             params![session_id.to_string()],
         )?;
+        if rows_affected > 0 {
+            // Local edit: re-open the parent session for the next sync.
+            self.mark_session_unsynced(session_id)?;
+        }
         Ok(rows_affected > 0)
     }
 
@@ -6107,6 +6399,319 @@ mod tests {
             (avg_val - 15.0).abs() < 0.01,
             "Average should be 15.0, got {}",
             avg_val
+        );
+    }
+
+    // ============ Remote-Merge Tests (git-ref sync child records) ============
+
+    use crate::storage::models::{Annotation, Summary, Tag};
+
+    /// Imports a session as already synced so merges can target an existing row.
+    fn seed_synced_session(db: &mut Database, message_count: i32) -> Session {
+        let mut session = create_test_session("claude-code", "/project", Utc::now(), None);
+        session.message_count = message_count;
+        db.import_session_with_messages(&session, &[], Some(Utc::now()))
+            .unwrap();
+        session
+    }
+
+    #[test]
+    fn test_merge_link_is_idempotent() {
+        let (mut db, _dir) = create_test_db();
+        let session = seed_synced_session(&mut db, 1);
+
+        let link = create_test_link(session.id, Some("abc123"), LinkType::Commit);
+
+        // First merge inserts the link, a second merge with the same id is a no-op.
+        let links_in = std::slice::from_ref(&link);
+        db.merge_remote_record(&session, &[], links_in, &[], &[], None, Utc::now())
+            .unwrap();
+        db.merge_remote_record(&session, &[], links_in, &[], &[], None, Utc::now())
+            .unwrap();
+
+        let links = db.get_links_by_session(&session.id).unwrap();
+        assert_eq!(
+            links.len(),
+            1,
+            "Re-merging the same link must not duplicate"
+        );
+        assert_eq!(links[0].id, link.id);
+    }
+
+    #[test]
+    fn test_merge_tag_idempotent_by_id_and_label() {
+        let (mut db, _dir) = create_test_db();
+        let session = seed_synced_session(&mut db, 1);
+
+        let tag = Tag {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            label: "bug-fix".to_string(),
+            created_at: Utc::now(),
+        };
+        // A different id but the same (session, label) also collapses to a no-op.
+        let tag_same_label = Tag {
+            id: Uuid::new_v4(),
+            ..tag.clone()
+        };
+
+        let tags_in = std::slice::from_ref(&tag);
+        db.merge_remote_record(&session, &[], &[], tags_in, &[], None, Utc::now())
+            .unwrap();
+        db.merge_remote_record(&session, &[], &[], tags_in, &[], None, Utc::now())
+            .unwrap();
+        db.merge_remote_record(
+            &session,
+            &[],
+            &[],
+            std::slice::from_ref(&tag_same_label),
+            &[],
+            None,
+            Utc::now(),
+        )
+        .unwrap();
+
+        let tags = db.get_tags(&session.id).unwrap();
+        assert_eq!(
+            tags.len(),
+            1,
+            "Duplicate tag label must not be inserted twice"
+        );
+        assert_eq!(tags[0].label, "bug-fix");
+    }
+
+    #[test]
+    fn test_merge_annotation_is_idempotent() {
+        let (mut db, _dir) = create_test_db();
+        let session = seed_synced_session(&mut db, 1);
+
+        let annotation = Annotation {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "important".to_string(),
+            created_at: Utc::now(),
+        };
+
+        let annotations_in = std::slice::from_ref(&annotation);
+        db.merge_remote_record(&session, &[], &[], &[], annotations_in, None, Utc::now())
+            .unwrap();
+        db.merge_remote_record(&session, &[], &[], &[], annotations_in, None, Utc::now())
+            .unwrap();
+
+        let annotations = db.get_annotations(&session.id).unwrap();
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].content, "important");
+    }
+
+    #[test]
+    fn test_merge_summary_newer_wins() {
+        let (mut db, _dir) = create_test_db();
+        let session = seed_synced_session(&mut db, 1);
+
+        let base = Utc::now();
+        let summary = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "first".to_string(),
+            generated_at: base,
+        };
+        db.merge_remote_record(&session, &[], &[], &[], &[], Some(&summary), Utc::now())
+            .unwrap();
+
+        // A strictly newer summary for the same session refreshes the content.
+        let updated = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "second".to_string(),
+            generated_at: base + Duration::seconds(1),
+        };
+        db.merge_remote_record(&session, &[], &[], &[], &[], Some(&updated), Utc::now())
+            .unwrap();
+
+        let stored = db
+            .get_summary(&session.id)
+            .unwrap()
+            .expect("summary exists");
+        assert_eq!(stored.content, "second", "Newer content should win");
+    }
+
+    #[test]
+    fn test_merge_summary_older_does_not_overwrite_newer() {
+        let (mut db, _dir) = create_test_db();
+        let session = seed_synced_session(&mut db, 1);
+
+        let base = Utc::now();
+        let newer = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "newer local".to_string(),
+            generated_at: base,
+        };
+        db.merge_remote_record(&session, &[], &[], &[], &[], Some(&newer), Utc::now())
+            .unwrap();
+
+        // An older incoming summary must not clobber the newer stored one.
+        let older = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "older remote".to_string(),
+            generated_at: base - Duration::seconds(60),
+        };
+        db.merge_remote_record(&session, &[], &[], &[], &[], Some(&older), Utc::now())
+            .unwrap();
+
+        let stored = db
+            .get_summary(&session.id)
+            .unwrap()
+            .expect("summary exists");
+        assert_eq!(
+            stored.content, "newer local",
+            "older summary must not overwrite a newer one"
+        );
+    }
+
+    #[test]
+    fn test_insert_link_clears_parent_synced_at() {
+        let (mut db, _dir) = create_test_db();
+        let mut session = create_test_session("claude-code", "/project", Utc::now(), None);
+        session.message_count = 0;
+
+        // Import as already synced (synced_at set), then add a link locally.
+        db.import_session_with_messages(&session, &[], Some(Utc::now()))
+            .unwrap();
+        assert_eq!(
+            db.get_unsynced_sessions().unwrap().len(),
+            0,
+            "session should start synced"
+        );
+
+        db.insert_link(&SessionLink {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            link_type: LinkType::Commit,
+            commit_sha: Some("abcdef".to_string()),
+            branch: None,
+            remote: None,
+            created_at: Utc::now(),
+            created_by: LinkCreator::User,
+            confidence: None,
+        })
+        .unwrap();
+
+        let unsynced = db.get_unsynced_sessions().unwrap();
+        assert_eq!(
+            unsynced.len(),
+            1,
+            "adding a link must re-open the parent session for sync"
+        );
+        assert_eq!(unsynced[0].id, session.id);
+    }
+
+    #[test]
+    fn test_merge_remote_record_imports_child_on_equal_session() {
+        let (mut db, _dir) = create_test_db();
+        let mut session = create_test_session("claude-code", "/project", Utc::now(), None);
+        session.message_count = 1;
+
+        // Local session already present and synced, with no children.
+        db.import_session_with_messages(&session, &[], Some(Utc::now()))
+            .unwrap();
+
+        // A remote record with the SAME session (not newer) but a new link.
+        let link = SessionLink {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            link_type: LinkType::Commit,
+            commit_sha: Some("cafe".to_string()),
+            branch: None,
+            remote: None,
+            created_at: Utc::now(),
+            created_by: LinkCreator::Auto,
+            confidence: None,
+        };
+        let imported = db
+            .merge_remote_record(&session, &[], &[link], &[], &[], None, Utc::now())
+            .unwrap();
+
+        assert!(
+            !imported,
+            "an equal session row must not count as a pulled session"
+        );
+        let links = db.get_links_by_session(&session.id).unwrap();
+        assert_eq!(
+            links.len(),
+            1,
+            "the remote-only link must still be merged in"
+        );
+        assert_eq!(links[0].commit_sha, Some("cafe".to_string()));
+    }
+
+    #[test]
+    fn test_merge_remote_record_persists_full_record() {
+        // A brand-new record merges its session, messages, and every child record
+        // in one call, all landing together (single transaction).
+        let (mut db, _dir) = create_test_db();
+        let mut session = create_test_session("claude-code", "/project", Utc::now(), None);
+        session.message_count = 1;
+
+        let message = Message {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            parent_id: None,
+            index: 0,
+            timestamp: Utc::now(),
+            role: MessageRole::User,
+            content: MessageContent::Text("hello".to_string()),
+            model: None,
+            git_branch: None,
+            cwd: None,
+        };
+        let link = create_test_link(session.id, Some("abc123"), LinkType::Commit);
+        let tag = Tag {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            label: "feature".to_string(),
+            created_at: Utc::now(),
+        };
+        let annotation = Annotation {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "note".to_string(),
+            created_at: Utc::now(),
+        };
+        let summary = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "did the thing".to_string(),
+            generated_at: Utc::now(),
+        };
+
+        let imported = db
+            .merge_remote_record(
+                &session,
+                &[message],
+                &[link],
+                &[tag],
+                &[annotation],
+                Some(&summary),
+                Utc::now(),
+            )
+            .unwrap();
+
+        assert!(imported, "a new session must count as pulled");
+        assert!(db.get_session(&session.id).unwrap().is_some());
+        assert_eq!(db.get_messages(&session.id).unwrap().len(), 1);
+        assert_eq!(db.get_links_by_session(&session.id).unwrap().len(), 1);
+        assert_eq!(db.get_tags(&session.id).unwrap().len(), 1);
+        assert_eq!(db.get_annotations(&session.id).unwrap().len(), 1);
+        assert_eq!(
+            db.get_summary(&session.id).unwrap().unwrap().content,
+            "did the thing"
+        );
+        // The merged session is marked synced, so it is not re-exported.
+        assert!(
+            db.get_unsynced_sessions().unwrap().is_empty(),
+            "a merged session must be marked synced"
         );
     }
 }
