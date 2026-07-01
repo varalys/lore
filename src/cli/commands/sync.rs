@@ -19,7 +19,7 @@
 //! All git access shells out through [`crate::sync::gitref`], inheriting the
 //! user's authentication and remotes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -124,6 +124,7 @@ struct SessionMeta {
 }
 
 /// Summary of a completed sync for reporting.
+#[derive(Debug)]
 struct SyncSummary {
     /// Sessions merged from the remote into the local database.
     pulled: usize,
@@ -327,8 +328,9 @@ fn perform_sync(
             Vec::new()
         };
 
-        // MERGE remote -> local database (full records, newer-wins).
-        pulled_total += merge_remote(db, repo, &tracking_entries, key, &machine.id)?;
+        // MERGE remote -> local database (full records, newer-wins). A wrong key
+        // surfaces here and aborts before anything is built or pushed.
+        pulled_total += merge_remote(db, repo, &tracking_entries, key)?;
         merge_machines(db, repo, &tracking_entries)?;
 
         // BUILD the outgoing tree. Base it on the remote commit when present so
@@ -340,10 +342,21 @@ fn perform_sync(
             }
             None => None,
         };
-        let base = tracking_commit.or(old_local.clone());
+        let base = tracking_commit.clone().or(old_local.clone());
 
         let unsynced = db.get_unsynced_sessions()?;
         let mut changes = build_session_changes(db, repo, key, &unsynced)?;
+
+        // When rebasing onto the remote tracking commit, carry forward any
+        // already-stored session artifacts that live only in the local ref (for
+        // example after a remote rewind), so no stored session is silently
+        // dropped from the outgoing tree.
+        if tracking_commit.is_some() {
+            if let Some(local_commit) = &old_local {
+                carry_forward_local_sessions(repo, local_commit, &tracking_entries, &mut changes)?;
+            }
+        }
+
         add_meta_changes(db, repo, base.as_deref(), salt, machine, &mut changes)?;
 
         let tree = gitref::build_tree(repo, base.as_deref(), &changes)?;
@@ -382,63 +395,72 @@ fn perform_sync(
 
 /// Merges every encrypted session in `entries` into the database.
 ///
-/// Applies newer-wins by (message_count, ended_at) and leaves the local copy
-/// untouched when it is at least as new (which also skips this machine's own
-/// in-progress sessions). Returns the number of sessions imported or updated.
+/// Each record is applied atomically by [`Database::merge_remote_record`]: the
+/// session row and messages follow newer-wins (by message_count then ended_at)
+/// while links, tags, and annotations are always merged (additive, idempotent by
+/// id) so a remote addition to an already-synced session is not lost, and the
+/// summary is kept only when strictly newer. Returns the number of sessions
+/// whose row was imported or updated (the newer-wins branch ran).
+///
+/// A blob that cannot be decrypted is normally skipped (corruption or a single
+/// stray entry). But if the store held session blobs and NONE of them decrypted,
+/// the stored key is wrong for this store, so this returns an error rather than
+/// letting the caller push locally re-encrypted sessions under the wrong key and
+/// mark them synced (which would poison the store).
 fn merge_remote(
     db: &mut Database,
     repo: &Path,
     entries: &[TreeEntry],
     key: &[u8],
-    _local_machine_id: &str,
 ) -> Result<usize> {
     let mut pulled = 0;
+    let mut session_blobs = 0;
+    let mut decrypted = 0;
 
     for entry in entries {
         if !is_session_blob(&entry.path) {
             continue;
         }
+        session_blobs += 1;
 
         let blob = gitref::read_blob(repo, &entry.sha)?;
         let record = match decrypt_session_record(&blob, key) {
             Ok(record) => record,
             Err(e) => {
                 // A blob we cannot decrypt (corrupt or a key mismatch on a
-                // single entry) must not abort the whole merge.
+                // single entry) must not abort the whole merge on its own; the
+                // wrong-key check below covers the all-failed case.
                 tracing::debug!("Skipping undecryptable session blob {}: {e}", entry.path);
                 continue;
             }
         };
+        decrypted += 1;
 
-        if let Some(existing) = db.get_session(&record.session.id)? {
-            if !remote_is_newer(&record.session, &existing) {
-                continue;
-            }
+        let imported = db.merge_remote_record(
+            &record.session,
+            &record.messages,
+            &record.links,
+            &record.tags,
+            &record.annotations,
+            record.summary.as_ref(),
+            Utc::now(),
+        )?;
+        if imported {
+            pulled += 1;
         }
+    }
 
-        persist_record(db, &record)?;
-        pulled += 1;
+    // If the store had sessions but not a single one decrypted, the key is wrong.
+    // Bail before the caller builds, pushes, and marks anything synced.
+    if session_blobs > 0 && decrypted == 0 {
+        bail!(
+            "Could not decrypt any of the {session_blobs} session(s) in the remote lore store. \
+             The sync key stored on this machine does not match this store's passphrase. \
+             Run 'lore sync setup' to re-enter the correct passphrase."
+        );
     }
 
     Ok(pulled)
-}
-
-/// Persists a full reasoning record, marking the session as synced.
-fn persist_record(db: &mut Database, record: &SessionRecord) -> Result<()> {
-    db.import_session_with_messages(&record.session, &record.messages, Some(Utc::now()))?;
-    for link in &record.links {
-        db.upsert_link(link)?;
-    }
-    for tag in &record.tags {
-        db.upsert_tag(tag)?;
-    }
-    for annotation in &record.annotations {
-        db.upsert_annotation(annotation)?;
-    }
-    if let Some(summary) = &record.summary {
-        db.upsert_summary(summary)?;
-    }
-    Ok(())
 }
 
 /// Merges the remote machine registry into the local database.
@@ -710,16 +732,38 @@ fn is_session_blob(path: &str) -> bool {
     path.starts_with("sessions/") && path.ends_with(".enc")
 }
 
-/// Newer-wins comparison: is the remote session newer than the local one?
-fn remote_is_newer(remote: &Session, local: &Session) -> bool {
-    if remote.message_count > local.message_count {
-        return true;
+/// Returns whether a tree path is a stored session artifact.
+///
+/// Covers both the encrypted record (`sessions/<id>.enc`) and its plaintext
+/// metadata sidecar (`sessions/<id>.meta.json`), the two entries a stored
+/// session contributes to the tree.
+fn is_session_path(path: &str) -> bool {
+    path.starts_with("sessions/") && (path.ends_with(".enc") || path.ends_with(".meta.json"))
+}
+
+/// Carries forward local-only session artifacts when rebasing on the remote.
+///
+/// When the outgoing tree is based on the remote tracking commit, any session
+/// entry present in the local ref but absent from the fetched remote tree (a
+/// remote rewind or reset, and whose session is already synced so it is not in
+/// the freshly re-encrypted set) would be dropped. This re-adds each such entry
+/// at its existing blob SHA. A freshly re-encrypted unsynced session already
+/// owns its paths in `changes`, so `or_insert` never overwrites those.
+fn carry_forward_local_sessions(
+    repo: &Path,
+    local_commit: &str,
+    tracking_entries: &[TreeEntry],
+    changes: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let tracking_paths: HashSet<&str> = tracking_entries.iter().map(|e| e.path.as_str()).collect();
+
+    for entry in gitref::read_tree(repo, local_commit)? {
+        if !is_session_path(&entry.path) || tracking_paths.contains(entry.path.as_str()) {
+            continue;
+        }
+        changes.entry(entry.path.clone()).or_insert(entry.sha);
     }
-    match (remote.ended_at, local.ended_at) {
-        (Some(r), Some(l)) => r > l,
-        (Some(_), None) => true,
-        _ => false,
-    }
+    Ok(())
 }
 
 /// Heuristically detects a non-fast-forward push rejection for retry.
@@ -819,6 +863,21 @@ mod tests {
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// Runs a git command in a test repo, asserting success and returning stdout.
+    fn git_out(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .expect("failed to spawn git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     /// Initializes a temp repo with an identity and signing disabled.
@@ -934,6 +993,17 @@ mod tests {
             .find(|e| is_session_blob(&e.path))
             .expect("a session blob should exist")
             .sha
+            .clone()
+    }
+
+    /// Returns the tree path of the single session `.enc` entry in the local ref.
+    fn session_blob_sha_path(repo: &Path) -> String {
+        let entries = gitref::read_tree(repo, SESSIONS_REF).unwrap();
+        entries
+            .iter()
+            .find(|e| is_session_blob(&e.path))
+            .expect("a session blob should exist")
+            .path
             .clone()
     }
 
@@ -1157,44 +1227,9 @@ mod tests {
             path: format!("sessions/{id}.enc"),
         }];
 
-        let pulled = merge_remote(&mut db, repo, &entries, &key, "machine-b").unwrap();
+        let pulled = merge_remote(&mut db, repo, &entries, &key).unwrap();
         assert_eq!(pulled, 0, "older remote session must be skipped");
         assert_eq!(db.get_session(&id).unwrap().unwrap().message_count, 2);
-    }
-
-    #[test]
-    fn test_remote_is_newer_rules() {
-        let base = Session {
-            id: Uuid::new_v4(),
-            tool: "t".to_string(),
-            tool_version: None,
-            started_at: Utc::now(),
-            ended_at: None,
-            model: None,
-            working_directory: "/p".to_string(),
-            git_branch: None,
-            source_path: None,
-            message_count: 5,
-            machine_id: None,
-        };
-
-        // More messages wins.
-        let mut more = base.clone();
-        more.message_count = 6;
-        assert!(remote_is_newer(&more, &base));
-
-        // Fewer messages loses.
-        let mut fewer = base.clone();
-        fewer.message_count = 4;
-        assert!(!remote_is_newer(&fewer, &base));
-
-        // Equal messages, later ended_at wins.
-        let mut local = base.clone();
-        local.ended_at = Some(Utc::now());
-        let mut remote = local.clone();
-        remote.ended_at = Some(local.ended_at.unwrap() + chrono::Duration::seconds(10));
-        assert!(remote_is_newer(&remote, &local));
-        assert!(!remote_is_newer(&local, &remote));
     }
 
     #[test]
@@ -1213,5 +1248,209 @@ mod tests {
         assert!(is_non_fast_forward(&rejected));
         let unrelated = SyncError::Git("git push origin failed: permission denied".to_string());
         assert!(!is_non_fast_forward(&unrelated));
+    }
+
+    #[test]
+    fn test_is_session_path() {
+        assert!(is_session_path("sessions/abc.enc"));
+        assert!(is_session_path("sessions/abc.meta.json"));
+        assert!(!is_session_path("meta/salt"));
+        assert!(!is_session_path("abc.enc"));
+    }
+
+    #[test]
+    fn test_added_link_reopens_session_and_syncs() {
+        // Adding a link to an already-synced session must re-export it, so the
+        // new link rides along to a teammate on the next sync.
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let passphrase = "shared team passphrase";
+
+        // Machine A: set up, seed a session, and sync it (push).
+        let dir_a = tempfile::tempdir().unwrap();
+        let repo_a = dir_a.path();
+        init_repo(repo_a);
+        git(repo_a, &["remote", "add", "origin", &remote_url]);
+        let (keystore_a, _ka) = test_keystore();
+        let ma = machine("machine-a", "Machine A");
+        create_store(repo_a, "origin", &keystore_a, &ma, passphrase).unwrap();
+
+        let (mut db_a, _da) = open_db();
+        let session_id = seed_full_session(&mut db_a, "machine-a");
+        let (key_a, salt_a) = load_store_credentials(repo_a, "origin", &keystore_a).unwrap();
+        let first = perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        assert_eq!(first.pushed, 1);
+
+        // The session is now synced; adding a link locally must re-open it.
+        db_a.insert_link(&SessionLink {
+            id: Uuid::new_v4(),
+            session_id,
+            link_type: LinkType::Commit,
+            commit_sha: Some("feedface".to_string()),
+            branch: Some("main".to_string()),
+            remote: Some("origin".to_string()),
+            created_at: Utc::now(),
+            created_by: LinkCreator::Auto,
+            confidence: Some(0.8),
+        })
+        .unwrap();
+
+        let second = perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        assert_eq!(
+            second.pushed, 1,
+            "adding a link must re-export the parent session"
+        );
+
+        // Machine B joins and pulls: it must see both links.
+        let dir_b = tempfile::tempdir().unwrap();
+        let repo_b = dir_b.path();
+        init_repo(repo_b);
+        git(repo_b, &["remote", "add", "origin", &remote_url]);
+        let (keystore_b, _kb) = test_keystore();
+        let mb = machine("machine-b", "Machine B");
+        gitref::fetch(repo_b, "origin", SESSIONS_REF).unwrap();
+        let salt_b = read_store_salt(repo_b, "origin").unwrap().unwrap();
+        join_store(repo_b, "origin", &keystore_b, &mb, &salt_b, passphrase).unwrap();
+        let (mut db_b, _db) = open_db();
+        let (key_b, salt_b2) = load_store_credentials(repo_b, "origin", &keystore_b).unwrap();
+        perform_sync(&mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb).unwrap();
+
+        let links = db_b.get_links_by_session(&session_id).unwrap();
+        assert_eq!(links.len(), 2, "both links must reach the teammate");
+    }
+
+    #[test]
+    fn test_wrong_key_errors_before_push() {
+        // A sync whose stored key does not match a non-empty remote store must
+        // error before pushing, and must not mark local sessions synced.
+        let (_remote_dir, remote_url) = init_bare_remote();
+
+        // Machine A creates the store and pushes a real (correctly keyed) session.
+        let dir_a = tempfile::tempdir().unwrap();
+        let repo_a = dir_a.path();
+        init_repo(repo_a);
+        git(repo_a, &["remote", "add", "origin", &remote_url]);
+        let (keystore_a, _ka) = test_keystore();
+        let ma = machine("machine-a", "Machine A");
+        create_store(repo_a, "origin", &keystore_a, &ma, "the real passphrase").unwrap();
+        let (mut db_a, _da) = open_db();
+        seed_full_session(&mut db_a, "machine-a");
+        let (key_a, salt_a) = load_store_credentials(repo_a, "origin", &keystore_a).unwrap();
+        perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+
+        // Machine B stores a WRONG key for the same store (same salt, bad pass).
+        let dir_b = tempfile::tempdir().unwrap();
+        let repo_b = dir_b.path();
+        init_repo(repo_b);
+        git(repo_b, &["remote", "add", "origin", &remote_url]);
+        let (keystore_b, _kb) = test_keystore();
+        let mb = machine("machine-b", "Machine B");
+        gitref::fetch(repo_b, "origin", SESSIONS_REF).unwrap();
+        let salt_b = read_store_salt(repo_b, "origin").unwrap().unwrap();
+        let wrong_key = derive_store_key("the WRONG passphrase", &salt_b).unwrap();
+        keystore_b
+            .store_key(&store_id_from_salt(&salt_b), &wrong_key)
+            .unwrap();
+
+        // Machine B has a local unsynced session that must not be pushed/marked.
+        let (mut db_b, _db) = open_db();
+        let local_id = seed_full_session(&mut db_b, "machine-b");
+
+        let err = perform_sync(&mut db_b, repo_b, "origin", &wrong_key, &salt_b, &mb).unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("passphrase") || msg.contains("decrypt"),
+            "wrong key must be reported clearly: {err}"
+        );
+
+        // The local session must remain unsynced (nothing was pushed).
+        let unsynced = db_b.get_unsynced_sessions().unwrap();
+        assert!(
+            unsynced.iter().any(|s| s.id == local_id),
+            "local session must not be marked synced after a wrong-key failure"
+        );
+    }
+
+    #[test]
+    fn test_carry_forward_local_sessions_readds_missing() {
+        // A session artifact present only in the local ref (missing from the
+        // fetched remote tree) must be carried into the outgoing changes.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+
+        let enc_sha = gitref::write_blob(repo, b"local-a-enc").unwrap();
+        let meta_sha = gitref::write_blob(repo, b"local-a-meta").unwrap();
+        let other_sha = gitref::write_blob(repo, b"remote-b-enc").unwrap();
+
+        let mut local = BTreeMap::new();
+        local.insert("sessions/a.enc".to_string(), enc_sha.clone());
+        local.insert("sessions/a.meta.json".to_string(), meta_sha.clone());
+        local.insert("sessions/b.enc".to_string(), other_sha.clone());
+        let local_tree = gitref::build_tree(repo, None, &local).unwrap();
+        let local_commit = gitref::commit_tree(repo, &local_tree, None, "lore: local").unwrap();
+
+        // The remote (tracking) tree only has session b.
+        let tracking = vec![TreeEntry {
+            mode: "100644".to_string(),
+            sha: other_sha,
+            path: "sessions/b.enc".to_string(),
+        }];
+
+        // A freshly re-encrypted unsynced session owns its own path already.
+        let mut changes = BTreeMap::new();
+        changes.insert("sessions/a.enc".to_string(), "fresh-sha".to_string());
+
+        carry_forward_local_sessions(repo, &local_commit, &tracking, &mut changes).unwrap();
+
+        // a.meta.json (local-only) is carried forward.
+        assert_eq!(changes.get("sessions/a.meta.json"), Some(&meta_sha));
+        // a.enc keeps the fresh re-encrypted value (or_insert must not override).
+        assert_eq!(
+            changes.get("sessions/a.enc"),
+            Some(&"fresh-sha".to_string())
+        );
+        // b.enc is in the tracking tree, so it is not re-added.
+        assert!(!changes.contains_key("sessions/b.enc"));
+    }
+
+    #[test]
+    fn test_local_only_session_survives_remote_rewind() {
+        // If the remote store rewinds to before a session, a sync that rebases on
+        // the remote must still keep the already-stored local session.
+        let (remote_dir, remote_url) = init_bare_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(repo, &["remote", "add", "origin", &remote_url]);
+
+        let (keystore, _kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(repo, "origin", &keystore, &m, "passphrase abcdefgh").unwrap();
+
+        // The store-setup commit (no sessions) is our rewind target.
+        let setup_commit = git_out(remote_dir.path(), &["rev-parse", SESSIONS_REF]);
+
+        let (mut db, _dd) = open_db();
+        seed_full_session(&mut db, "machine-a");
+        let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
+        perform_sync(&mut db, repo, "origin", &key, &salt, &m).unwrap();
+
+        let session_enc = session_blob_sha_path(repo);
+
+        // Simulate a remote rewind: force the remote lore ref back to setup.
+        git(
+            remote_dir.path(),
+            &["update-ref", SESSIONS_REF, setup_commit.trim()],
+        );
+
+        // Sync again. The already-synced session is not rebuilt, so only the
+        // carry-forward keeps it in the outgoing tree.
+        perform_sync(&mut db, repo, "origin", &key, &salt, &m).unwrap();
+
+        let entries = gitref::read_tree(repo, SESSIONS_REF).unwrap();
+        assert!(
+            entries.iter().any(|e| e.path == session_enc),
+            "local-only session must survive a remote rewind"
+        );
     }
 }
