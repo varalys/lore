@@ -65,7 +65,8 @@ const PROMPT_TIMEOUT_SECS: u64 = 30;
     lore link abc123         Link session to HEAD\n    \
     lore search \"auth\"       Search sessions for text\n    \
     lore insights            Show AI development insights\n    \
-    lore daemon start        Start background watcher\n\n\
+    lore hooks install       Auto-link and sync on git commit/push\n    \
+    lore daemon start        Start background watcher (optional)\n\n\
     For more information about a command, run 'lore <command> --help'.")]
 pub struct Cli {
     #[command(subcommand)]
@@ -237,11 +238,13 @@ enum Commands {
     )]
     Insights(commands::insights::Args),
 
-    /// Manage git hooks for automatic session linking
+    /// Manage git hooks for automatic session linking and sync
     #[command(
         long_about = "Installs, uninstalls, or checks the status of git hooks that\n\
         integrate Lore with your git workflow. The post-commit hook\n\
-        automatically links sessions to commits."
+        automatically links sessions to commits, and the pre-push hook\n\
+        best-effort syncs reasoning history when you push (no daemon\n\
+        required); it never blocks the push."
     )]
     Hooks(commands::hooks::Args),
 
@@ -291,7 +294,9 @@ enum Commands {
         is no server and no per-seat fee.\n\n\
         Run 'lore sync setup' once per repo to set the passphrase, then\n\
         'lore sync' to fetch, merge, and push. Session content is encrypted\n\
-        with a passphrase that only you and your teammates know."
+        with a passphrase that only you and your teammates know.\n\n\
+        To automate sync without a background daemon, run 'lore hooks install':\n\
+        the pre-push hook best-effort syncs whenever you push code."
     )]
     Sync(commands::sync::Args),
 

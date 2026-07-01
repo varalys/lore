@@ -67,6 +67,14 @@ pub struct Args {
     /// Remote to sync the lore store with (default: origin).
     #[arg(long, global = true, default_value = "origin")]
     pub remote: String,
+
+    /// Hook-friendly mode used by the pre-push hook.
+    ///
+    /// No-ops and exits 0 when this repo's store is not set up or no key is
+    /// stored on this machine, never prompts for a passphrase, and keeps output
+    /// minimal. Only affects a full sync (no subcommand).
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 /// Sync subcommands. When omitted, a full sync runs.
@@ -150,6 +158,7 @@ pub fn run(args: Args) -> Result<()> {
     match args.command {
         Some(SyncSubcommand::Setup) => run_setup(&args.remote),
         Some(SyncSubcommand::Status { format }) => run_status(&args.remote, format),
+        None if args.quiet => run_sync_quiet(&args.remote),
         None => run_sync(&args.remote),
     }
 }
@@ -297,6 +306,89 @@ fn run_sync(remote: &str) -> Result<()> {
         summary.pushed
     );
     Ok(())
+}
+
+/// Performs a hook-friendly sync used by the pre-push hook.
+///
+/// Skips silently (returns Ok without touching the config or database) when the
+/// repo's store is not set up or no key is stored on this machine, never
+/// prompts, and keeps output minimal. Sync errors are propagated so the caller
+/// (the pre-push hook) can surface a brief warning; they never block the push
+/// because the hook always exits 0.
+fn run_sync_quiet(remote: &str) -> Result<()> {
+    let repo = current_repo()?;
+    sync_quiet_in_repo(&repo, remote)
+}
+
+/// Core of the quiet sync for a resolved repository path.
+///
+/// Split from [`run_sync_quiet`] so it can be exercised in tests with a
+/// temporary repo rather than the process working directory.
+fn sync_quiet_in_repo(repo: &Path, remote: &str) -> Result<()> {
+    // git hands the pre-push hook the pushed remote's name, but it may be a raw
+    // URL or an unknown name; resolve it to a configured remote or skip.
+    let remote = match resolve_hook_remote(repo, remote)? {
+        Some(remote) => remote,
+        None => return Ok(()),
+    };
+
+    // Skip silently when the store is not set up. This check reads only local
+    // refs, so a repo that never opted into lore sync is a no-op that never
+    // touches the config or database.
+    let salt = match read_store_salt(repo, &remote)? {
+        Some(salt) => salt,
+        None => return Ok(()),
+    };
+
+    let mut config = Config::load()?;
+    let machine = machine_identity(&mut config)?;
+    let keystore = KeyStore::with_keychain(config.use_keychain);
+
+    // Skip silently when no key is stored on this machine. Quiet mode never
+    // prompts for a passphrase; the user runs 'lore sync setup' interactively.
+    let store_id = store_id_from_salt(&salt);
+    let key = match keystore.load_key(&store_id)? {
+        Some(key) => key,
+        None => return Ok(()),
+    };
+
+    let mut db = Database::open_default()?;
+    perform_sync(&mut db, repo, &remote, &key, &salt, &machine)?;
+    Ok(())
+}
+
+/// Resolves the remote to sync against for a hook invocation.
+///
+/// git passes the pushed remote's name (or a raw URL for an anonymous push) to
+/// the pre-push hook. When it names a configured remote, use it. Otherwise fall
+/// back to the default remote (`origin`) when configured, else return `None` so
+/// the caller skips gracefully rather than erroring on an unknown remote.
+fn resolve_hook_remote(repo: &Path, remote: &str) -> Result<Option<String>> {
+    let remotes = configured_remotes(repo)?;
+    if remotes.iter().any(|r| r == remote) {
+        return Ok(Some(remote.to_string()));
+    }
+    if remotes.iter().any(|r| r == "origin") {
+        return Ok(Some("origin".to_string()));
+    }
+    Ok(None)
+}
+
+/// Lists the names of remotes configured in the repository.
+fn configured_remotes(repo: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["remote"])
+        .output()
+        .context("Failed to run git remote")?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
 }
 
 /// Fetches, merges remote reasoning into the database, then builds and pushes.
@@ -1411,6 +1503,83 @@ mod tests {
         );
         // b.enc is in the tracking tree, so it is not re-added.
         assert!(!changes.contains_key("sessions/b.enc"));
+    }
+
+    #[test]
+    fn test_sync_quiet_noops_when_not_set_up() {
+        // A repo with a remote but no lore store must be a silent no-op. It must
+        // not error and must not touch the config or database (this test does
+        // not open ~/.lore, so reaching that code would surface as a failure).
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(repo, &["remote", "add", "origin", &remote_url]);
+
+        sync_quiet_in_repo(repo, "origin").expect("quiet sync must no-op when not set up");
+    }
+
+    #[test]
+    fn test_sync_quiet_noops_without_remote() {
+        // No configured remote at all: quiet sync skips gracefully.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+
+        sync_quiet_in_repo(repo, "origin").expect("quiet sync must no-op without a remote");
+    }
+
+    #[test]
+    fn test_resolve_hook_remote_prefers_named_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(
+            repo,
+            &["remote", "add", "origin", "https://example.com/a.git"],
+        );
+        git(
+            repo,
+            &["remote", "add", "upstream", "https://example.com/b.git"],
+        );
+
+        assert_eq!(
+            resolve_hook_remote(repo, "upstream").unwrap(),
+            Some("upstream".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_hook_remote_falls_back_to_origin_for_url() {
+        // git can pass a raw URL for an anonymous push; fall back to origin.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(
+            repo,
+            &["remote", "add", "origin", "https://example.com/a.git"],
+        );
+
+        assert_eq!(
+            resolve_hook_remote(repo, "https://example.com/other.git").unwrap(),
+            Some("origin".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_hook_remote_none_when_unknown_and_no_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(
+            repo,
+            &["remote", "add", "upstream", "https://example.com/b.git"],
+        );
+
+        assert_eq!(
+            resolve_hook_remote(repo, "https://example.com/x.git").unwrap(),
+            None
+        );
     }
 
     #[test]
