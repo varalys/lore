@@ -12,5 +12,8 @@
 //!
 //! - GitHub Copilot - Will parse from Copilot's logs
 
+/// Read-only mirror of a coding tool's per-project memory store.
+pub mod memory;
+
 /// Tool-specific session parsers.
 pub mod watchers;

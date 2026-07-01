@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use super::models::{
-    Annotation, Machine, Message, MessageContent, MessageRole, SearchResult, Session, SessionLink,
-    Summary, Tag, Tombstone,
+    Annotation, Machine, Memory, Message, MessageContent, MessageRole, SearchResult, Session,
+    SessionLink, Summary, Tag, Tombstone,
 };
 
 /// Tombstone kind for a deleted session-to-commit link.
@@ -325,6 +325,25 @@ impl Database {
                 created_at TEXT NOT NULL
             );
 
+            -- Read-only mirror of a coding tool's per-project memory store.
+            -- Each row is one markdown memory file mirrored from the tool's
+            -- memory folder. Scoped by (project_path, source_tool). The
+            -- (project_path, source_tool, file_path) triple is unique so a
+            -- refresh can upsert by source file. Lore never writes back to the
+            -- tool's own memory folder; this table is a read-only reflection.
+            CREATE TABLE IF NOT EXISTS memories (
+                id TEXT PRIMARY KEY,
+                project_path TEXT NOT NULL,
+                source_tool TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                memory_type TEXT,
+                content TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_path, source_tool, file_path)
+            );
+
             -- Tombstones record locally deleted child records so a deletion on
             -- one machine propagates through the sync store instead of being
             -- resurrected by the additive child merge. Keyed by (child_id, kind)
@@ -347,6 +366,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_tags_session_id ON tags(session_id);
             CREATE INDEX IF NOT EXISTS idx_tags_label ON tags(label);
             CREATE INDEX IF NOT EXISTS idx_tombstones_deleted_at ON tombstones(deleted_at);
+            CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_path, source_tool);
             "#,
         )?;
 
@@ -373,6 +393,21 @@ impl Database {
                 tool,
                 working_directory,
                 git_branch,
+                tokenize='porter unicode61'
+            );
+            "#,
+        )?;
+
+        // Create FTS5 virtual table for full-text search over mirrored memories.
+        // The memory_id column stores the UUID string for joining back to the
+        // memories table.
+        self.conn.execute_batch(
+            r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                memory_id,
+                name,
+                description,
+                content,
                 tokenize='porter unicode61'
             );
             "#,
@@ -2001,6 +2036,155 @@ impl Database {
         // Rebuild needed if we have messages/sessions but either FTS index is empty
         Ok((message_count > 0 && msg_fts_count == 0)
             || (session_count > 0 && session_fts_count == 0))
+    }
+
+    // ==================== Memories ====================
+
+    /// Maps a database row to a [`Memory`].
+    fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
+        Ok(Memory {
+            id: parse_uuid(&row.get::<_, String>(0)?)?,
+            project_path: row.get(1)?,
+            source_tool: row.get(2)?,
+            name: row.get(3)?,
+            description: row.get(4)?,
+            memory_type: row.get(5)?,
+            content: row.get(6)?,
+            file_path: row.get(7)?,
+            updated_at: parse_datetime(&row.get::<_, String>(8)?)?,
+        })
+    }
+
+    /// Inserts a mirrored memory or updates the existing one for the same source
+    /// file.
+    ///
+    /// Memories are uniquely identified by their
+    /// `(project_path, source_tool, file_path)` triple. If a memory already
+    /// exists for that source file its existing id is preserved and its fields
+    /// are updated in place. The `memories_fts` index is kept in sync so search
+    /// reflects the latest content. Returns the id of the stored memory.
+    pub fn upsert_memory(&self, memory: &Memory) -> Result<Uuid> {
+        // Preserve the existing id when the source file is already mirrored so
+        // that the FTS row and any external references stay stable.
+        let existing_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM memories WHERE project_path = ?1 AND source_tool = ?2 AND file_path = ?3",
+                params![memory.project_path, memory.source_tool, memory.file_path],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let id = match existing_id {
+            Some(s) => Uuid::parse_str(&s).unwrap_or(memory.id),
+            None => memory.id,
+        };
+
+        self.conn.execute(
+            r#"
+            INSERT INTO memories (id, project_path, source_tool, name, description, memory_type, content, file_path, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(project_path, source_tool, file_path) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                memory_type = excluded.memory_type,
+                content = excluded.content,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                id.to_string(),
+                memory.project_path,
+                memory.source_tool,
+                memory.name,
+                memory.description,
+                memory.memory_type,
+                memory.content,
+                memory.file_path,
+                memory.updated_at.to_rfc3339(),
+            ],
+        )?;
+
+        // Keep the FTS index in sync: replace any prior row for this memory.
+        self.conn.execute(
+            "DELETE FROM memories_fts WHERE memory_id = ?1",
+            params![id.to_string()],
+        )?;
+        self.conn.execute(
+            "INSERT INTO memories_fts (memory_id, name, description, content) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                id.to_string(),
+                memory.name,
+                memory.description.as_deref().unwrap_or(""),
+                memory.content,
+            ],
+        )?;
+
+        Ok(id)
+    }
+
+    /// Deletes a mirrored memory by id, also removing it from the FTS index.
+    ///
+    /// Returns true if a memory was deleted.
+    pub fn delete_memory(&self, id: &Uuid) -> Result<bool> {
+        self.conn.execute(
+            "DELETE FROM memories_fts WHERE memory_id = ?1",
+            params![id.to_string()],
+        )?;
+        let rows = self.conn.execute(
+            "DELETE FROM memories WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Returns all mirrored memories for a project and source tool.
+    ///
+    /// Results are ordered by name for stable display.
+    pub fn get_memories(&self, project_path: &str, source_tool: &str) -> Result<Vec<Memory>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_path, source_tool, name, description, memory_type, content, file_path, updated_at
+             FROM memories
+             WHERE project_path = ?1 AND source_tool = ?2
+             ORDER BY name",
+        )?;
+
+        let memories = stmt
+            .query_map(params![project_path, source_tool], Self::row_to_memory)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(memories)
+    }
+
+    /// Full-text searches mirrored memories for a project and source tool.
+    ///
+    /// Matches against memory name, description, and content using FTS5 and
+    /// returns results ordered by relevance, limited to `limit` rows.
+    pub fn search_memories(
+        &self,
+        project_path: &str,
+        source_tool: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Memory>> {
+        let escaped_query = escape_fts5_query(query);
+
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.project_path, m.source_tool, m.name, m.description, m.memory_type, m.content, m.file_path, m.updated_at
+             FROM memories_fts fts
+             JOIN memories m ON fts.memory_id = m.id
+             WHERE memories_fts MATCH ?1 AND m.project_path = ?2 AND m.source_tool = ?3
+             ORDER BY rank
+             LIMIT ?4",
+        )?;
+
+        let memories = stmt
+            .query_map(
+                params![escaped_query, project_path, source_tool, limit as i64],
+                Self::row_to_memory,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(memories)
     }
 
     // ==================== Sync ====================
