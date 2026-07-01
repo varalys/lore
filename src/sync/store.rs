@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use super::encryption::{decrypt_data, encrypt_data};
 use super::SyncError;
-use crate::storage::models::{Annotation, Message, Session, SessionLink, Summary, Tag};
+use crate::storage::models::{Annotation, Message, Session, SessionLink, Summary, Tag, Tombstone};
 
 /// The complete reasoning record for a single session.
 ///
@@ -102,6 +102,32 @@ pub fn decrypt_session_record(blob: &[u8], key: &[u8]) -> Result<SessionRecord, 
 
     serde_json::from_slice(&json)
         .map_err(|e| SyncError::Serialization(format!("Failed to deserialize record: {e}")))
+}
+
+/// Serializes and encrypts the tombstone set into a git-blob-ready buffer.
+///
+/// Stored at `meta/tombstones` in the store tree so deletions of child records
+/// propagate across machines alongside the session blobs. Uses the identical
+/// `serde_json -> gzip -> encrypt_data` pipeline as [`encrypt_session_record`].
+pub fn encrypt_tombstones(tombstones: &[Tombstone], key: &[u8]) -> Result<Vec<u8>, SyncError> {
+    let json = serde_json::to_vec(tombstones)
+        .map_err(|e| SyncError::Serialization(format!("Failed to serialize tombstones: {e}")))?;
+
+    let compressed = gzip_compress(&json)?;
+
+    encrypt_data(&compressed, key)
+}
+
+/// Decrypts and deserializes the tombstone set from git-blob bytes.
+///
+/// Inverse of [`encrypt_tombstones`].
+pub fn decrypt_tombstones(blob: &[u8], key: &[u8]) -> Result<Vec<Tombstone>, SyncError> {
+    let compressed = decrypt_data(blob, key)?;
+
+    let json = gzip_decompress(&compressed)?;
+
+    serde_json::from_slice(&json)
+        .map_err(|e| SyncError::Serialization(format!("Failed to deserialize tombstones: {e}")))
 }
 
 /// Compresses bytes with gzip at the default compression level.
@@ -370,6 +396,49 @@ mod tests {
         let sha = gitref::write_blob(repo, &fixture).unwrap();
         let read_back = gitref::read_blob(repo, &sha).unwrap();
         assert_eq!(read_back, fixture, "binary blob must survive byte-for-byte");
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_tombstones_roundtrip() {
+        let salt = generate_salt();
+        let key = derive_key("tombstone passphrase", &salt).unwrap();
+
+        let tombstones = vec![
+            Tombstone {
+                child_id: Uuid::new_v4().to_string(),
+                kind: "link".to_string(),
+                session_id: Some(Uuid::new_v4().to_string()),
+                deleted_at: Utc::now(),
+            },
+            Tombstone {
+                child_id: Uuid::new_v4().to_string(),
+                kind: "summary".to_string(),
+                session_id: None,
+                deleted_at: Utc::now(),
+            },
+        ];
+
+        let blob = encrypt_tombstones(&tombstones, &key).unwrap();
+        let restored = decrypt_tombstones(&blob, &key).unwrap();
+
+        assert_eq!(restored, tombstones);
+    }
+
+    #[test]
+    fn test_decrypt_tombstones_wrong_key_fails() {
+        let salt = generate_salt();
+        let key = derive_key("right", &salt).unwrap();
+        let wrong = derive_key("wrong", &salt).unwrap();
+
+        let tombstones = vec![Tombstone {
+            child_id: Uuid::new_v4().to_string(),
+            kind: "tag".to_string(),
+            session_id: None,
+            deleted_at: Utc::now(),
+        }];
+        let blob = encrypt_tombstones(&tombstones, &key).unwrap();
+
+        assert!(decrypt_tombstones(&blob, &wrong).is_err());
     }
 
     #[test]

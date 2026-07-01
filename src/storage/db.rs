@@ -13,8 +13,17 @@ use uuid::Uuid;
 
 use super::models::{
     Annotation, Machine, Message, MessageContent, MessageRole, SearchResult, Session, SessionLink,
-    Summary, Tag,
+    Summary, Tag, Tombstone,
 };
+
+/// Tombstone kind for a deleted session-to-commit link.
+const TOMBSTONE_KIND_LINK: &str = "link";
+/// Tombstone kind for a deleted tag.
+const TOMBSTONE_KIND_TAG: &str = "tag";
+/// Tombstone kind for a deleted annotation.
+const TOMBSTONE_KIND_ANNOTATION: &str = "annotation";
+/// Tombstone kind for a deleted summary.
+const TOMBSTONE_KIND_SUMMARY: &str = "summary";
 
 /// Which sync-tracking column a merge or import marks on write.
 ///
@@ -316,6 +325,18 @@ impl Database {
                 created_at TEXT NOT NULL
             );
 
+            -- Tombstones record locally deleted child records so a deletion on
+            -- one machine propagates through the sync store instead of being
+            -- resurrected by the additive child merge. Keyed by (child_id, kind)
+            -- so a link and a tag can never collide on the same UUID.
+            CREATE TABLE IF NOT EXISTS tombstones (
+                child_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('link','tag','annotation','summary')),
+                session_id TEXT,
+                deleted_at TEXT NOT NULL,
+                PRIMARY KEY (child_id, kind)
+            );
+
             -- Indexes for common queries
             CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
             CREATE INDEX IF NOT EXISTS idx_sessions_working_directory ON sessions(working_directory);
@@ -325,6 +346,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_annotations_session_id ON annotations(session_id);
             CREATE INDEX IF NOT EXISTS idx_tags_session_id ON tags(session_id);
             CREATE INDEX IF NOT EXISTS idx_tags_label ON tags(label);
+            CREATE INDEX IF NOT EXISTS idx_tombstones_deleted_at ON tombstones(deleted_at);
             "#,
         )?;
 
@@ -923,6 +945,171 @@ impl Database {
         Ok(())
     }
 
+    /// Records a tombstone for a locally deleted child record.
+    ///
+    /// Called only from the user-facing child delete methods (unlink, tag
+    /// remove, annotation delete, summary delete). The session-cascade delete
+    /// (`delete_session`, `delete_sessions_older_than`) deletes its children with
+    /// inline SQL and deliberately does NOT call this, so removing a whole
+    /// session never strips that session's children from the shared store. On a
+    /// re-delete the existing row's timestamp is refreshed so garbage collection
+    /// keys off the most recent deletion.
+    fn record_tombstone(
+        conn: &Connection,
+        child_id: &str,
+        kind: &str,
+        session_id: &Uuid,
+        deleted_at: DateTime<Utc>,
+    ) -> Result<()> {
+        conn.execute(
+            r#"
+            INSERT INTO tombstones (child_id, kind, session_id, deleted_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(child_id, kind) DO UPDATE SET
+                session_id = excluded.session_id,
+                deleted_at = excluded.deleted_at
+            "#,
+            params![
+                child_id,
+                kind,
+                session_id.to_string(),
+                deleted_at.to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns the `id` values of a child table's rows for a session.
+    ///
+    /// Used by the bulk child delete methods to capture ids before deletion so
+    /// each removed row can be tombstoned. `table` is a fixed internal literal
+    /// (never user input), so interpolating it into the query is safe.
+    fn child_ids(&self, table: &str, session_id: &Uuid) -> Result<Vec<String>> {
+        let sql = format!("SELECT id FROM {table} WHERE session_id = ?1");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![session_id.to_string()], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to read child ids")
+    }
+
+    /// Returns whether a child record of the given kind is tombstoned.
+    ///
+    /// Used by the merge path to suppress re-adding a record that was deleted on
+    /// another machine.
+    fn is_tombstoned(conn: &Connection, child_id: &Uuid, kind: &str) -> Result<bool> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tombstones WHERE child_id = ?1 AND kind = ?2",
+            params![child_id.to_string(), kind],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Returns every locally recorded tombstone.
+    ///
+    /// Ordered by `(kind, child_id)` so the serialized store blob is stable
+    /// across repeated syncs on the same machine (content-addressed dedup).
+    pub fn list_tombstones(&self) -> Result<Vec<Tombstone>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT child_id, kind, session_id, deleted_at
+             FROM tombstones
+             ORDER BY kind ASC, child_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let deleted_at: String = row.get(3)?;
+            Ok(Tombstone {
+                child_id: row.get(0)?,
+                kind: row.get(1)?,
+                session_id: row.get(2)?,
+                deleted_at: parse_datetime(&deleted_at)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list tombstones")
+    }
+
+    /// Unions a set of remote tombstones into the local table.
+    ///
+    /// First-wins on `(child_id, kind)`: an existing local tombstone is left
+    /// untouched, so a machine's own deletion timestamp is preserved. Used by
+    /// the sync merge before importing remote records so the merge can suppress
+    /// any child that was deleted elsewhere.
+    pub fn add_tombstones(&self, tombstones: &[Tombstone]) -> Result<()> {
+        for t in tombstones {
+            self.conn.execute(
+                r#"
+                INSERT INTO tombstones (child_id, kind, session_id, deleted_at)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(child_id, kind) DO NOTHING
+                "#,
+                params![t.child_id, t.kind, t.session_id, t.deleted_at.to_rfc3339()],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Deletes any locally-present child records that are tombstoned.
+    ///
+    /// Enforces, on this machine, a deletion that happened on another machine.
+    /// Deletes with plain SQL rather than the user-facing delete methods so it
+    /// does NOT record a fresh tombstone (the child is already tombstoned) and
+    /// cannot recurse. Each session whose child was actually removed is marked
+    /// unsynced so the cleaned record is re-exported on the next sync, replacing
+    /// the stale blob in the store. Suppression during merge already prevents
+    /// resurrection, so this re-export is a cleanup rather than a correctness
+    /// requirement.
+    pub fn apply_tombstones(&self, tombstones: &[Tombstone]) -> Result<()> {
+        let mut affected: HashSet<Uuid> = HashSet::new();
+        for t in tombstones {
+            let deleted = match t.kind.as_str() {
+                TOMBSTONE_KIND_LINK => self.conn.execute(
+                    "DELETE FROM session_links WHERE id = ?1",
+                    params![t.child_id],
+                )?,
+                TOMBSTONE_KIND_TAG => self
+                    .conn
+                    .execute("DELETE FROM tags WHERE id = ?1", params![t.child_id])?,
+                TOMBSTONE_KIND_ANNOTATION => self
+                    .conn
+                    .execute("DELETE FROM annotations WHERE id = ?1", params![t.child_id])?,
+                TOMBSTONE_KIND_SUMMARY => self
+                    .conn
+                    .execute("DELETE FROM summaries WHERE id = ?1", params![t.child_id])?,
+                _ => 0,
+            };
+            if deleted > 0 {
+                if let Some(sid) = &t.session_id {
+                    if let Ok(uuid) = parse_uuid(sid) {
+                        affected.insert(uuid);
+                    }
+                }
+            }
+        }
+        for session_id in affected {
+            self.mark_session_unsynced(&session_id)?;
+        }
+        Ok(())
+    }
+
+    /// Prunes tombstones deleted before the given cutoff.
+    ///
+    /// Returns the number of tombstones removed. This is NOT called during sync:
+    /// an age-based prune there could drop a tombstone still needed to suppress a
+    /// stale session blob, resurrecting the deleted child. Tombstones are tiny, so
+    /// the sync path keeps the full set indefinitely. This method is retained for
+    /// a possible future safe garbage collection that only prunes tombstones
+    /// proven to have propagated to every machine.
+    // Retained for that future safe GC and covered by a direct unit test; it has
+    // no non-test caller today now that the sync path never prunes.
+    #[allow(dead_code)]
+    pub fn prune_tombstones(&self, before: DateTime<Utc>) -> Result<usize> {
+        let rows = self.conn.execute(
+            "DELETE FROM tombstones WHERE deleted_at < ?1",
+            params![before.to_rfc3339()],
+        )?;
+        Ok(rows)
+    }
+
     /// Merges a full remote reasoning record into the database atomically.
     ///
     /// Used by git-ref sync when pulling a remote store. The session row,
@@ -935,17 +1122,17 @@ impl Database {
     ///   messages, or an equal message count with a later `ended_at`). When
     ///   written, the session is marked synced with `synced_at`.
     /// - Links, tags, and annotations are additive and idempotent by id, so they
-    ///   are always merged regardless of which session row is newer. This lets a
-    ///   remote that added a child to an already-synced (equal or older) session
-    ///   still deliver that child locally.
-    /// - The summary is applied through the newer-wins writer, so an older remote
-    ///   summary never clobbers a newer local one.
+    ///   are merged regardless of which session row is newer, EXCEPT that a child
+    ///   whose (child_id, kind) is tombstoned is suppressed. This lets a remote
+    ///   that added a child to an already-synced session still deliver it, while
+    ///   a child deleted on another machine is not resurrected.
+    /// - The summary is applied through the newer-wins writer (unless
+    ///   tombstoned), so an older remote summary never clobbers a newer local one.
     ///
-    /// Known limitation: child merges are additive, so a link/tag/annotation
-    /// DELETED on another machine is not removed here (and can be resurrected on a
-    /// later export). Propagating deletions needs tombstones; tracked as a Phase
-    /// 29.8 follow-up. This is intentional for the first sync release: additive
-    /// merge never loses or corrupts data.
+    /// Deletion propagation: the caller unions remote tombstones into the local
+    /// table before merging (so suppression here sees them) and applies them
+    /// afterward via [`Self::apply_tombstones`] to remove any child that was
+    /// already present locally. See `cli/commands/sync.rs`.
     ///
     /// Returns `true` when the session row and messages were written (the
     /// newer-wins branch ran), which callers use for the pulled count.
@@ -1044,19 +1231,31 @@ impl Database {
             Self::write_session_with_messages(&tx, session, messages, Some(synced_at), track)?;
         }
 
-        // Child records are additive and idempotent by id: always merge them so a
-        // remote addition to an equal-or-older session is not lost.
+        // Child records are additive and idempotent by id: merge them so a
+        // remote addition to an equal-or-older session is not lost. A child that
+        // is tombstoned (deleted on this or another machine) is suppressed so a
+        // stale remote blob cannot resurrect it. Concurrent additions of other
+        // records are unaffected because suppression matches only the exact
+        // (child_id, kind) of a deleted record.
         for link in links {
-            Self::write_link(&tx, link, true)?;
+            if !Self::is_tombstoned(&tx, &link.id, TOMBSTONE_KIND_LINK)? {
+                Self::write_link(&tx, link, true)?;
+            }
         }
         for tag in tags {
-            Self::write_tag(&tx, tag, true)?;
+            if !Self::is_tombstoned(&tx, &tag.id, TOMBSTONE_KIND_TAG)? {
+                Self::write_tag(&tx, tag, true)?;
+            }
         }
         for annotation in annotations {
-            Self::write_annotation(&tx, annotation, true)?;
+            if !Self::is_tombstoned(&tx, &annotation.id, TOMBSTONE_KIND_ANNOTATION)? {
+                Self::write_annotation(&tx, annotation, true)?;
+            }
         }
         if let Some(summary) = summary {
-            Self::write_summary_newer(&tx, summary)?;
+            if !Self::is_tombstoned(&tx, &summary.id, TOMBSTONE_KIND_SUMMARY)? {
+                Self::write_summary_newer(&tx, summary)?;
+            }
         }
 
         tx.commit()?;
@@ -1300,7 +1499,16 @@ impl Database {
         )?;
         if rows_affected > 0 {
             if let Some(sid) = session_id {
-                self.mark_session_unsynced(&parse_uuid(&sid)?)?;
+                let sid = parse_uuid(&sid)?;
+                // User-facing deletion: tombstone so the removal propagates.
+                Self::record_tombstone(
+                    &self.conn,
+                    &link_id.to_string(),
+                    TOMBSTONE_KIND_LINK,
+                    &sid,
+                    Utc::now(),
+                )?;
+                self.mark_session_unsynced(&sid)?;
             }
         }
         Ok(rows_affected > 0)
@@ -1310,11 +1518,18 @@ impl Database {
     ///
     /// Returns the number of links deleted.
     pub fn delete_links_by_session(&self, session_id: &Uuid) -> Result<usize> {
+        // Capture the link ids before deleting so each removal can be
+        // tombstoned and propagate to other machines.
+        let ids = self.child_ids("session_links", session_id)?;
         let rows_affected = self.conn.execute(
             "DELETE FROM session_links WHERE session_id = ?1",
             params![session_id.to_string()],
         )?;
         if rows_affected > 0 {
+            let now = Utc::now();
+            for id in &ids {
+                Self::record_tombstone(&self.conn, id, TOMBSTONE_KIND_LINK, session_id, now)?;
+            }
             // Local edit: re-open the parent session for the next sync.
             self.mark_session_unsynced(session_id)?;
         }
@@ -1331,11 +1546,26 @@ impl Database {
         commit_sha: &str,
     ) -> Result<bool> {
         let pattern = format!("{commit_sha}%");
+        // Capture the matching link ids before deleting so each removal can be
+        // tombstoned and propagate to other machines.
+        let ids: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM session_links WHERE session_id = ?1 AND commit_sha LIKE ?2",
+            )?;
+            let rows =
+                stmt.query_map(params![session_id.to_string(), pattern], |row| row.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .context("Failed to read link ids")?
+        };
         let rows_affected = self.conn.execute(
             "DELETE FROM session_links WHERE session_id = ?1 AND commit_sha LIKE ?2",
             params![session_id.to_string(), pattern],
         )?;
         if rows_affected > 0 {
+            let now = Utc::now();
+            for id in &ids {
+                Self::record_tombstone(&self.conn, id, TOMBSTONE_KIND_LINK, session_id, now)?;
+            }
             // Local edit: re-open the parent session for the next sync.
             self.mark_session_unsynced(session_id)?;
         }
@@ -2349,7 +2579,16 @@ impl Database {
         )?;
         if rows_affected > 0 {
             if let Some(sid) = session_id {
-                self.mark_session_unsynced(&parse_uuid(&sid)?)?;
+                let sid = parse_uuid(&sid)?;
+                // User-facing deletion: tombstone so the removal propagates.
+                Self::record_tombstone(
+                    &self.conn,
+                    &annotation_id.to_string(),
+                    TOMBSTONE_KIND_ANNOTATION,
+                    &sid,
+                    Utc::now(),
+                )?;
+                self.mark_session_unsynced(&sid)?;
             }
         }
         Ok(rows_affected > 0)
@@ -2360,11 +2599,18 @@ impl Database {
     /// Returns the number of annotations deleted.
     #[allow(dead_code)]
     pub fn delete_annotations_by_session(&self, session_id: &Uuid) -> Result<usize> {
+        // Capture the annotation ids before deleting so each removal can be
+        // tombstoned and propagate to other machines.
+        let ids = self.child_ids("annotations", session_id)?;
         let rows_affected = self.conn.execute(
             "DELETE FROM annotations WHERE session_id = ?1",
             params![session_id.to_string()],
         )?;
         if rows_affected > 0 {
+            let now = Utc::now();
+            for id in &ids {
+                Self::record_tombstone(&self.conn, id, TOMBSTONE_KIND_ANNOTATION, session_id, now)?;
+            }
             // Local edit: re-open the parent session for the next sync.
             self.mark_session_unsynced(session_id)?;
         }
@@ -2453,11 +2699,30 @@ impl Database {
     ///
     /// Returns `true` if a tag was deleted, `false` if not found.
     pub fn delete_tag(&self, session_id: &Uuid, label: &str) -> Result<bool> {
+        // Capture the tag id before deleting so the removal can be tombstoned
+        // and propagate to other machines.
+        let id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM tags WHERE session_id = ?1 AND label = ?2",
+                params![session_id.to_string(), label],
+                |row| row.get(0),
+            )
+            .optional()?;
         let rows_affected = self.conn.execute(
             "DELETE FROM tags WHERE session_id = ?1 AND label = ?2",
             params![session_id.to_string(), label],
         )?;
         if rows_affected > 0 {
+            if let Some(id) = id {
+                Self::record_tombstone(
+                    &self.conn,
+                    &id,
+                    TOMBSTONE_KIND_TAG,
+                    session_id,
+                    Utc::now(),
+                )?;
+            }
             // Local edit: re-open the parent session for the next sync.
             self.mark_session_unsynced(session_id)?;
         }
@@ -2469,11 +2734,18 @@ impl Database {
     /// Returns the number of tags deleted.
     #[allow(dead_code)]
     pub fn delete_tags_by_session(&self, session_id: &Uuid) -> Result<usize> {
+        // Capture the tag ids before deleting so each removal can be tombstoned
+        // and propagate to other machines.
+        let ids = self.child_ids("tags", session_id)?;
         let rows_affected = self.conn.execute(
             "DELETE FROM tags WHERE session_id = ?1",
             params![session_id.to_string()],
         )?;
         if rows_affected > 0 {
+            let now = Utc::now();
+            for id in &ids {
+                Self::record_tombstone(&self.conn, id, TOMBSTONE_KIND_TAG, session_id, now)?;
+            }
             // Local edit: re-open the parent session for the next sync.
             self.mark_session_unsynced(session_id)?;
         }
@@ -2631,11 +2903,30 @@ impl Database {
     /// Returns `true` if a summary was deleted, `false` if no summary existed.
     #[allow(dead_code)]
     pub fn delete_summary(&self, session_id: &Uuid) -> Result<bool> {
+        // Capture the summary id before deleting so the removal can be
+        // tombstoned and propagate to other machines.
+        let id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM summaries WHERE session_id = ?1",
+                params![session_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
         let rows_affected = self.conn.execute(
             "DELETE FROM summaries WHERE session_id = ?1",
             params![session_id.to_string()],
         )?;
         if rows_affected > 0 {
+            if let Some(id) = id {
+                Self::record_tombstone(
+                    &self.conn,
+                    &id,
+                    TOMBSTONE_KIND_SUMMARY,
+                    session_id,
+                    Utc::now(),
+                )?;
+            }
             // Local edit: re-open the parent session for the next sync.
             self.mark_session_unsynced(session_id)?;
         }
@@ -7393,5 +7684,340 @@ mod tests {
             .expect("global sync time recorded");
         // Compare at second granularity to avoid RFC3339 sub-second rounding.
         assert_eq!(last.timestamp(), when.timestamp());
+    }
+
+    // ==================== Tombstone Tests ====================
+
+    /// Seeds a session with one link, tag, annotation, and summary.
+    ///
+    /// Returns the ids so a test can delete a specific child and assert on the
+    /// resulting tombstone.
+    fn seed_session_with_children(db: &Database) -> (Uuid, Uuid, Uuid, Uuid, Uuid) {
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+
+        let link = create_test_link(session.id, Some("deadbeef"), LinkType::Commit);
+        db.insert_link(&link).expect("insert link");
+
+        let tag = Tag {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            label: "feature".to_string(),
+            created_at: Utc::now(),
+        };
+        db.insert_tag(&tag).expect("insert tag");
+
+        let annotation = Annotation {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "note".to_string(),
+            created_at: Utc::now(),
+        };
+        db.insert_annotation(&annotation)
+            .expect("insert annotation");
+
+        let summary = Summary {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            content: "summary".to_string(),
+            generated_at: Utc::now(),
+        };
+        db.insert_summary(&summary).expect("insert summary");
+
+        (session.id, link.id, tag.id, annotation.id, summary.id)
+    }
+
+    #[test]
+    fn test_delete_link_records_tombstone() {
+        let (db, _dir) = create_test_db();
+        let (_sid, link_id, _tag, _ann, _sum) = seed_session_with_children(&db);
+
+        assert!(db.delete_link(&link_id).unwrap());
+
+        let tombstones = db.list_tombstones().unwrap();
+        assert_eq!(tombstones.len(), 1, "one tombstone recorded");
+        assert_eq!(tombstones[0].child_id, link_id.to_string());
+        assert_eq!(tombstones[0].kind, TOMBSTONE_KIND_LINK);
+    }
+
+    #[test]
+    fn test_delete_tag_records_tombstone() {
+        let (db, _dir) = create_test_db();
+        let (sid, _link, tag_id, _ann, _sum) = seed_session_with_children(&db);
+
+        assert!(db.delete_tag(&sid, "feature").unwrap());
+
+        let tombstones = db.list_tombstones().unwrap();
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].child_id, tag_id.to_string());
+        assert_eq!(tombstones[0].kind, TOMBSTONE_KIND_TAG);
+    }
+
+    #[test]
+    fn test_delete_annotation_records_tombstone() {
+        let (db, _dir) = create_test_db();
+        let (_sid, _link, _tag, ann_id, _sum) = seed_session_with_children(&db);
+
+        assert!(db.delete_annotation(&ann_id).unwrap());
+
+        let tombstones = db.list_tombstones().unwrap();
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].child_id, ann_id.to_string());
+        assert_eq!(tombstones[0].kind, TOMBSTONE_KIND_ANNOTATION);
+    }
+
+    #[test]
+    fn test_delete_summary_records_tombstone() {
+        let (db, _dir) = create_test_db();
+        let (sid, _link, _tag, _ann, sum_id) = seed_session_with_children(&db);
+
+        assert!(db.delete_summary(&sid).unwrap());
+
+        let tombstones = db.list_tombstones().unwrap();
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].child_id, sum_id.to_string());
+        assert_eq!(tombstones[0].kind, TOMBSTONE_KIND_SUMMARY);
+    }
+
+    #[test]
+    fn test_bulk_delete_links_records_tombstone_per_link() {
+        let (db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        db.insert_session(&session).expect("insert session");
+        let link_a = create_test_link(session.id, Some("aaaa1111"), LinkType::Commit);
+        let link_b = create_test_link(session.id, Some("bbbb2222"), LinkType::Commit);
+        db.insert_link(&link_a).unwrap();
+        db.insert_link(&link_b).unwrap();
+
+        assert_eq!(db.delete_links_by_session(&session.id).unwrap(), 2);
+
+        let tombstones = db.list_tombstones().unwrap();
+        assert_eq!(tombstones.len(), 2, "one tombstone per removed link");
+        let ids: HashSet<String> = tombstones.iter().map(|t| t.child_id.clone()).collect();
+        assert!(ids.contains(&link_a.id.to_string()));
+        assert!(ids.contains(&link_b.id.to_string()));
+        assert!(tombstones.iter().all(|t| t.kind == TOMBSTONE_KIND_LINK));
+    }
+
+    #[test]
+    fn test_session_cascade_delete_records_no_tombstones() {
+        // Deleting a whole session is a purely local operation: it must not
+        // tombstone the session's children, or a teammate sharing the store
+        // would lose that session's reasoning.
+        let (db, _dir) = create_test_db();
+        let (sid, _link, _tag, _ann, _sum) = seed_session_with_children(&db);
+
+        db.delete_session(&sid).expect("delete session");
+
+        assert!(
+            db.list_tombstones().unwrap().is_empty(),
+            "session-cascade delete must not create tombstones"
+        );
+    }
+
+    #[test]
+    fn test_delete_sessions_older_than_records_no_tombstones() {
+        // The bulk age-based session purge is also a cascade delete and must not
+        // tombstone children.
+        let (db, _dir) = create_test_db();
+        let old = create_test_session(
+            "claude-code",
+            "/project",
+            Utc::now() - Duration::days(400),
+            None,
+        );
+        db.insert_session(&old).expect("insert session");
+        let link = create_test_link(old.id, Some("deadbeef"), LinkType::Commit);
+        db.insert_link(&link).unwrap();
+
+        let cutoff = Utc::now() - Duration::days(30);
+        assert_eq!(db.delete_sessions_older_than(cutoff).unwrap(), 1);
+
+        assert!(
+            db.list_tombstones().unwrap().is_empty(),
+            "age-based session purge must not create tombstones"
+        );
+    }
+
+    #[test]
+    fn test_add_tombstones_unions_first_wins() {
+        let (db, _dir) = create_test_db();
+        let child = Uuid::new_v4().to_string();
+        let session = Uuid::new_v4().to_string();
+
+        let earlier = Utc::now() - Duration::hours(2);
+        let later = Utc::now();
+        db.add_tombstones(&[Tombstone {
+            child_id: child.clone(),
+            kind: TOMBSTONE_KIND_LINK.to_string(),
+            session_id: Some(session.clone()),
+            deleted_at: earlier,
+        }])
+        .unwrap();
+        // A second union of the same (child_id, kind) must not overwrite.
+        db.add_tombstones(&[Tombstone {
+            child_id: child.clone(),
+            kind: TOMBSTONE_KIND_LINK.to_string(),
+            session_id: Some(session),
+            deleted_at: later,
+        }])
+        .unwrap();
+
+        let tombstones = db.list_tombstones().unwrap();
+        assert_eq!(tombstones.len(), 1, "union is keyed by (child_id, kind)");
+        assert_eq!(
+            tombstones[0].deleted_at.timestamp(),
+            earlier.timestamp(),
+            "first-wins keeps the earliest recorded deletion"
+        );
+    }
+
+    #[test]
+    fn test_apply_tombstones_removes_local_child() {
+        let (db, _dir) = create_test_db();
+        let (sid, link_id, _tag, _ann, _sum) = seed_session_with_children(&db);
+
+        // A tombstone that arrived from another machine for a link we still hold.
+        db.apply_tombstones(&[Tombstone {
+            child_id: link_id.to_string(),
+            kind: TOMBSTONE_KIND_LINK.to_string(),
+            session_id: Some(sid.to_string()),
+            deleted_at: Utc::now(),
+        }])
+        .unwrap();
+
+        assert!(
+            db.get_links_by_session(&sid).unwrap().is_empty(),
+            "apply_tombstones must remove the locally-present tombstoned link"
+        );
+        // The cleaned session is re-opened for the next sync.
+        assert!(
+            db.get_unsynced_sessions()
+                .unwrap()
+                .iter()
+                .any(|s| s.id == sid),
+            "cleaning a child must re-open the parent session for re-export"
+        );
+    }
+
+    #[test]
+    fn test_apply_tombstones_does_not_record_new_tombstone() {
+        // Applying a tombstone must not create a fresh tombstone (it is already
+        // recorded), so the set does not grow on every sync.
+        let (db, _dir) = create_test_db();
+        let (sid, link_id, _tag, _ann, _sum) = seed_session_with_children(&db);
+        // Clear the delete-path tombstones so we start from a known state.
+        db.prune_tombstones(Utc::now() + Duration::days(1)).unwrap();
+        assert!(db.list_tombstones().unwrap().is_empty());
+
+        db.apply_tombstones(&[Tombstone {
+            child_id: link_id.to_string(),
+            kind: TOMBSTONE_KIND_LINK.to_string(),
+            session_id: Some(sid.to_string()),
+            deleted_at: Utc::now(),
+        }])
+        .unwrap();
+
+        assert!(
+            db.list_tombstones().unwrap().is_empty(),
+            "apply_tombstones must not record new tombstones"
+        );
+    }
+
+    #[test]
+    fn test_merge_suppresses_tombstoned_child() {
+        // A remote record whose link is tombstoned locally must not re-add it.
+        let (mut db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        let link = create_test_link(session.id, Some("deadbeef"), LinkType::Commit);
+
+        // Tombstone the link before merging a remote record that still holds it.
+        db.add_tombstones(&[Tombstone {
+            child_id: link.id.to_string(),
+            kind: TOMBSTONE_KIND_LINK.to_string(),
+            session_id: Some(session.id.to_string()),
+            deleted_at: Utc::now(),
+        }])
+        .unwrap();
+
+        db.merge_remote_record(
+            &session,
+            &[],
+            std::slice::from_ref(&link),
+            &[],
+            &[],
+            None,
+            Utc::now(),
+        )
+        .unwrap();
+
+        assert!(
+            db.get_links_by_session(&session.id).unwrap().is_empty(),
+            "merge must suppress a tombstoned link"
+        );
+    }
+
+    #[test]
+    fn test_merge_keeps_non_tombstoned_child() {
+        // A concurrent add (a different link id) must survive even when another
+        // link on the same session is tombstoned.
+        let (mut db, _dir) = create_test_db();
+        let session = create_test_session("claude-code", "/project", Utc::now(), None);
+        let deleted = create_test_link(session.id, Some("deadbeef"), LinkType::Commit);
+        let added = create_test_link(session.id, Some("feedface"), LinkType::Commit);
+
+        db.add_tombstones(&[Tombstone {
+            child_id: deleted.id.to_string(),
+            kind: TOMBSTONE_KIND_LINK.to_string(),
+            session_id: Some(session.id.to_string()),
+            deleted_at: Utc::now(),
+        }])
+        .unwrap();
+
+        db.merge_remote_record(
+            &session,
+            &[],
+            &[deleted.clone(), added.clone()],
+            &[],
+            &[],
+            None,
+            Utc::now(),
+        )
+        .unwrap();
+
+        let links = db.get_links_by_session(&session.id).unwrap();
+        assert_eq!(links.len(), 1, "only the non-tombstoned link survives");
+        assert_eq!(links[0].id, added.id);
+    }
+
+    #[test]
+    fn test_prune_tombstones_removes_old_only() {
+        let (db, _dir) = create_test_db();
+        let old_child = Uuid::new_v4().to_string();
+        let fresh_child = Uuid::new_v4().to_string();
+        db.add_tombstones(&[
+            Tombstone {
+                child_id: old_child.clone(),
+                kind: TOMBSTONE_KIND_TAG.to_string(),
+                session_id: None,
+                deleted_at: Utc::now() - Duration::days(120),
+            },
+            Tombstone {
+                child_id: fresh_child.clone(),
+                kind: TOMBSTONE_KIND_TAG.to_string(),
+                session_id: None,
+                deleted_at: Utc::now(),
+            },
+        ])
+        .unwrap();
+
+        let pruned = db
+            .prune_tombstones(Utc::now() - Duration::days(90))
+            .unwrap();
+        assert_eq!(pruned, 1, "only the old tombstone is pruned");
+
+        let remaining = db.list_tombstones().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].child_id, fresh_child);
     }
 }
