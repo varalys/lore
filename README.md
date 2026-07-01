@@ -5,9 +5,9 @@
 [![Release](https://img.shields.io/github/v/release/varalys/lore)](https://github.com/varalys/lore/releases)
 ![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20WSL2-blue)
 
-**Reasoning history for code.** Lore captures AI coding sessions and links them to git commits.
+**Reasoning history for code.**
 
-Lore saves all your AI coding sessions from Claude Code, Codex, etc and links them to commits. When you look at code later, you can see the conversation that produced it.
+Lore records your AI coding sessions and links them to git commits. Run `lore blame` on any line to see the conversation that produced it. Sessions sync over git, encrypted, with no server and no account.
 
 **Documentation:** [lore.varalys.com](https://lore.varalys.com)
 
@@ -101,11 +101,11 @@ Linked sessions (1):
 
 | Feature | Description |
 |---------|-------------|
-| **Session Capture** | Import from 10+ AI coding tools |
+| **Blame** | Trace any line of code to the AI session that produced it |
+| **Git-ref Sync** | Sync reasoning over git, encrypted, no server; share by passphrase |
+| **Session Capture** | One history across 10+ AI coding tools |
 | **Git Linking** | Connect sessions to commits |
-| **Full-text Search** | Find any conversation |
-| **Blame Integration** | Trace code to sessions |
-| **Git-ref Sync** | Share and back up reasoning over git, encrypted end to end |
+| **Full-text Search** | Find any past conversation |
 | **MCP Server** | Let AI tools query your history |
 | **Background Daemon** | Real-time capture (optional) |
 
