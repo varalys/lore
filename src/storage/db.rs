@@ -767,6 +767,12 @@ impl Database {
     /// - The summary is applied through the newer-wins writer, so an older remote
     ///   summary never clobbers a newer local one.
     ///
+    /// Known limitation: child merges are additive, so a link/tag/annotation
+    /// DELETED on another machine is not removed here (and can be resurrected on a
+    /// later export). Propagating deletions needs tombstones; tracked as a Phase
+    /// 29.8 follow-up. This is intentional for the first sync release: additive
+    /// merge never loses or corrupts data.
+    ///
     /// Returns `true` when the session row and messages were written (the
     /// newer-wins branch ran), which callers use for the pulled count.
     #[allow(clippy::too_many_arguments)]
