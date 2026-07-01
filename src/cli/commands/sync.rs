@@ -297,7 +297,10 @@ fn run_sync(remote: &str) -> Result<()> {
     let (key, salt) = load_store_credentials(&repo, remote, &keystore)?;
 
     let mut db = Database::open_default()?;
-    let summary = perform_sync(&mut db, &repo, remote, &key, &salt, &machine)?;
+    // Push only this repo's own sessions so cross-project history is never
+    // written into (and shared through) this repo's store.
+    let sessions = db.get_unsynced_sessions_for_repo(&repo)?;
+    let summary = perform_sync(&mut db, &repo, remote, &key, &salt, &machine, sessions)?;
 
     println!(
         "{} Pulled {}, pushed {}.",
@@ -377,7 +380,8 @@ fn quiet_sync_with_keystore(
     let mut config = Config::load()?;
     let machine = machine_identity(&mut config)?;
     let mut db = Database::open_default()?;
-    perform_sync(&mut db, repo, remote, &key, salt, &machine)?;
+    let sessions = db.get_unsynced_sessions_for_repo(repo)?;
+    perform_sync(&mut db, repo, remote, &key, salt, &machine, sessions)?;
     Ok(())
 }
 
@@ -417,6 +421,13 @@ fn configured_remotes(repo: &Path) -> Result<Vec<String>> {
 
 /// Fetches, merges remote reasoning into the database, then builds and pushes.
 ///
+/// The caller supplies `sessions`, the exact set of local sessions to push into
+/// this store. For a per-repo store that is the repo-scoped unsynced set (see
+/// [`Database::get_unsynced_sessions_for_repo`]) so cross-project history never
+/// leaks into one repo's store; a future global store can pass all unsynced
+/// sessions without any change here. Inbound merge is independent of this set:
+/// every remote session is pulled regardless of its working directory.
+///
 /// Retries the whole cycle on a compare-and-swap mismatch (a concurrent local
 /// sync moved the ref) or a non-fast-forward push (the remote moved between our
 /// fetch and push), up to [`MAX_SYNC_ATTEMPTS`].
@@ -427,6 +438,7 @@ fn perform_sync(
     key: &[u8],
     salt: &[u8],
     machine: &MachineIdentity,
+    sessions: Vec<Session>,
 ) -> Result<SyncSummary> {
     let mut pulled_total = 0;
 
@@ -460,8 +472,7 @@ fn perform_sync(
         };
         let base = tracking_commit.clone().or(old_local.clone());
 
-        let unsynced = db.get_unsynced_sessions()?;
-        let mut changes = build_session_changes(db, repo, key, &unsynced)?;
+        let mut changes = build_session_changes(db, repo, key, &sessions)?;
 
         // When rebasing onto the remote tracking commit, carry forward any
         // already-stored session artifacts that live only in the local ref (for
@@ -476,7 +487,7 @@ fn perform_sync(
         add_meta_changes(db, repo, base.as_deref(), salt, machine, &mut changes)?;
 
         let tree = gitref::build_tree(repo, base.as_deref(), &changes)?;
-        let message = format!("lore: sync {} session(s)", unsynced.len());
+        let message = format!("lore: sync {} session(s)", sessions.len());
         let commit = gitref::commit_tree(repo, &tree, base.as_deref(), &message)?;
 
         // CAS-update the local ref, guarding against a concurrent local sync.
@@ -497,12 +508,12 @@ fn perform_sync(
             }
         }
 
-        let ids: Vec<Uuid> = unsynced.iter().map(|s| s.id).collect();
+        let ids: Vec<Uuid> = sessions.iter().map(|s| s.id).collect();
         db.mark_sessions_synced(&ids, Utc::now())?;
 
         return Ok(SyncSummary {
             pulled: pulled_total,
-            pushed: unsynced.len(),
+            pushed: sessions.len(),
         });
     }
 
@@ -686,7 +697,8 @@ fn run_status(remote: &str, format: OutputFormat) -> Result<()> {
     };
     let set_up = salt.is_some();
 
-    let unsynced = db.unsynced_session_count()?;
+    // Scope the pending count to this repo so it reflects what a sync will push.
+    let unsynced = db.unsynced_session_count_for_repo(&repo)?;
     let last_sync = db.last_sync_time()?;
     let remote_exists = gitref::remote_ref_exists(&repo, remote, SESSIONS_REF).unwrap_or(false);
     let local_ref = gitref::resolve_ref(&repo, SESSIONS_REF)?;
@@ -1034,8 +1046,25 @@ mod tests {
         }
     }
 
+    /// Returns the canonical string form of a repo path.
+    ///
+    /// A session must be seeded with the same path the scoped selector derives
+    /// (which canonicalizes the repo, resolving symlinks such as macOS's
+    /// `/var` -> `/private/var`) so it stays in scope and is actually pushed.
+    fn repo_dir(repo: &Path) -> String {
+        repo.canonicalize().unwrap().to_string_lossy().to_string()
+    }
+
+    /// Returns this repo's unsynced sessions, the set a real sync would push.
+    fn scoped_unsynced(db: &Database, repo: &Path) -> Vec<Session> {
+        db.get_unsynced_sessions_for_repo(repo).unwrap()
+    }
+
     /// Seeds a full unsynced session (messages, link, tag, annotation, summary).
-    fn seed_full_session(db: &mut Database, machine_id: &str) -> Uuid {
+    ///
+    /// `working_directory` must be inside the repo under test for the session to
+    /// be selected by the repo-scoped sync.
+    fn seed_full_session(db: &mut Database, machine_id: &str, working_directory: &str) -> Uuid {
         let id = Uuid::new_v4();
         let session = Session {
             id,
@@ -1044,7 +1073,7 @@ mod tests {
             started_at: Utc::now(),
             ended_at: Some(Utc::now()),
             model: Some("claude-opus".to_string()),
-            working_directory: "/proj".to_string(),
+            working_directory: working_directory.to_string(),
             git_branch: Some("main".to_string()),
             source_path: None,
             message_count: 1,
@@ -1060,7 +1089,7 @@ mod tests {
             content: MessageContent::Text("fix the bug".to_string()),
             model: None,
             git_branch: Some("main".to_string()),
-            cwd: Some("/proj".to_string()),
+            cwd: Some(working_directory.to_string()),
         };
         // synced_at = None so the session is picked up by get_unsynced_sessions.
         db.import_session_with_messages(&session, &[message], None)
@@ -1163,9 +1192,13 @@ mod tests {
         create_store(repo_a, "origin", &keystore_a, &ma, passphrase).unwrap();
 
         let (mut db_a, _da) = open_db();
-        let session_id = seed_full_session(&mut db_a, "machine-a");
+        let session_id = seed_full_session(&mut db_a, "machine-a", &repo_dir(repo_a));
         let (key_a, salt_a) = load_store_credentials(repo_a, "origin", &keystore_a).unwrap();
-        let summary_a = perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, repo_a);
+        let summary_a = perform_sync(
+            &mut db_a, repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
         assert_eq!(summary_a.pushed, 1);
 
         // Machine B: join with the same passphrase, then sync (pull).
@@ -1183,7 +1216,11 @@ mod tests {
         let (key_b, salt_b2) = load_store_credentials(repo_b, "origin", &keystore_b).unwrap();
         // Both machines derive the same key from the shared passphrase and salt.
         assert_eq!(key_a, key_b);
-        let summary_b = perform_sync(&mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb).unwrap();
+        let sessions_b = scoped_unsynced(&db_b, repo_b);
+        let summary_b = perform_sync(
+            &mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb, sessions_b,
+        )
+        .unwrap();
         assert_eq!(summary_b.pulled, 1);
 
         // Machine B now has the full reasoning record, including links, tags,
@@ -1218,15 +1255,17 @@ mod tests {
         create_store(repo, "origin", &keystore, &m, "passphrase one two").unwrap();
 
         let (mut db, _dd) = open_db();
-        seed_full_session(&mut db, "machine-a");
+        seed_full_session(&mut db, "machine-a", &repo_dir(repo));
         let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
 
-        perform_sync(&mut db, repo, "origin", &key, &salt, &m).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
         let sha_first = session_blob_sha(repo);
 
         // A second sync with nothing new must not re-encrypt the session, so its
         // content-addressed blob object stays byte-identical (near-zero growth).
-        let summary = perform_sync(&mut db, repo, "origin", &key, &salt, &m).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        let summary = perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
         assert_eq!(summary.pushed, 0);
         let sha_second = session_blob_sha(repo);
         assert_eq!(
@@ -1264,9 +1303,13 @@ mod tests {
         let ma = machine("machine-a", "Machine A");
         create_store(repo_a, "origin", &keystore_a, &ma, "the real passphrase").unwrap();
         let (mut db_a, _da) = open_db();
-        seed_full_session(&mut db_a, "machine-a");
+        seed_full_session(&mut db_a, "machine-a", &repo_dir(repo_a));
         let (key_a, salt_a) = load_store_credentials(repo_a, "origin", &keystore_a).unwrap();
-        perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, repo_a);
+        perform_sync(
+            &mut db_a, repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
 
         // Machine B tries to join with the wrong passphrase.
         let dir_b = tempfile::tempdir().unwrap();
@@ -1391,9 +1434,13 @@ mod tests {
         create_store(repo_a, "origin", &keystore_a, &ma, passphrase).unwrap();
 
         let (mut db_a, _da) = open_db();
-        let session_id = seed_full_session(&mut db_a, "machine-a");
+        let session_id = seed_full_session(&mut db_a, "machine-a", &repo_dir(repo_a));
         let (key_a, salt_a) = load_store_credentials(repo_a, "origin", &keystore_a).unwrap();
-        let first = perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, repo_a);
+        let first = perform_sync(
+            &mut db_a, repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
         assert_eq!(first.pushed, 1);
 
         // The session is now synced; adding a link locally must re-open it.
@@ -1410,7 +1457,11 @@ mod tests {
         })
         .unwrap();
 
-        let second = perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, repo_a);
+        let second = perform_sync(
+            &mut db_a, repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
         assert_eq!(
             second.pushed, 1,
             "adding a link must re-export the parent session"
@@ -1428,7 +1479,11 @@ mod tests {
         join_store(repo_b, "origin", &keystore_b, &mb, &salt_b, passphrase).unwrap();
         let (mut db_b, _db) = open_db();
         let (key_b, salt_b2) = load_store_credentials(repo_b, "origin", &keystore_b).unwrap();
-        perform_sync(&mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb).unwrap();
+        let sessions_b = scoped_unsynced(&db_b, repo_b);
+        perform_sync(
+            &mut db_b, repo_b, "origin", &key_b, &salt_b2, &mb, sessions_b,
+        )
+        .unwrap();
 
         let links = db_b.get_links_by_session(&session_id).unwrap();
         assert_eq!(links.len(), 2, "both links must reach the teammate");
@@ -1449,9 +1504,13 @@ mod tests {
         let ma = machine("machine-a", "Machine A");
         create_store(repo_a, "origin", &keystore_a, &ma, "the real passphrase").unwrap();
         let (mut db_a, _da) = open_db();
-        seed_full_session(&mut db_a, "machine-a");
+        seed_full_session(&mut db_a, "machine-a", &repo_dir(repo_a));
         let (key_a, salt_a) = load_store_credentials(repo_a, "origin", &keystore_a).unwrap();
-        perform_sync(&mut db_a, repo_a, "origin", &key_a, &salt_a, &ma).unwrap();
+        let sessions_a = scoped_unsynced(&db_a, repo_a);
+        perform_sync(
+            &mut db_a, repo_a, "origin", &key_a, &salt_a, &ma, sessions_a,
+        )
+        .unwrap();
 
         // Machine B stores a WRONG key for the same store (same salt, bad pass).
         let dir_b = tempfile::tempdir().unwrap();
@@ -1469,9 +1528,13 @@ mod tests {
 
         // Machine B has a local unsynced session that must not be pushed/marked.
         let (mut db_b, _db) = open_db();
-        let local_id = seed_full_session(&mut db_b, "machine-b");
+        let local_id = seed_full_session(&mut db_b, "machine-b", &repo_dir(repo_b));
+        let sessions_b = scoped_unsynced(&db_b, repo_b);
 
-        let err = perform_sync(&mut db_b, repo_b, "origin", &wrong_key, &salt_b, &mb).unwrap_err();
+        let err = perform_sync(
+            &mut db_b, repo_b, "origin", &wrong_key, &salt_b, &mb, sessions_b,
+        )
+        .unwrap_err();
         let msg = err.to_string().to_lowercase();
         assert!(
             msg.contains("passphrase") || msg.contains("decrypt"),
@@ -1658,9 +1721,10 @@ mod tests {
         let setup_commit = git_out(remote_dir.path(), &["rev-parse", SESSIONS_REF]);
 
         let (mut db, _dd) = open_db();
-        seed_full_session(&mut db, "machine-a");
+        seed_full_session(&mut db, "machine-a", &repo_dir(repo));
         let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
-        perform_sync(&mut db, repo, "origin", &key, &salt, &m).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
 
         let session_enc = session_blob_sha_path(repo);
 
@@ -1672,12 +1736,74 @@ mod tests {
 
         // Sync again. The already-synced session is not rebuilt, so only the
         // carry-forward keeps it in the outgoing tree.
-        perform_sync(&mut db, repo, "origin", &key, &salt, &m).unwrap();
+        let sessions = scoped_unsynced(&db, repo);
+        perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
 
         let entries = gitref::read_tree(repo, SESSIONS_REF).unwrap();
         assert!(
             entries.iter().any(|e| e.path == session_enc),
             "local-only session must survive a remote rewind"
+        );
+    }
+
+    #[test]
+    fn test_sync_only_pushes_in_scope_sessions() {
+        // A per-repo sync must push only sessions whose working directory is
+        // inside this repo. A session captured in an unrelated directory must
+        // stay out of this repo's store (the privacy bug this scoping fixes) and
+        // remain unsynced.
+        let (_remote_dir, remote_url) = init_bare_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        git(repo, &["remote", "add", "origin", &remote_url]);
+
+        let (keystore, _kd) = test_keystore();
+        let m = machine("machine-a", "Machine A");
+        create_store(repo, "origin", &keystore, &m, "passphrase abcdefgh").unwrap();
+
+        let (mut db, _dd) = open_db();
+        // One session inside a subdirectory of the repo, one in an unrelated dir.
+        let repo_sub = format!("{}/crate/src", repo_dir(repo));
+        let in_scope = seed_full_session(&mut db, "machine-a", &repo_sub);
+        let out_of_scope = seed_full_session(&mut db, "machine-a", "/somewhere/else/project");
+        let (key, salt) = load_store_credentials(repo, "origin", &keystore).unwrap();
+
+        let sessions = scoped_unsynced(&db, repo);
+        let summary = perform_sync(&mut db, repo, "origin", &key, &salt, &m, sessions).unwrap();
+        assert_eq!(
+            summary.pushed, 1,
+            "only the in-scope session must be pushed"
+        );
+
+        // The store holds exactly the in-scope session's encrypted blob.
+        let entries = gitref::read_tree(repo, SESSIONS_REF).unwrap();
+        let session_blobs = entries.iter().filter(|e| is_session_blob(&e.path)).count();
+        assert_eq!(session_blobs, 1, "store must hold exactly one session blob");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.path == format!("sessions/{in_scope}.enc")),
+            "the in-scope session must be stored"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.path == format!("sessions/{out_of_scope}.enc")),
+            "the out-of-scope session must not reach this repo's store"
+        );
+
+        // The out-of-scope session stays unsynced; the in-scope one is marked
+        // synced.
+        let unsynced = db.get_unsynced_sessions().unwrap();
+        let unsynced_ids: HashSet<Uuid> = unsynced.iter().map(|s| s.id).collect();
+        assert!(
+            unsynced_ids.contains(&out_of_scope),
+            "the out-of-scope session must remain unsynced"
+        );
+        assert!(
+            !unsynced_ids.contains(&in_scope),
+            "the in-scope session must be marked synced after the push"
         );
     }
 }

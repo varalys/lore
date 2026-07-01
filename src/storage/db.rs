@@ -8,13 +8,58 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use super::models::{
     Annotation, Machine, Message, MessageContent, MessageRole, SearchResult, Session, SessionLink,
     Summary, Tag,
 };
+
+/// Builds the SQL parameters for a path-boundary directory match.
+///
+/// Returns `(exact, trailing, like_pattern)` for matching a
+/// `working_directory` column against `directory`: the column matches when it
+/// equals `exact` (the root with any trailing separator trimmed), equals
+/// `trailing` (the root with a trailing separator), or is
+/// `LIKE like_pattern ESCAPE '|'` (a descendant path). Anchoring the descendant
+/// pattern on the trailing separator is what stops a prefix sibling such as
+/// `/home/me/foobar` from matching the directory `/home/me/foo`. The pattern's
+/// LIKE metacharacters are escaped so a directory containing `%` or `_` cannot
+/// widen the match.
+///
+/// Shared by [`Database::find_active_sessions_for_directory`] and
+/// [`Database::get_unsynced_sessions_for_repo`] so both scope sessions to a
+/// directory the same way.
+fn directory_match_params(directory: &str) -> (String, String, String) {
+    fn escape_like(input: &str) -> String {
+        let mut escaped = String::with_capacity(input.len());
+        for ch in input.chars() {
+            match ch {
+                '|' => escaped.push_str("||"),
+                '%' => escaped.push_str("|%"),
+                '_' => escaped.push_str("|_"),
+                _ => escaped.push(ch),
+            }
+        }
+        escaped
+    }
+
+    let separator = std::path::MAIN_SEPARATOR.to_string();
+    let mut normalized = directory
+        .trim_end_matches(std::path::MAIN_SEPARATOR)
+        .to_string();
+    if normalized.is_empty() {
+        normalized = separator.clone();
+    }
+    let trailing = if normalized == separator {
+        normalized.clone()
+    } else {
+        format!("{normalized}{separator}")
+    };
+    let like_pattern = format!("{}%", escape_like(&trailing));
+    (normalized, trailing, like_pattern)
+}
 
 /// Parses a UUID from a string, converting errors to rusqlite errors.
 ///
@@ -1558,11 +1603,70 @@ impl Database {
             .context("Failed to get unsynced sessions")
     }
 
+    /// Returns unsynced sessions whose working directory is inside `repo_path`.
+    ///
+    /// A per-repo lore store must hold only the reasoning history produced in
+    /// that repository, so an outbound sync scopes its push to sessions whose
+    /// `working_directory` is the repo root or a descendant of it. Cross-project
+    /// and cross-tool sessions captured elsewhere are excluded, keeping one
+    /// repo's store from leaking a user's entire history to teammates.
+    ///
+    /// The repo path is canonicalized when possible so it compares against
+    /// stored paths on the same footing; matching uses the shared path-boundary
+    /// logic in [`directory_match_params`], so a prefix sibling such as
+    /// `/x/foobar` never matches the repo `/x/foo`. Results are ordered oldest
+    /// first to sync in chronological order.
+    pub fn get_unsynced_sessions_for_repo(&self, repo_path: &Path) -> Result<Vec<Session>> {
+        let directory = repo_path
+            .canonicalize()
+            .unwrap_or_else(|_| repo_path.to_path_buf());
+        let (exact, trailing, like_pattern) = directory_match_params(&directory.to_string_lossy());
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tool, tool_version, started_at, ended_at, model, working_directory, git_branch, source_path, message_count, machine_id
+             FROM sessions
+             WHERE synced_at IS NULL
+               AND (working_directory = ?1
+                 OR working_directory = ?2
+                 OR working_directory LIKE ?3 ESCAPE '|')
+             ORDER BY started_at ASC"
+        )?;
+
+        let rows = stmt.query_map(params![exact, trailing, like_pattern], Self::row_to_session)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to get unsynced sessions for repo")
+    }
+
     /// Returns the count of sessions that have not been synced.
     pub fn unsynced_session_count(&self) -> Result<i32> {
         let count: i32 = self.conn.query_row(
             "SELECT COUNT(*) FROM sessions WHERE synced_at IS NULL",
             [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Returns the count of unsynced sessions whose working directory is inside
+    /// `repo_path`.
+    ///
+    /// Repo-scoped counterpart of [`Database::unsynced_session_count`], using the
+    /// same directory scoping as [`Database::get_unsynced_sessions_for_repo`] so
+    /// `lore sync status` reports what this repo will actually push.
+    pub fn unsynced_session_count_for_repo(&self, repo_path: &Path) -> Result<i32> {
+        let directory = repo_path
+            .canonicalize()
+            .unwrap_or_else(|_| repo_path.to_path_buf());
+        let (exact, trailing, like_pattern) = directory_match_params(&directory.to_string_lossy());
+
+        let count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions
+             WHERE synced_at IS NULL
+               AND (working_directory = ?1
+                 OR working_directory = ?2
+                 OR working_directory LIKE ?3 ESCAPE '|')",
+            params![exact, trailing, like_pattern],
             |row| row.get(0),
         )?;
         Ok(count)
@@ -1806,34 +1910,9 @@ impl Database {
         directory: &str,
         recent_minutes: Option<i64>,
     ) -> Result<Vec<Session>> {
-        fn escape_like(input: &str) -> String {
-            let mut escaped = String::with_capacity(input.len());
-            for ch in input.chars() {
-                match ch {
-                    '|' => escaped.push_str("||"),
-                    '%' => escaped.push_str("|%"),
-                    '_' => escaped.push_str("|_"),
-                    _ => escaped.push(ch),
-                }
-            }
-            escaped
-        }
-
         let minutes = recent_minutes.unwrap_or(5);
         let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
-        let separator = std::path::MAIN_SEPARATOR.to_string();
-        let mut normalized = directory
-            .trim_end_matches(std::path::MAIN_SEPARATOR)
-            .to_string();
-        if normalized.is_empty() {
-            normalized = separator.clone();
-        }
-        let trailing = if normalized == separator {
-            normalized.clone()
-        } else {
-            format!("{normalized}{separator}")
-        };
-        let like_pattern = format!("{}%", escape_like(&trailing));
+        let (exact, trailing, like_pattern) = directory_match_params(directory);
 
         let sql = r#"
             SELECT id, tool, tool_version, started_at, ended_at, model,
@@ -1848,7 +1927,7 @@ impl Database {
 
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(
-            params![normalized, trailing, like_pattern, cutoff],
+            params![exact, trailing, like_pattern, cutoff],
             Self::row_to_session,
         )?;
 
@@ -4420,6 +4499,134 @@ mod tests {
         assert!(found_ids.contains(&session_root.id));
         assert!(found_ids.contains(&session_subdir.id));
         assert!(!found_ids.contains(&session_sibling.id));
+    }
+
+    #[test]
+    fn test_get_unsynced_sessions_for_repo_includes_root() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let session = create_test_session("claude-code", "/home/user/project", now, None);
+        db.insert_session(&session).expect("insert session");
+
+        let found = db
+            .get_unsynced_sessions_for_repo(Path::new("/home/user/project"))
+            .expect("scoped unsynced");
+
+        assert_eq!(found.len(), 1, "session at the repo root must be selected");
+        assert_eq!(found[0].id, session.id);
+    }
+
+    #[test]
+    fn test_get_unsynced_sessions_for_repo_excludes_unrelated() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let inside = create_test_session("claude-code", "/home/user/project", now, None);
+        let unrelated = create_test_session("aider", "/home/user/other-project", now, None);
+        db.insert_session(&inside).expect("insert inside");
+        db.insert_session(&unrelated).expect("insert unrelated");
+
+        let found = db
+            .get_unsynced_sessions_for_repo(Path::new("/home/user/project"))
+            .expect("scoped unsynced");
+
+        let ids: std::collections::HashSet<Uuid> = found.iter().map(|s| s.id).collect();
+        assert!(
+            ids.contains(&inside.id),
+            "in-scope session must be selected"
+        );
+        assert!(
+            !ids.contains(&unrelated.id),
+            "session in an unrelated directory must not be selected"
+        );
+    }
+
+    #[test]
+    fn test_get_unsynced_sessions_for_repo_includes_nested_subdir() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let nested = create_test_session("claude-code", "/home/user/project/src/deep", now, None);
+        db.insert_session(&nested).expect("insert nested");
+
+        let found = db
+            .get_unsynced_sessions_for_repo(Path::new("/home/user/project"))
+            .expect("scoped unsynced");
+
+        assert_eq!(
+            found.len(),
+            1,
+            "session in a nested subdirectory must be selected"
+        );
+        assert_eq!(found[0].id, nested.id);
+    }
+
+    #[test]
+    fn test_get_unsynced_sessions_for_repo_excludes_prefix_sibling() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let root = create_test_session("claude-code", "/home/user/foo", now, None);
+        let sibling = create_test_session("claude-code", "/home/user/foobar", now, None);
+        db.insert_session(&root).expect("insert root");
+        db.insert_session(&sibling).expect("insert sibling");
+
+        let found = db
+            .get_unsynced_sessions_for_repo(Path::new("/home/user/foo"))
+            .expect("scoped unsynced");
+
+        let ids: std::collections::HashSet<Uuid> = found.iter().map(|s| s.id).collect();
+        assert!(
+            ids.contains(&root.id),
+            "the repo root session must be selected"
+        );
+        assert!(
+            !ids.contains(&sibling.id),
+            "a prefix-sibling directory must not be matched"
+        );
+    }
+
+    #[test]
+    fn test_get_unsynced_sessions_for_repo_excludes_already_synced() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let session = create_test_session("claude-code", "/home/user/project", now, None);
+        db.insert_session(&session).expect("insert session");
+        db.mark_sessions_synced(&[session.id], now)
+            .expect("mark synced");
+
+        let found = db
+            .get_unsynced_sessions_for_repo(Path::new("/home/user/project"))
+            .expect("scoped unsynced");
+
+        assert!(
+            found.is_empty(),
+            "an already-synced in-scope session must not be selected"
+        );
+    }
+
+    #[test]
+    fn test_unsynced_session_count_for_repo_scopes_to_repo() {
+        let (db, _dir) = create_test_db();
+        let now = Utc::now();
+
+        let inside = create_test_session("claude-code", "/home/user/project", now, None);
+        let nested = create_test_session("claude-code", "/home/user/project/src", now, None);
+        let outside = create_test_session("aider", "/home/user/elsewhere", now, None);
+        db.insert_session(&inside).expect("insert inside");
+        db.insert_session(&nested).expect("insert nested");
+        db.insert_session(&outside).expect("insert outside");
+
+        let count = db
+            .unsynced_session_count_for_repo(Path::new("/home/user/project"))
+            .expect("scoped count");
+
+        assert_eq!(
+            count, 2,
+            "count must include only in-scope unsynced sessions"
+        );
     }
 
     #[test]
