@@ -450,6 +450,48 @@ pub struct Summary {
     pub generated_at: DateTime<Utc>,
 }
 
+/// A per-project memory mirrored from a coding tool's memory store.
+///
+/// Tools such as Claude Code write per-project "memory" (running notes, next
+/// steps, corrections) into their own private stores that other tools cannot
+/// see. Lore mirrors those files into this read-only representation so any LLM
+/// can read them through Lore's MCP server. Lore never writes back to the
+/// tool's memory folder.
+///
+/// Each memory corresponds to a single markdown file in the tool's memory
+/// folder. The memory is scoped to the project it belongs to (`project_path`)
+/// and the tool that authored it (`source_tool`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Memory {
+    /// Unique identifier for this memory.
+    pub id: Uuid,
+
+    /// Absolute path of the repository this memory belongs to.
+    pub project_path: String,
+
+    /// The tool that authored this memory (e.g., "claude-code").
+    pub source_tool: String,
+
+    /// Short name of the memory (from frontmatter `name`, or the file stem).
+    pub name: String,
+
+    /// Optional human-readable description (from frontmatter `description`).
+    pub description: Option<String>,
+
+    /// Optional memory type (from frontmatter `metadata.type`, e.g. user,
+    /// feedback, project, reference).
+    pub memory_type: Option<String>,
+
+    /// The memory body (the markdown content following any frontmatter).
+    pub content: String,
+
+    /// Absolute path of the source file this memory was mirrored from.
+    pub file_path: String,
+
+    /// When the source file was last modified, used to detect changes.
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Represents a machine that has captured sessions.
 ///
 /// Used for sync to map machine UUIDs to friendly names. Each machine

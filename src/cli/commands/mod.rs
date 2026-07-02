@@ -54,6 +54,9 @@ pub mod link;
 /// MCP (Model Context Protocol) server.
 pub mod mcp;
 
+/// List a project's mirrored memories.
+pub mod memories;
+
 /// Search session content using FTS5 full-text search.
 pub mod search;
 

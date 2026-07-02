@@ -10,6 +10,8 @@
 //! - `lore_list_sessions`: List recent sessions with optional filters
 //! - `lore_get_context`: Get recent session context for a repository
 //! - `lore_get_linked_sessions`: Get sessions linked to a commit
+//! - `lore_get_memories`: Get a project's memories mirrored from a coding tool
+//! - `lore_search_memories`: Full-text search a project's mirrored memories
 
 mod server;
 mod tools;

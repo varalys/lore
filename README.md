@@ -103,6 +103,7 @@ Linked sessions (1):
 |---------|-------------|
 | **Blame** | Trace any line of code to the AI session that produced it |
 | **Git-ref Sync** | Sync reasoning through your existing git remotes, encrypted; share by passphrase |
+| **Cross-tool Memory** | Mirror one tool's project memory so any LLM can read it over MCP |
 | **Session Capture** | One history across 10+ AI coding tools |
 | **Git Linking** | Connect sessions to commits |
 | **Full-text Search** | Find any past conversation |
@@ -119,6 +120,16 @@ Lore syncs reasoning history through your existing git remotes, with no server a
 - **Team sharing**: share the repo plus the passphrase out of band. No accounts, no seats, serverless.
 
 See the [Sync Guide](https://lore.varalys.com/guides/sync/) for details.
+
+## Memory
+
+Coding tools write their own per-project memory (running notes, next steps, corrections) that other tools cannot see. Lore mirrors that memory and exposes it over MCP, so switching tools keeps the context. Point Codex, or any MCP client, at `lore mcp serve` and it can read the memory another tool wrote for the same repo.
+
+- Read-only: Lore mirrors the tool's memory files, it never modifies them.
+- Scoped to the current repo.
+- `lore memories` lists what has been mirrored.
+
+Currently mirrors Claude Code memory, with more tools to follow. See the [Memory Guide](https://lore.varalys.com/guides/memory/) for details.
 
 ## Supported Tools
 

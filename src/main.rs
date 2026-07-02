@@ -292,6 +292,16 @@ enum Commands {
     )]
     Mcp(commands::mcp::Args),
 
+    /// List a project's memories mirrored from a coding tool
+    #[command(
+        long_about = "Lists the current repository's memories, mirrored read-only from a\n\
+        coding tool's per-project memory store (currently Claude Code). The\n\
+        mirror is refreshed from the tool's memory folder before listing, so\n\
+        results always reflect the current state. Lore never writes back to\n\
+        the tool's memory folder."
+    )]
+    Memories(commands::memories::Args),
+
     /// Generate shell completions
     #[command(
         long_about = "Generates shell completion scripts for various shells.\n\
@@ -444,6 +454,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Sync(_) => "sync",
         Commands::Doctor(_) => "doctor",
         Commands::Mcp(_) => "mcp",
+        Commands::Memories(_) => "memories",
         Commands::Completions(_) => "completions",
     }
 }
@@ -529,6 +540,7 @@ fn main() -> Result<()> {
         Commands::Sync(args) => commands::sync::run(args),
         Commands::Doctor(args) => commands::doctor::run(args),
         Commands::Mcp(args) => commands::mcp::run(args),
+        Commands::Memories(args) => commands::memories::run(args),
         Commands::Completions(args) => {
             let mut cmd = Cli::command();
             commands::completions::run(args, &mut cmd)

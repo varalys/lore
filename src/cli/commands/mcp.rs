@@ -26,7 +26,9 @@ pub enum McpCommand {
         - lore_get_session: Get full session details\n  \
         - lore_list_sessions: List recent sessions\n  \
         - lore_get_context: Get repository context\n  \
-        - lore_get_linked_sessions: Get sessions linked to a commit"
+        - lore_get_linked_sessions: Get sessions linked to a commit\n  \
+        - lore_get_memories: Get a project's mirrored memories\n  \
+        - lore_search_memories: Search a project's mirrored memories"
     )]
     Serve,
 }

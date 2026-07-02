@@ -18,7 +18,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-use crate::storage::models::{Message, SearchOptions, Session};
+use crate::capture::memory::{resolve_project_path, MemoryMirror, CLAUDE_CODE_TOOL};
+use crate::storage::models::{Memory, Message, SearchOptions, Session};
 use crate::storage::Database;
 
 // ============== Tool Parameter Types ==============
@@ -91,6 +92,34 @@ pub struct GetLinkedSessionsParams {
     pub commit_sha: String,
 }
 
+/// Parameters for the lore_get_memories tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetMemoriesParams {
+    /// Project path to read memories for.
+    #[schemars(
+        description = "Repository path (defaults to the current directory's git top-level)"
+    )]
+    pub project_path: Option<String>,
+}
+
+/// Parameters for the lore_search_memories tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchMemoriesParams {
+    /// The search query text.
+    #[schemars(description = "Text to search for in the project's mirrored memories")]
+    pub query: String,
+
+    /// Project path to search memories within.
+    #[schemars(
+        description = "Repository path (defaults to the current directory's git top-level)"
+    )]
+    pub project_path: Option<String>,
+
+    /// Maximum number of results to return.
+    #[schemars(description = "Maximum number of results (default: 20)")]
+    pub limit: Option<usize>,
+}
+
 // ============== Result Types ==============
 
 /// A session in search results.
@@ -155,6 +184,36 @@ pub struct ContextResponse {
 pub struct LinkedSessionsResponse {
     pub commit_sha: String,
     pub sessions: Vec<SessionInfo>,
+}
+
+/// A single mirrored memory in a response.
+#[derive(Debug, Serialize)]
+pub struct MemoryInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub memory_type: Option<String>,
+    pub content: String,
+    pub file_path: String,
+    pub updated_at: String,
+}
+
+/// Response for the lore_get_memories tool.
+#[derive(Debug, Serialize)]
+pub struct MemoriesResponse {
+    pub project_path: String,
+    pub source_tool: String,
+    pub total: usize,
+    pub memories: Vec<MemoryInfo>,
+}
+
+/// Response for the lore_search_memories tool.
+#[derive(Debug, Serialize)]
+pub struct SearchMemoriesResponse {
+    pub query: String,
+    pub project_path: String,
+    pub source_tool: String,
+    pub total: usize,
+    pub memories: Vec<MemoryInfo>,
 }
 
 // ============== Server Implementation ==============
@@ -292,6 +351,49 @@ impl LoreServer {
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
             Err(e) => Err(mcp_error(&format!("Get linked sessions failed: {e}"))),
+        }
+    }
+
+    /// Get the mirrored memories for a project.
+    ///
+    /// Reflects the coding tool's per-project memory store (currently Claude
+    /// Code) and returns the current memories. The mirror is refreshed from the
+    /// tool's memory folder before returning so results are always current.
+    #[tool(description = "Get a project's memories mirrored from a coding tool's memory store")]
+    async fn lore_get_memories(
+        &self,
+        params: Parameters<GetMemoriesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+        let result = get_memories_impl(params);
+        match result {
+            Ok(response) => {
+                let json = serde_json::to_string_pretty(&response)
+                    .unwrap_or_else(|e| format!("Error serializing response: {e}"));
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            Err(e) => Err(mcp_error(&format!("Get memories failed: {e}"))),
+        }
+    }
+
+    /// Search a project's mirrored memories by text.
+    ///
+    /// Refreshes the mirror from the tool's memory folder, then full-text
+    /// searches the project's memories.
+    #[tool(description = "Full-text search a project's mirrored memories")]
+    async fn lore_search_memories(
+        &self,
+        params: Parameters<SearchMemoriesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+        let result = search_memories_impl(params);
+        match result {
+            Ok(response) => {
+                let json = serde_json::to_string_pretty(&response)
+                    .unwrap_or_else(|e| format!("Error serializing response: {e}"));
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            Err(e) => Err(mcp_error(&format!("Search memories failed: {e}"))),
         }
     }
 }
@@ -528,6 +630,65 @@ fn get_linked_sessions_impl(
     })
 }
 
+/// Converts a Memory to MemoryInfo.
+fn memory_to_info(memory: &Memory) -> MemoryInfo {
+    MemoryInfo {
+        name: memory.name.clone(),
+        description: memory.description.clone(),
+        memory_type: memory.memory_type.clone(),
+        content: memory.content.clone(),
+        file_path: memory.file_path.clone(),
+        updated_at: memory.updated_at.to_rfc3339(),
+    }
+}
+
+/// Implementation of the get_memories tool.
+///
+/// Refreshes the read-only mirror of the tool's memory folder for the resolved
+/// project, then returns the current memories scoped to that project.
+fn get_memories_impl(params: GetMemoriesParams) -> anyhow::Result<MemoriesResponse> {
+    let db = Database::open_default()?;
+    let project = resolve_project_path(params.project_path.as_deref())?;
+
+    // Refresh-on-read so results are current without needing the daemon.
+    let mirror = MemoryMirror::claude();
+    mirror.refresh(&db, &project)?;
+
+    let project_key = project.to_string_lossy().to_string();
+    let memories = db.get_memories(&project_key, CLAUDE_CODE_TOOL)?;
+    let infos: Vec<MemoryInfo> = memories.iter().map(memory_to_info).collect();
+
+    Ok(MemoriesResponse {
+        project_path: project_key,
+        source_tool: CLAUDE_CODE_TOOL.to_string(),
+        total: infos.len(),
+        memories: infos,
+    })
+}
+
+/// Implementation of the search_memories tool.
+fn search_memories_impl(params: SearchMemoriesParams) -> anyhow::Result<SearchMemoriesResponse> {
+    let db = Database::open_default()?;
+    let project = resolve_project_path(params.project_path.as_deref())?;
+
+    // Refresh-on-read so results are current without needing the daemon.
+    let mirror = MemoryMirror::claude();
+    mirror.refresh(&db, &project)?;
+
+    let project_key = project.to_string_lossy().to_string();
+    let limit = params.limit.unwrap_or(20);
+    let memories = db.search_memories(&project_key, CLAUDE_CODE_TOOL, &params.query, limit)?;
+    let infos: Vec<MemoryInfo> = memories.iter().map(memory_to_info).collect();
+
+    Ok(SearchMemoriesResponse {
+        query: params.query,
+        project_path: project_key,
+        source_tool: CLAUDE_CODE_TOOL.to_string(),
+        total: infos.len(),
+        memories: infos,
+    })
+}
+
 /// Resolves a session ID prefix to a full UUID.
 fn resolve_session_id(db: &Database, id_prefix: &str) -> anyhow::Result<uuid::Uuid> {
     // Use the efficient database method that searches all sessions
@@ -634,5 +795,30 @@ mod tests {
         assert_eq!(info.index, 0);
         assert_eq!(info.role, "user");
         assert_eq!(info.content, "Hello, world!");
+    }
+
+    #[test]
+    fn test_memory_to_info() {
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let memory = Memory {
+            id: Uuid::new_v4(),
+            project_path: "/home/user/project".to_string(),
+            source_tool: "claude-code".to_string(),
+            name: "API base URL".to_string(),
+            description: Some("Where the API lives".to_string()),
+            memory_type: Some("reference".to_string()),
+            content: "The API base URL is https://example.com.".to_string(),
+            file_path: "/home/user/.claude/projects/slug/memory/fact-1.md".to_string(),
+            updated_at: Utc::now(),
+        };
+
+        let info = memory_to_info(&memory);
+        assert_eq!(info.name, "API base URL");
+        assert_eq!(info.description.as_deref(), Some("Where the API lives"));
+        assert_eq!(info.memory_type.as_deref(), Some("reference"));
+        assert!(info.content.contains("https://example.com"));
+        assert!(info.file_path.ends_with("fact-1.md"));
     }
 }
