@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-01
+
+### Added
+
+- **Git-ref sync** - Sync reasoning history through your existing git remotes, encrypted, with no server and no account
+  - `lore sync setup` / `lore sync` / `lore sync status` - per-repo store under `refs/lore/sessions`, shared with a passphrase
+  - `lore sync --global` - a private global store at `~/.lore/sync` aggregating all sessions across tools and repos
+  - Pre-push hook (`lore hooks install`) runs `lore sync` automatically on `git push`, best-effort and non-blocking
+  - Client-side encryption (Argon2id key derivation, AES-256-GCM); the git host only sees ciphertext
+  - Child-record deletions (links, tags, annotations, summaries) propagate across machines via tombstones
+- **Cross-tool memory** - Mirror a tool's per-project memory and expose it to any LLM over MCP
+  - `lore memories` lists the mirrored memories for a repo
+  - `lore_get_memories` and `lore_search_memories` MCP tools
+  - Currently mirrors Claude Code memory (read-only); more tools planned
+
+### Changed
+
+- The background daemon is now optional and is no longer used for sync. It handles capture, auto-linking, and auto-summaries only; sync runs via the pre-push hook or `lore sync`.
+
+### Removed
+
+- **Lore Cloud** - the hosted sync service and its commands (`lore login`, `lore logout`, `lore cloud ...`) have been removed in favor of git-ref sync. The `cloud_url` config key is gone.
+
+### Fixed
+
+- Security: upgraded `rmcp` (RUSTSEC-2026-0189) and `git2` (unsoundness advisories); resolved new clippy lints.
+- Per-repo `lore sync` now pushes only the current repository's sessions (it previously pushed all sessions), preventing cross-project reasoning from leaking into a shared store.
+
 ## [0.1.13] - 2026-02-27
 
 ### Added
