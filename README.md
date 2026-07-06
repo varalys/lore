@@ -18,6 +18,14 @@ Lore records your AI coding sessions and links them to git commits. Run `lore bl
 - **Knowledge transfer**: AI conversations stay with the code when people leave
 - **Search**: Find that conversation where you solved a similar problem
 
+## Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **Blame** | Trace any line of code to the AI session that produced it |
+| **Git-ref Sync** | Sync reasoning through your existing git remotes, encrypted; share by passphrase |
+| **Cross-tool Memory** | Mirror one tool's project memory so any LLM can read it over MCP |
+
 ## Installation
 
 ### Homebrew (macOS)
@@ -96,19 +104,6 @@ Linked sessions (1):
       ...decided on 5 attempts as the threshold based on industry standards...
       Let me add rate limiting to prevent brute force attacks.
 ```
-
-## Key Features
-
-| Feature | Description |
-|---------|-------------|
-| **Blame** | Trace any line of code to the AI session that produced it |
-| **Git-ref Sync** | Sync reasoning through your existing git remotes, encrypted; share by passphrase |
-| **Cross-tool Memory** | Mirror one tool's project memory so any LLM can read it over MCP |
-| **Session Capture** | One history across 10+ AI coding tools |
-| **Git Linking** | Connect sessions to commits |
-| **Full-text Search** | Find any past conversation |
-| **MCP Server** | Let AI tools query your history |
-| **Background Daemon** | Real-time capture (optional) |
 
 ## Sync
 
